@@ -18,11 +18,11 @@ This slice should make the waiting lifecycle complete without adding kill, cance
 - [ ] `mini-mas close <workflow-id>` sends a Close Signal to a waiting Child Agent Workflow.
 - [ ] A child receiving a Close Signal exits with lifecycle state `closed`.
 - [ ] Status and wait output describe the child as `closed` without accepted/rejected/aborted semantics.
+- [ ] Close delivery and receipt use parent-to-child DBOS messages at the async Agent Workflow layer, outside DBOS steps.
 - [ ] Closing an already terminal or unknown workflow returns a clear error or no-op response consistent with the CLI behavior chosen in this slice.
 - [ ] The child's final Trajectory Artifact remains available at the deterministic artifact path.
 - [ ] Tests cover close from waiting state, closed status visibility, neutral wording, and repeated or invalid close behavior.
 
 ## Blocked by
 
-- .scratch/dbos-mas/issues/07-make-child-workflows-wait-after-first-submission.md
-
+- .scratch/dbos-mas/issues/08-make-child-workflows-wait-after-first-submission.md

@@ -19,10 +19,10 @@ This slice should prove that a Remote Interactive Agent can produce a submission
 - [ ] The Continuation Signal is injected into the child trajectory as a normal user message.
 - [ ] Continuation metadata identifies the message as MAS continuation without changing model adapter action parsing.
 - [ ] The child resumes from its existing message history rather than starting a new workflow.
+- [ ] Continuation delivery and receipt use parent-to-child DBOS messages at the async Agent Workflow layer, outside DBOS steps.
 - [ ] The resumed child can produce a second submission or terminal status visible through status/wait.
 - [ ] Tests cover first submission, waiting state, continuation, trajectory message injection, second submission, and observation formatting.
 
 ## Blocked by
 
-- .scratch/dbos-mas/issues/07-make-child-workflows-wait-after-first-submission.md
-
+- .scratch/dbos-mas/issues/08-make-child-workflows-wait-after-first-submission.md

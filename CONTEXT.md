@@ -64,6 +64,10 @@ _Avoid_: Accept signal, abort signal
 A lightweight DBOS event that exposes a **Child Agent Workflow** lifecycle state to its parent.
 _Avoid_: Full telemetry, trajectory event
 
+**First Observable Event**:
+A lightweight DBOS event set by a **Child Agent Workflow** when it first reaches a parent-actionable state.
+_Avoid_: Child result, workflow result, parent message
+
 **Trajectory Artifact**:
 A JSON file containing the message history and run metadata for an **Agent Workflow**.
 _Avoid_: DBOS event log, mini-mas history
@@ -73,11 +77,11 @@ The artifact directory scoped to one **Root Agent Workflow**.
 _Avoid_: Global history directory, log folder
 
 **Detached Spawn**:
-A **MAS Command** that starts one or more **Child Agent Workflows** and immediately returns their identifiers.
+A **MAS Command** that starts one or more **Child Agent Workflows** from repeated task arguments and immediately returns their identifiers.
 _Avoid_: Background subprocess, fire-and-forget shell
 
 **Waited Spawn**:
-A **MAS Command** that starts one or more **Child Agent Workflows** and waits for their first observable submissions before returning.
+A **MAS Command** that starts one or more **Child Agent Workflows** from repeated task arguments and waits for **First Observable Events** before returning.
 _Avoid_: Synchronous spawn, blocking spawn
 
 **Shared Workspace**:
@@ -100,12 +104,20 @@ _Avoid_: Bash serialization, command locking
 - A **Remote Interactive Agent** waits for either a **Continuation Signal** or a **Close Signal** after producing a submission.
 - A **Close Signal** ends a **Remote Interactive Agent** without judging whether the child output was accepted or rejected.
 - A **Child Status Event** reports coarse lifecycle states such as `running`, `waiting_for_parent`, `closed`, `failed`, and `limits_exceeded`.
+- A **First Observable Event** is set when a **Child Agent Workflow** first reaches `waiting_for_parent`, `failed`, or `limits_exceeded`.
 - The MVP exposes lightweight child events such as `status`, `latest_submission`, and `latest_error`; full trajectory data remains outside DBOS events.
 - **Trajectory Artifacts** live under `.mini-mas/runs/<root-workflow-id>/trajectories/<workflow-id>.traj.json`.
 - `mini-mas status` and `mini-mas wait` return the exact **Trajectory Artifact** path and **Run Directory** for full history inspection.
 - Full history search is performed with ordinary bash tools against **Trajectory Artifacts**, not with dedicated `mini-mas` history, logs, or grep commands.
+- `mini-mas spawn "task A" "task B"` starts one **Child Agent Workflow** per repeated task argument.
 - `mini-mas spawn` defaults to **Detached Spawn**.
 - `mini-mas spawn --wait` requests **Waited Spawn**.
+- **Waited Spawn** defaults to wait-any behavior; a parent uses explicit all-waiting only when it needs all started children to become observable.
+- `mini-mas spawn --wait --timeout <seconds>` bounds only the **Waited Spawn** wait phase.
+- A **Waited Spawn** timeout does not cancel, close, fail, or retry started **Child Agent Workflows**.
+- `mini-mas spawn --timeout <seconds>` without `--wait` is invalid because **Detached Spawn** has no wait phase.
+- `mini-mas wait` waits on **First Observable Events** for child workflow identifiers, not on final DBOS workflow results.
+- **Child Agent Workflows** publish parent-observable state through DBOS events; **Continuation Signals** and **Close Signals** are parent-to-child DBOS messages.
 - The MVP may allow multiple **Agent Workflows** to use a **Shared Workspace**.
 - **Workspace Isolation** is deferred beyond the MVP and should not be replaced by global bash command serialization.
 
@@ -123,6 +135,15 @@ _Avoid_: Bash serialization, command locking
 > **Dev:** "Does `mini-mas spawn` wait for child results?"
 > **Domain expert:** "No. Spawn is detached by default; use `mini-mas spawn --wait` or `mini-mas wait` to synchronize."
 
+> **Dev:** "Does `mini-mas spawn --wait` wait for child workflows to finish?"
+> **Domain expert:** "No. It waits for First Observable Events, so a child can submit and then keep waiting for a Continuation Signal or Close Signal."
+
+> **Dev:** "If `mini-mas spawn --wait --timeout 30` times out, are the children stopped?"
+> **Domain expert:** "No. The timeout only ends the parent's current wait action; the started Child Agent Workflows keep running."
+
+> **Dev:** "How does one command start several children?"
+> **Domain expert:** "Use repeated task arguments, such as `mini-mas spawn \"inspect api\" \"write tests\"`; the command returns one Workflow Tree ID per child."
+
 > **Dev:** "Can an agent write `mini-mas spawn ... && echo done`?"
 > **Domain expert:** "Not for the MVP. A MAS Command must be standalone to receive in-process interception."
 
@@ -134,3 +155,4 @@ _Avoid_: Bash serialization, command locking
 - "mini-mas command" can mean both an internal agent-issued command and the external shell command. Resolved: use **MAS Command** for the internal bash-level request and **External MAS CLI** for the real command run outside an **Agent Workflow**.
 - "close" can sound like acceptance or cancellation. Resolved: **Close Signal** is neutral and only means no further work is requested.
 - "serialize bash steps" can sound like **Workspace Isolation**. Resolved: global command serialization does not protect the full read-reason-write window across multiple agent turns.
+- "wait for a child handle" can sound like waiting for the final DBOS workflow result. Resolved: `mini-mas wait` waits for a **First Observable Event** for a child workflow identifier.

@@ -13,6 +13,8 @@ Implement `mini-mas spawn "task"` inside a Parent Agent Workflow as a Detached S
 
 This slice should make one parent-to-child delegation path work end to end without waiting for the child submission.
 
+This completed slice covers single-child Detached Spawn. Later slices extend the command shape to multi-child repeated task arguments and waited synchronization.
+
 ## Acceptance criteria
 
 - [x] A Parent Agent Workflow can emit `mini-mas spawn "task"` as a Standalone MAS Command.
@@ -90,6 +92,7 @@ Workflow-control operations for spawning and queueing children must remain outsi
 - [x] Tests cover detached spawn output, child queue usage, deterministic child ID generation, replay or recovery duplicate prevention, and child artifact path visibility.
 
 **Out of scope:**
+- Implementing multi-child `mini-mas spawn "task A" "task B"` repeated task arguments.
 - Implementing `mini-mas spawn --wait` or any Waited Spawn behavior.
 - Implementing `mini-mas wait`, `continue`, or `close`.
 - Implementing full `mini-mas status` tree inspection beyond whatever minimal internal child metadata is needed for Detached Spawn.

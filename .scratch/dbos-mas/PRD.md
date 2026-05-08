@@ -6,7 +6,7 @@ Status: needs-triage
 
 mini-swe-agent is intentionally small and bash-first, which makes it easy to understand and extend, but it currently runs as a single agent invocation without durable multi-agent coordination. A user who wants one agent to delegate work to other agents needs a way to start, observe, wait for, and continue child work without abandoning mini-swe-agent's existing action parsing model.
 
-The user wants to use DBOS durable workflows, queues, and communication primitives to build a recursive multi-agent system where a **Parent Agent Workflow** can create **Child Agent Workflows**, children can produce submissions and wait for further parent direction, and all of this remains visible to the model as bash-shaped `mini-mas` commands.
+The user wants to use DBOS durable workflows, queues, events, and communication primitives to build a recursive multi-agent system where a **Parent Agent Workflow** can create **Child Agent Workflows**, children can become observable through submissions, failures, or limits, and children can wait for further parent direction. All of this remains visible to the model as bash-shaped `mini-mas` commands.
 
 ## Solution
 
@@ -16,48 +16,55 @@ Inside an **Agent Workflow**, a model still emits bash-shaped actions. If the ac
 
 The MVP supports recursive delegation through an **Agent Workflow Tree**. **Workflow Tree IDs** use readable, deterministic IDs such as `mas-a7f3c9d4e8b11234-c001-c002`. Every **Agent Workflow** writes a **Trajectory Artifact** under the current **Run Directory**, and MAS commands return exact artifact paths so parent agents can inspect history with ordinary shell tools.
 
+`mini-mas spawn` accepts repeated task arguments such as `mini-mas spawn "task A" "task B"` and starts one Child Agent Workflow per task. `mini-mas spawn --wait` defaults to waiting for any started child to publish a First Observable Event; `mini-mas spawn --wait --all` waits for all started children to become observable. `mini-mas spawn --wait --timeout <seconds>` bounds only the waiting phase and does not cancel, close, fail, or retry started children.
+
+Wait operations use child workflow identifiers to wait for First Observable Events, not final DBOS workflow results. Child-to-parent observable state is published through DBOS events keyed by child workflow identifiers; parent-to-child Continuation Signals and Close Signals are delivered as DBOS workflow messages.
+
 ## User Stories
 
 1. As a developer, I want to run `mini-mas` as a separate command, so that I can use MAS features without changing the ordinary `mini` workflow.
 2. As a developer, I want DBOS to be installed as a default dependency on this branch, so that MAS works without an optional extra.
 3. As a developer, I want the existing `mini` command to avoid DBOS initialization, so that single-agent usage remains operationally simple.
 4. As a Parent Agent Workflow, I want to emit `mini-mas spawn "task"` as a bash action, so that I can delegate work while preserving the bash-first interface.
-5. As a Parent Agent Workflow, I want `mini-mas spawn` to return child workflow identifiers immediately, so that I can decide when to synchronize.
-6. As a Parent Agent Workflow, I want `mini-mas spawn --wait` to wait for first child submissions, so that I can do simple fan-out/fan-in delegation in one action.
-7. As a Parent Agent Workflow, I want `mini-mas wait --all`, so that I can gather all currently relevant child submissions.
-8. As a Parent Agent Workflow, I want `mini-mas wait --any`, so that I can react to whichever child produces a result first.
-9. As a Parent Agent Workflow, I want `mini-mas wait --timeout <seconds>`, so that I can use bounded waiting and regain control if children are still running.
-10. As a Parent Agent Workflow, I want `mini-mas status`, so that I can inspect the current Agent Workflow Tree without blocking.
-11. As a Parent Agent Workflow, I want `mini-mas status <workflow-id>`, so that I can inspect a specific descendant.
-12. As a Parent Agent Workflow, I want `mini-mas continue <workflow-id> "message"`, so that I can ask a Remote Interactive Agent to keep working from its existing trajectory.
-13. As a Parent Agent Workflow, I want `mini-mas close <workflow-id>`, so that I can end a Remote Interactive Agent without implying acceptance or rejection.
-14. As a Child Agent Workflow, I want to enter `waiting_for_parent` after producing a submission, so that my parent can decide whether I should continue or close.
-15. As a Child Agent Workflow, I want a Continuation Signal to become a normal user message in my trajectory, so that I can continue with the same linear message history model.
-16. As a Child Agent Workflow, I want a Close Signal to end my workflow, so that I do not keep waiting indefinitely once no further work is requested.
-17. As a Descendant Agent Workflow, I want to spawn my own child workflows, so that MAS supports recursive delegation.
-18. As a developer, I want workflow IDs to encode tree position, so that recursive relationships are readable in logs and CLI output.
-19. As a developer, I want all artifacts for one Root Agent Workflow under one Run Directory, so that history search is scoped and not polluted by unrelated MAS runs.
-20. As a Parent Agent Workflow, I want status and wait results to include exact Trajectory Artifact paths, so that I can inspect full child history using ordinary bash tools.
-21. As a Parent Agent Workflow, I want `mini-mas` to avoid dedicated history, grep, or logs commands, so that MAS coordination stays separate from shell-based text inspection.
-22. As a developer, I want MAS command parsing to require Standalone MAS Commands, so that command interception is predictable and safe.
-23. As a developer, I want complex shell combinations containing `mini-mas` to return a clear error, so that agents can correct their next action.
-24. As a developer, I want model adapters to continue producing bash-shaped actions, so that MAS does not introduce another model tool schema.
-25. As a developer, I want MAS to preserve model-specific observation formatting, so that toolcall, Responses API, and text-based models continue to receive observations correctly.
-26. As a developer, I want MAS command dispatch to happen at the workflow layer, so that DBOS workflow-control APIs are not called from steps.
-27. As a developer, I want ordinary model calls to be checkpointed as DBOS steps, so that successful model responses can be replayed during workflow recovery.
-28. As a developer, I want ordinary bash execution to be checkpointed as DBOS steps, so that successful command outputs can be replayed during workflow recovery.
-29. As a developer, I want trajectory saving to use deterministic artifact paths, so that repeated saves are safe and easy to find.
-30. As a developer, I want child workflow startup to use deterministic Workflow Tree IDs, so that DBOS recovery does not create duplicate descendants.
-31. As a developer, I want a DBOS queue for Child Agent Workflows, so that global child-agent concurrency can be controlled.
-32. As a developer, I want MAS to expose lightweight Child Status Events, so that parents can make coordination decisions without reading full trajectories.
-33. As a developer, I want MAS to expose `latest_submission` and `latest_error`, so that parent workflows can make fast decisions.
-34. As a developer, I want `limits_exceeded` to be a terminal MVP state, so that dynamic child limit changes do not expand the initial scope.
-35. As a developer, I want DBOS step side-effect recovery risks documented, so that implementation does not imply exactly-once semantics for arbitrary bash.
-36. As a developer, I want Operation Ledger to remain a candidate mitigation, so that recovery policy can be designed deliberately before implementation.
-37. As a developer, I want Shared Workspace risks documented, so that MVP users understand that Workspace Isolation is deferred.
-38. As a developer, I want MAS to avoid treating bash serialization as Workspace Isolation, so that file-level coordination is not falsely considered solved.
-39. As a tester, I want deterministic model and environment doubles, so that MAS workflow behavior can be tested without real LLM calls.
-40. As a maintainer, I want the new subsystem separated from the core agent loop, so that future upstream changes to mini-swe-agent remain easier to adopt.
+5. As a Parent Agent Workflow, I want to emit `mini-mas spawn "task A" "task B"` as a bash action, so that I can start multiple Child Agent Workflows in one command.
+6. As a Parent Agent Workflow, I want `mini-mas spawn` to return child workflow identifiers, Run Directory, and Trajectory Artifact paths immediately, so that I can decide when to synchronize and inspect child history.
+7. As a Parent Agent Workflow, I want `mini-mas spawn --wait` to wait for the first observable child by default, so that I can react quickly to whichever child becomes actionable first.
+8. As a Parent Agent Workflow, I want `mini-mas spawn --wait --all`, so that I can start several children and wait until all of them become observable.
+9. As a Parent Agent Workflow, I want `mini-mas spawn --wait --timeout <seconds>`, so that I can bound the waited-spawn wait phase without stopping the children.
+10. As a Parent Agent Workflow, I want `mini-mas wait --all`, so that I can gather all currently relevant child First Observable Events.
+11. As a Parent Agent Workflow, I want `mini-mas wait --any`, so that I can react to whichever child becomes observable first.
+12. As a Parent Agent Workflow, I want `mini-mas wait --timeout <seconds>`, so that I can use bounded waiting and regain control when no relevant child becomes observable before the timeout.
+13. As a Parent Agent Workflow, I want `mini-mas status`, so that I can inspect the current Agent Workflow Tree without blocking.
+14. As a Parent Agent Workflow, I want `mini-mas status <workflow-id>`, so that I can inspect a specific descendant.
+15. As a Parent Agent Workflow, I want `mini-mas continue <workflow-id> "message"`, so that I can ask a Remote Interactive Agent to keep working from its existing trajectory.
+16. As a Parent Agent Workflow, I want `mini-mas close <workflow-id>`, so that I can end a Remote Interactive Agent without implying acceptance or rejection.
+17. As a Child Agent Workflow, I want to enter `waiting_for_parent` after producing a submission, so that my parent can decide whether I should continue or close.
+18. As a Child Agent Workflow, I want a Continuation Signal to become a normal user message in my trajectory, so that I can continue with the same linear message history model.
+19. As a Child Agent Workflow, I want a Close Signal to end my workflow, so that I do not keep waiting indefinitely once no further work is requested.
+20. As a Descendant Agent Workflow, I want to spawn my own child workflows, so that MAS supports recursive delegation.
+21. As a developer, I want workflow IDs to encode tree position, so that recursive relationships are readable in logs and CLI output.
+22. As a developer, I want all artifacts for one Root Agent Workflow under one Run Directory, so that history search is scoped and not polluted by unrelated MAS runs.
+23. As a Parent Agent Workflow, I want status and wait results to include exact Trajectory Artifact paths, so that I can inspect full child history using ordinary bash tools.
+24. As a Parent Agent Workflow, I want `mini-mas` to avoid dedicated history, grep, or logs commands, so that MAS coordination stays separate from shell-based text inspection.
+25. As a developer, I want MAS command parsing to require Standalone MAS Commands, so that command interception is predictable and safe.
+26. As a developer, I want complex shell combinations containing `mini-mas` to return a clear error, so that agents can correct their next action.
+27. As a developer, I want model adapters to continue producing bash-shaped actions, so that MAS does not introduce another model tool schema.
+28. As a developer, I want MAS to preserve model-specific observation formatting, so that toolcall, Responses API, and text-based models continue to receive observations correctly.
+29. As a developer, I want MAS command dispatch to happen at the workflow layer, so that DBOS workflow-control APIs are not called from steps.
+30. As a developer, I want ordinary model calls to be checkpointed as DBOS steps, so that successful model responses can be replayed during workflow recovery.
+31. As a developer, I want ordinary bash execution to be checkpointed as DBOS steps, so that successful command outputs can be replayed during workflow recovery.
+32. As a developer, I want trajectory saving to use deterministic artifact paths, so that repeated saves are safe and easy to find.
+33. As a developer, I want child workflow startup to use deterministic Workflow Tree IDs, so that DBOS recovery does not create duplicate descendants.
+34. As a developer, I want a DBOS queue for Child Agent Workflows, so that global child-agent concurrency can be controlled.
+35. As a developer, I want MAS to expose lightweight Child Status Events, so that parents can make coordination decisions without reading full trajectories.
+36. As a developer, I want MAS to expose `latest_submission` and `latest_error`, so that parent workflows can make fast decisions.
+37. As a developer, I want `limits_exceeded` to be a terminal MVP state, so that dynamic child limit changes do not expand the initial scope.
+38. As a developer, I want DBOS step side-effect recovery risks documented, so that implementation does not imply exactly-once semantics for arbitrary bash.
+39. As a developer, I want Operation Ledger to remain a candidate mitigation, so that recovery policy can be designed deliberately before implementation.
+40. As a developer, I want Shared Workspace risks documented, so that MVP users understand that Workspace Isolation is deferred.
+41. As a developer, I want MAS to avoid treating bash serialization as Workspace Isolation, so that file-level coordination is not falsely considered solved.
+42. As a tester, I want deterministic model and environment doubles, so that MAS workflow behavior can be tested without real LLM calls.
+43. As a maintainer, I want the new subsystem separated from the core agent loop, so that future upstream changes to mini-swe-agent remain easier to adopt.
 
 ## Implementation Decisions
 
@@ -73,14 +80,27 @@ The MVP supports recursive delegation through an **Agent Workflow Tree**. **Work
 - Ordinary bash execution enters an `execute_bash_step`; Standalone MAS Commands enter the workflow-layer MAS dispatcher.
 - Model calls, bash execution, and trajectory persistence are DBOS steps.
 - Workflow control operations such as spawn, wait, send, receive, and child workflow creation stay outside DBOS steps.
+- The Agent Workflow layer uses async DBOS workflows and async DBOS workflow-control APIs for MAS coordination.
+- `root_agent_workflow`, `child_agent_workflow`, MAS command dispatch, spawn, wait, continue, and close are implemented with `async def` / `await` rather than blocking workflow-control calls.
+- Blocking model, environment, and filesystem operations remain behind DBOS step boundaries; they may be synchronous steps or async steps as long as the Agent Workflow layer awaits them through DBOS-supported APIs.
 - The MVP command set is limited to `run`, `spawn`, `status`, `wait`, `continue`, and `close`.
+- `mini-mas spawn` accepts one or more repeated task arguments and starts one Child Agent Workflow per task.
 - `mini-mas spawn` defaults to Detached Spawn.
-- `mini-mas spawn --wait` requests Waited Spawn and waits for first observable submissions, not final workflow completion.
+- `mini-mas spawn --wait` requests Waited Spawn and defaults to wait-any behavior.
+- `mini-mas spawn --wait --all` requests Waited Spawn that waits until all started children first become observable.
+- `mini-mas spawn --wait --timeout <seconds>` bounds the Waited Spawn wait phase and defaults to wait-any behavior unless `--all` is present.
+- A Waited Spawn timeout returns started child metadata, any ready First Observable Events, and still-running child workflow IDs without cancelling, closing, failing, or retrying child workflows.
+- `mini-mas spawn --timeout <seconds>` without `--wait` is invalid because Detached Spawn has no wait phase.
+- Waited Spawn and `mini-mas wait` wait for First Observable Events, not final DBOS workflow results.
+- A First Observable Event is set when a Child Agent Workflow first reaches a parent-actionable state: `waiting_for_parent`, `failed`, or `limits_exceeded`.
+- Child-to-parent observable state uses DBOS events keyed by child workflow identifiers; parent-to-child Continuation Signals and Close Signals use DBOS workflow messages.
 - `mini-mas wait` supports waiting for one workflow, all workflows, any workflow, and bounded timeout-based waiting.
 - Remote Interactive Agents wait for either a Continuation Signal or a Close Signal after producing a submission.
 - A Continuation Signal is injected into the child trajectory as a normal user message with metadata identifying MAS continuation.
 - A Close Signal ends a Remote Interactive Agent and does not mean accepted or aborted.
 - Child Status Events are lightweight and include coarse states such as `running`, `waiting_for_parent`, `closed`, `failed`, and `limits_exceeded`.
+- Child Status Events may be updated repeatedly and represent the latest lightweight state.
+- A First Observable Event is set once per Child Agent Workflow and is the synchronization target for Waited Spawn and `mini-mas wait`.
 - The MVP exposes lightweight status, latest submission, and latest error data through DBOS events or status APIs.
 - Full history remains in Trajectory Artifacts, not DBOS events.
 - `status`, `wait`, and `spawn` outputs include exact Trajectory Artifact paths and the Run Directory.
@@ -112,8 +132,14 @@ The MVP supports recursive delegation through an **Agent Workflow Tree**. **Work
 - Run Directory and Trajectory Artifact path generation should be tested as a deep module to ensure histories stay scoped to one Root Agent Workflow.
 - MAS command dispatch should be tested with deterministic model outputs and fake ordinary bash execution.
 - Remote Interactive Agent lifecycle should be tested for first submission, waiting for parent, continue, second submission, and close.
+- Single-child and multi-child `spawn` behavior should be tested separately.
 - `spawn` default detach behavior should be tested separately from `spawn --wait`.
-- `wait --any`, `wait --all`, and timeout behavior should be tested using deterministic child workflows or DBOS test doubles.
+- `spawn --wait` default wait-any behavior should be tested separately from `spawn --wait --all`.
+- `spawn --wait --timeout` behavior should be tested for wait-any timeout, wait-all partial timeout, ready child snapshots, still-running child IDs, and preservation of running child workflows.
+- `spawn --timeout` without `--wait` should be tested as an invalid command.
+- `wait --any`, `wait --all`, one-workflow waiting, and timeout behavior should be tested against First Observable Events using deterministic child workflows or DBOS test doubles.
+- Tests should prove Waited Spawn and `mini-mas wait` synchronize through child DBOS events rather than child-to-parent send messages or final workflow results.
+- Workflow-control tests should cover async MAS coordination behavior without asserting incidental internal DBOS function IDs.
 - Status output should be tested to ensure it includes workflow ID, status, latest submission or error, trajectory path, and run directory.
 - Observation formatting should be tested with existing model adapter patterns so MAS does not break toolcall, Responses API, or text-based observation handling.
 - Existing tests for default and interactive agents provide prior art for deterministic model outputs, message history assertions, and command execution behavior.
