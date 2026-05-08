@@ -81,7 +81,7 @@ def build_trajectory_artifact(
                 "api_calls": 0,
             },
             "config": {
-                "agent_type": "minisweagent.mas.workflows.root_agent_workflow",
+                "agent_type": "minisweagent.mas.workflows.agent_workflow",
             },
             "mini_version": __version__,
             "exit_status": status,

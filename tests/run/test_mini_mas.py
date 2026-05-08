@@ -51,6 +51,28 @@ def _call_root_agent_workflow(workflow_func, *args, **kwargs):
     return getattr(workflow_func, "__wrapped__", workflow_func)(*args, **kwargs)
 
 
+def _recording_child_queue():
+    class RecordingChildQueue:
+        def __init__(self):
+            self.enqueued = []
+
+        def enqueue(self, workflow_func, *args, **kwargs):
+            handle = Mock()
+            handle.workflow_id = args[1]
+            handle.get_workflow_id.return_value = args[1]
+            self.enqueued.append(
+                {
+                    "workflow_func": workflow_func,
+                    "args": args,
+                    "kwargs": kwargs,
+                    "handle": handle,
+                }
+            )
+            return handle
+
+    return RecordingChildQueue()
+
+
 def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
     """mini-mas run is the external path that activates DBOS for MAS work."""
     handle = Mock()
@@ -195,6 +217,32 @@ def test_root_agent_workflow_writes_trajectory_artifact(tmp_path, monkeypatch):
     assert artifact["info"]["run_directory"] == ".mini-mas/runs/mas-0123456789abcdef"
 
 
+def test_child_agent_workflow_writes_artifact_under_root_run_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.workflows as workflows
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "inspect api",
+    )
+
+    assert result == {
+        "root_workflow_id": "mas-0123456789abcdef",
+        "workflow_id": "mas-0123456789abcdef-c001",
+        "status": "started",
+        "terminal_state": "started",
+        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "trajectory_artifact_path": ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json",
+    }
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    assert artifact["info"]["root_workflow_id"] == "mas-0123456789abcdef"
+    assert artifact["info"]["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert artifact["info"]["run_directory"] == ".mini-mas/runs/mas-0123456789abcdef"
+
+
 def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
     """The root workflow is defined inside the MAS subsystem boundary."""
     dbos_module = _mock_dbos_module()
@@ -219,6 +267,7 @@ def test_model_bash_and_trajectory_operations_are_registered_as_dbos_steps():
     assert "query_model_step" in dbos_module.registered_steps
     assert "execute_bash_step" in dbos_module.registered_steps
     assert "save_root_trajectory_artifact_step" in dbos_module.registered_steps
+    assert "save_child_trajectory_artifact_step" in dbos_module.registered_steps
 
 
 @pytest.mark.parametrize(
@@ -475,3 +524,119 @@ def test_root_agent_workflow_keeps_standalone_mas_commands_out_of_bash_step(tmp_
     assert result["terminal_state"] == "limits_exceeded"
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
     assert "MAS command accepted: status" in _observation_text(artifact["messages"][3])
+
+
+def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    monkeypatch.chdir(tmp_path)
+    child_queue = _recording_child_queue()
+    set_workflow_ids = []
+
+    class RecordingSetWorkflowID:
+        def __init__(self, workflow_id):
+            self.workflow_id = workflow_id
+
+        def __enter__(self):
+            set_workflow_ids.append(self.workflow_id)
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", RecordingSetWorkflowID)
+
+    model = DeterministicModel(outputs=[make_output("delegate", [{"command": 'mini-mas spawn "inspect api"'}], cost=0.1)])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    result = _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        task="delegate once",
+        step_limit=1,
+    )
+
+    assert set_workflow_ids == ["mas-0123456789abcdef-c001"]
+    assert len(child_queue.enqueued) == 1
+    child_call = child_queue.enqueued[0]
+    assert child_call["workflow_func"].__name__ == "child_agent_workflow"
+    assert child_call["args"][:3] == (
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "inspect api",
+    )
+    assert child_call["kwargs"] == {}
+    assert result["terminal_state"] == "limits_exceeded"
+
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    observation = _observation_text(artifact["messages"][3])
+    assert "Detached spawn started" in observation
+    assert "workflow_id: mas-0123456789abcdef-c001" in observation
+    assert "run_directory: .mini-mas/runs/mas-0123456789abcdef" in observation
+    assert (
+        "trajectory_artifact_path: "
+        ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+        in observation
+    )
+
+
+def test_detached_spawn_allocates_stable_sibling_child_ids_without_duplicate_enqueue(tmp_path, monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    monkeypatch.chdir(tmp_path)
+    child_queue = _recording_child_queue()
+
+    class NoopSetWorkflowID:
+        def __init__(self, workflow_id):
+            self.workflow_id = workflow_id
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
+
+    first_message = make_output("delegate first", [{"command": 'mini-mas spawn "first task"'}], cost=0.1)
+    second_message = make_output("delegate second", [{"command": 'mini-mas spawn "second task"'}], cost=0.1)
+    model = DeterministicModel(outputs=[first_message, second_message])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    result = _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        task="delegate twice",
+        step_limit=2,
+    )
+
+    assert result["terminal_state"] == "limits_exceeded"
+    assert [call["args"][1] for call in child_queue.enqueued] == [
+        "mas-0123456789abcdef-c001",
+        "mas-0123456789abcdef-c002",
+    ]
+
+    replay_queue = _recording_child_queue()
+    monkeypatch.setattr(workflows, "child_agent_queue", replay_queue)
+    replay_observations = workflows.execute_agent_workflow_actions(
+        message=first_message,
+        model=model,
+        env=env,
+        template_vars={
+            "root_workflow_id": "mas-0123456789abcdef",
+            "workflow_id": "mas-0123456789abcdef",
+            "spawn_index": 0,
+            "existing_child_workflow_ids": ["mas-0123456789abcdef-c001"],
+        },
+    )
+
+    assert replay_queue.enqueued == []
+    assert "workflow_id: mas-0123456789abcdef-c001" in _observation_text(replay_observations[0])
