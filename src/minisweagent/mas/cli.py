@@ -10,7 +10,7 @@ from rich.console import Console
 from minisweagent.mas.runtime import start_root_agent_workflow
 
 app = typer.Typer(rich_markup_mode="rich", help="Run DBOS-backed mini-SWE-agent MAS commands.")
-console = Console(highlight=False)
+console = Console(highlight=False, soft_wrap=True)
 
 
 @app.callback()
@@ -27,7 +27,7 @@ def run(
     wait: Annotated[
         bool,
         typer.Option("--wait", help="Wait for the minimal Root Agent Workflow result before returning."),
-    ] = False,
+    ] = True,
     system_database_url: Annotated[
         str | None,
         typer.Option(
@@ -44,7 +44,10 @@ def run(
             system_database_url=system_database_url,
         )
     )
+    console.print(f"root_workflow_id: {result['root_workflow_id']}")
     console.print(f"workflow_id: {result['workflow_id']}")
+    console.print(f"run_directory: {result['run_directory']}")
+    console.print(f"trajectory_artifact_path: {result['trajectory_artifact_path']}")
     if "result" in result:
         console.print(f"result: {result['result']}")
     return result

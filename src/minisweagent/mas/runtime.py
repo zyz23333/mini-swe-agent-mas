@@ -7,6 +7,8 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
+from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id
+
 MAS_APP_NAME = "mini-swe-agent-mas"
 
 
@@ -38,8 +40,11 @@ def _handle_workflow_id(handle: Any) -> str:
     return str(handle.workflow_id)
 
 
-def _format_run_result(*, workflow_id: str, result: Any | None, wait: bool) -> dict[str, Any]:
-    data: dict[str, Any] = {"workflow_id": workflow_id}
+def _format_run_result(*, root_workflow_id: str, result: Any | None, wait: bool) -> dict[str, Any]:
+    data: dict[str, Any] = make_artifact_metadata(
+        root_workflow_id=root_workflow_id,
+        workflow_id=root_workflow_id,
+    )
     if wait:
         data["result"] = result
     return data
@@ -48,7 +53,7 @@ def _format_run_result(*, workflow_id: str, result: Any | None, wait: bool) -> d
 def start_root_agent_workflow(
     *,
     workflow_id: str | None = None,
-    wait: bool = False,
+    wait: bool = True,
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Initialize DBOS, launch it, and start a minimal Root Agent Workflow."""
@@ -60,10 +65,10 @@ def start_root_agent_workflow(
 
     dbos_module.DBOS.launch()
 
-    assigned_workflow_id = workflow_id or make_root_workflow_id()
+    assigned_workflow_id = validate_root_workflow_id(workflow_id or make_root_workflow_id())
     with dbos_module.SetWorkflowID(assigned_workflow_id):
-        handle = dbos_module.DBOS.start_workflow(root_agent_workflow)
+        handle = dbos_module.DBOS.start_workflow(root_agent_workflow, assigned_workflow_id)
 
     started_workflow_id = _handle_workflow_id(handle)
     result = handle.get_result() if wait else None
-    return _format_run_result(workflow_id=started_workflow_id, result=result, wait=wait)
+    return _format_run_result(root_workflow_id=started_workflow_id, result=result, wait=wait)
