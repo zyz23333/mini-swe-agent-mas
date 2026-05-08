@@ -51,13 +51,32 @@ def make_artifact_metadata(*, root_workflow_id: str, workflow_id: str) -> dict[s
     }
 
 
-def build_trajectory_artifact(*, root_workflow_id: str, workflow_id: str, status: str) -> dict:
-    """Build a minimal mini-swe-agent-compatible trajectory artifact."""
+def build_trajectory_artifact(
+    *,
+    root_workflow_id: str,
+    workflow_id: str,
+    status: str,
+    messages: list[dict] | None = None,
+    model_stats: dict | None = None,
+    submission: str = "",
+    extra_info: dict | None = None,
+) -> dict:
+    """Build a mini-swe-agent-compatible trajectory artifact."""
     metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
+    messages = messages or [
+        {
+            "role": "exit",
+            "content": status,
+            "extra": {
+                "exit_status": status,
+                "submission": submission,
+            },
+        }
+    ]
     return {
         "info": {
             **metadata,
-            "model_stats": {
+            "model_stats": model_stats or {
                 "instance_cost": 0.0,
                 "api_calls": 0,
             },
@@ -66,23 +85,25 @@ def build_trajectory_artifact(*, root_workflow_id: str, workflow_id: str, status
             },
             "mini_version": __version__,
             "exit_status": status,
-            "submission": "",
+            "terminal_state": status,
+            "submission": submission,
+            **(extra_info or {}),
         },
-        "messages": [
-            {
-                "role": "exit",
-                "content": status,
-                "extra": {
-                    "exit_status": status,
-                    "submission": "",
-                },
-            }
-        ],
+        "messages": messages,
         "trajectory_format": "mini-swe-agent-1.1",
     }
 
 
-def save_trajectory_artifact(*, root_workflow_id: str, workflow_id: str, status: str) -> Path:
+def save_trajectory_artifact(
+    *,
+    root_workflow_id: str,
+    workflow_id: str,
+    status: str,
+    messages: list[dict] | None = None,
+    model_stats: dict | None = None,
+    submission: str = "",
+    extra_info: dict | None = None,
+) -> Path:
     """Persist a Trajectory Artifact, creating parents and overwriting the same path safely."""
     metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
     trajectory_path = Path(metadata["trajectory_artifact_path"])
@@ -90,6 +111,10 @@ def save_trajectory_artifact(*, root_workflow_id: str, workflow_id: str, status:
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         status=status,
+        messages=messages,
+        model_stats=model_stats,
+        submission=submission,
+        extra_info=extra_info,
     )
     trajectory_path.parent.mkdir(parents=True, exist_ok=True)
     trajectory_path.write_text(json.dumps(artifact, indent=2))

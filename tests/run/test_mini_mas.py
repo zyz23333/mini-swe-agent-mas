@@ -25,6 +25,19 @@ def _mock_dbos_module() -> MagicMock:
     return dbos_module
 
 
+def _mock_recording_dbos_module() -> MagicMock:
+    dbos_module = MagicMock()
+    dbos_module.registered_steps = []
+    dbos_module.DBOS.workflow.return_value = lambda func: func
+
+    def record_step(func):
+        dbos_module.registered_steps.append(func.__name__)
+        return func
+
+    dbos_module.DBOS.step.return_value = record_step
+    return dbos_module
+
+
 def _observation_text(message: dict) -> str:
     if message.get("type") == "function_call_output":
         return message["output"]
@@ -32,6 +45,10 @@ def _observation_text(message: dict) -> str:
     if isinstance(content, list):
         return content[0]["text"]
     return content
+
+
+def _call_root_agent_workflow(workflow_func, *args, **kwargs):
+    return getattr(workflow_func, "__wrapped__", workflow_func)(*args, **kwargs)
 
 
 def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
@@ -161,12 +178,13 @@ def test_root_agent_workflow_writes_trajectory_artifact(tmp_path, monkeypatch):
 
     import minisweagent.mas.workflows as workflows
 
-    result = workflows.root_agent_workflow("mas-0123456789abcdef")
+    result = _call_root_agent_workflow(workflows.root_agent_workflow, "mas-0123456789abcdef")
 
     assert result == {
         "root_workflow_id": "mas-0123456789abcdef",
         "workflow_id": "mas-0123456789abcdef",
         "status": "started",
+        "terminal_state": "started",
         "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
         "trajectory_artifact_path": ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef.traj.json",
     }
@@ -187,6 +205,20 @@ def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
         importlib.reload(minisweagent.mas.workflows)
 
     dbos_module.DBOS.workflow.assert_called()
+
+
+def test_model_bash_and_trajectory_operations_are_registered_as_dbos_steps():
+    """Model calls, ordinary bash execution, and trajectory persistence are checkpointed as DBOS steps."""
+    dbos_module = _mock_recording_dbos_module()
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        import minisweagent.mas.workflows
+
+        importlib.reload(minisweagent.mas.workflows)
+
+    assert "query_model_step" in dbos_module.registered_steps
+    assert "execute_bash_step" in dbos_module.registered_steps
+    assert "save_root_trajectory_artifact_step" in dbos_module.registered_steps
 
 
 @pytest.mark.parametrize(
@@ -332,3 +364,114 @@ def test_mas_rejections_use_existing_model_specific_observation_formatters(model
     env.execute.assert_not_called()
     assert expected_marker in observations[0]
     assert "mini-mas must be issued as a standalone command" in _observation_text(observations[0])
+
+
+def test_root_agent_workflow_runs_model_and_bash_path_and_saves_trajectory(tmp_path, monkeypatch):
+    from minisweagent.exceptions import Submitted
+    from minisweagent.mas.workflows import root_agent_workflow
+
+    monkeypatch.chdir(tmp_path)
+    model = DeterministicModel(
+        outputs=[
+            make_output("inspect", [{"command": "echo hello"}], cost=0.25),
+            make_output("submit", [{"command": "submit"}], cost=0.25),
+        ],
+        cost_per_call=0.25,
+    )
+    env = Mock()
+    env.get_template_vars.return_value = {"cwd": tmp_path.as_posix()}
+    env.serialize.return_value = {"info": {"config": {"environment_type": "deterministic-env"}}}
+    env.execute.side_effect = [
+        {"output": "hello\n", "returncode": 0, "exception_info": ""},
+        Submitted(
+            {
+                "role": "exit",
+                "content": "done",
+                "extra": {"exit_status": "Submitted", "submission": "done"},
+            }
+        ),
+    ]
+
+    result = _call_root_agent_workflow(
+        root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        task="exercise ordinary path",
+        step_limit=3,
+    )
+
+    assert result["terminal_state"] == "Submitted"
+    assert result["submission"] == "done"
+    assert result["model_stats"] == {"instance_cost": 0.5, "api_calls": 2}
+    trajectory_path = tmp_path / result["trajectory_artifact_path"]
+    artifact = json.loads(trajectory_path.read_text())
+    assert artifact["info"]["exit_status"] == "Submitted"
+    assert artifact["info"]["submission"] == "done"
+    assert artifact["info"]["model_stats"] == {"instance_cost": 0.5, "api_calls": 2}
+    assert artifact["messages"][2]["content"] == "inspect"
+    assert "hello" in _observation_text(artifact["messages"][3])
+    assert artifact["messages"][-1]["extra"] == {"exit_status": "Submitted", "submission": "done"}
+
+
+def test_root_agent_workflow_can_replay_successful_model_and_bash_step_results(tmp_path, monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    monkeypatch.chdir(tmp_path)
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    def replay_model_response(_model, _messages):
+        return make_output("replayed model", [{"command": "echo replay"}], cost=0.1)
+
+    def replay_bash_output(_env, _action):
+        return {"output": "replayed output\n", "returncode": 0, "exception_info": ""}
+
+    monkeypatch.setattr(workflows, "query_model_step", replay_model_response)
+    monkeypatch.setattr(workflows, "execute_bash_step", replay_bash_output)
+
+    result = _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        task="replay checkpoints",
+        step_limit=1,
+    )
+
+    env.execute.assert_not_called()
+    assert result["terminal_state"] == "limits_exceeded"
+    trajectory_path = tmp_path / result["trajectory_artifact_path"]
+    artifact = json.loads(trajectory_path.read_text())
+    assert artifact["info"]["exit_status"] == "limits_exceeded"
+    assert artifact["info"]["model_stats"] == {"instance_cost": 0.1, "api_calls": 1}
+    assert artifact["messages"][2]["content"] == "replayed model"
+    assert "replayed output" in _observation_text(artifact["messages"][3])
+    assert artifact["messages"][-1]["extra"] == {"exit_status": "limits_exceeded", "submission": ""}
+
+
+def test_root_agent_workflow_keeps_standalone_mas_commands_out_of_bash_step(tmp_path, monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    monkeypatch.chdir(tmp_path)
+    model = DeterministicModel(outputs=[make_output("check status", [{"command": "mini-mas status"}], cost=0.1)])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    bash_step = Mock(side_effect=AssertionError("standalone MAS command entered bash step"))
+    monkeypatch.setattr(workflows, "execute_bash_step", bash_step)
+
+    result = _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        task="route mas command",
+        step_limit=1,
+    )
+
+    env.execute.assert_not_called()
+    bash_step.assert_not_called()
+    assert result["terminal_state"] == "limits_exceeded"
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    assert "MAS command accepted: status" in _observation_text(artifact["messages"][3])
