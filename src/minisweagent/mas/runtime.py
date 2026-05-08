@@ -7,7 +7,8 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
-from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id
+from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id, validate_workflow_id
+from minisweagent.mas.status import query_specific_status, query_status_tree, root_id_for_workflow
 
 MAS_APP_NAME = "mini-swe-agent-mas"
 
@@ -72,3 +73,44 @@ def start_root_agent_workflow(
     started_workflow_id = _handle_workflow_id(handle)
     result = handle.get_result() if wait else None
     return _format_run_result(root_workflow_id=started_workflow_id, result=result, wait=wait)
+
+
+def get_agent_workflow_status(
+    *,
+    workflow_id: str,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Initialize DBOS and read a non-blocking MAS status snapshot or tree."""
+    dbos_module = load_dbos()
+    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+
+    from minisweagent.mas import workflows  # noqa: F401
+
+    dbos_module.DBOS.launch()
+
+    workflow_id = validate_workflow_id(workflow_id)
+    root_workflow_id = root_id_for_workflow(workflow_id)
+    if workflow_id == root_workflow_id:
+        return {
+            "kind": "tree",
+            "root_workflow_id": root_workflow_id,
+            "snapshots": query_status_tree(dbos_module.DBOS, root_workflow_id),
+        }
+
+    snapshot = query_specific_status(
+        dbos_module.DBOS,
+        root_workflow_id=root_workflow_id,
+        workflow_id=workflow_id,
+    )
+    if snapshot is None:
+        return {
+            "kind": "missing",
+            "root_workflow_id": root_workflow_id,
+            "workflow_id": workflow_id,
+        }
+    return {
+        "kind": "single",
+        "root_workflow_id": root_workflow_id,
+        "workflow_id": workflow_id,
+        "snapshot": snapshot,
+    }

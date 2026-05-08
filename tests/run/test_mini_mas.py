@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from typer.testing import CliRunner
 
-from minisweagent.mas.cli import app, run
+from minisweagent.mas.cli import app, run, status
 from minisweagent.mas.runtime import make_root_workflow_id
 from minisweagent.models.test_models import (
     DeterministicModel,
@@ -146,6 +146,65 @@ def test_mini_mas_run_cli_outputs_artifact_locations():
         "trajectory_artifact_path: .mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json"
         in cli_result.stdout
     )
+
+
+def test_mini_mas_status_cli_outputs_root_tree(monkeypatch):
+    tree = [
+        {
+            "workflow_id": "mas-2222222222222222",
+            "root_workflow_id": "mas-2222222222222222",
+            "lifecycle_state": "running",
+            "run_directory": ".mini-mas/runs/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json",
+        },
+        {
+            "workflow_id": "mas-2222222222222222-c001",
+            "root_workflow_id": "mas-2222222222222222",
+            "lifecycle_state": "closed",
+            "latest_submission": "child done",
+            "run_directory": ".mini-mas/runs/mas-2222222222222222",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222-c001.traj.json"
+            ),
+        },
+    ]
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.get_agent_workflow_status",
+        Mock(
+            return_value={
+                "kind": "tree",
+                "root_workflow_id": "mas-2222222222222222",
+                "snapshots": tree,
+            }
+        ),
+    )
+
+    result = status("mas-2222222222222222")
+
+    assert result["kind"] == "tree"
+    cli_result = CliRunner().invoke(app, ["status", "mas-2222222222222222"])
+    assert cli_result.exit_code == 0
+    assert "Agent Workflow Tree: mas-2222222222222222" in cli_result.stdout
+    assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "latest_submission: child done" in cli_result.stdout
+
+
+def test_mini_mas_status_cli_reports_missing_descendant(monkeypatch):
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.get_agent_workflow_status",
+        Mock(
+            return_value={
+                "kind": "missing",
+                "root_workflow_id": "mas-2222222222222222",
+                "workflow_id": "mas-2222222222222222-c999",
+            }
+        ),
+    )
+
+    cli_result = CliRunner().invoke(app, ["status", "mas-2222222222222222-c999"])
+
+    assert cli_result.exit_code == 1
+    assert "Workflow not found in current Agent Workflow Tree: mas-2222222222222222-c999" in cli_result.stdout
 
 
 def test_root_workflow_ids_use_mas_16_hex_shape():
@@ -320,7 +379,7 @@ def test_ordinary_bash_without_mini_mas_is_not_intercepted(command):
 def test_workflow_action_execution_dispatches_standalone_mas_commands():
     from minisweagent.mas.workflows import execute_agent_workflow_actions
 
-    message = make_output("dispatch", [{"command": "mini-mas status"}])
+    message = make_output("dispatch", [{"command": "mini-mas wait --any"}])
     env = Mock()
     model = DeterministicModel(outputs=[])
 
@@ -328,7 +387,209 @@ def test_workflow_action_execution_dispatches_standalone_mas_commands():
 
     env.execute.assert_not_called()
     assert len(observations) == 1
-    assert "MAS command accepted: status" in _observation_text(observations[0])
+    assert "MAS command accepted: wait --any" in _observation_text(observations[0])
+
+
+def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    events_by_workflow = {
+        "mas-0123456789abcdef": {
+            "mini_mas_status": {
+                "workflow_id": "mas-0123456789abcdef",
+                "root_workflow_id": "mas-0123456789abcdef",
+                "lifecycle_state": "running",
+                "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+                "trajectory_artifact_path": (
+                    ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef.traj.json"
+                ),
+            }
+        },
+        "mas-0123456789abcdef-c001": {
+            "mini_mas_status": {
+                "workflow_id": "mas-0123456789abcdef-c001",
+                "root_workflow_id": "mas-0123456789abcdef",
+                "lifecycle_state": "waiting_for_parent",
+                "latest_submission": "ready for review",
+                "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+                "trajectory_artifact_path": (
+                    ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ),
+            }
+        },
+    }
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "list_workflows",
+        Mock(return_value=[Mock(workflow_id=workflow_id) for workflow_id in events_by_workflow]),
+    )
+    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events", Mock(side_effect=events_by_workflow.__getitem__))
+
+    message = make_output("status", [{"command": "mini-mas status"}])
+    model = DeterministicModel(outputs=[])
+    observations = workflows.execute_agent_workflow_actions(
+        message=message,
+        model=model,
+        env=Mock(),
+        template_vars={
+            "root_workflow_id": "mas-0123456789abcdef",
+            "workflow_id": "mas-0123456789abcdef",
+        },
+    )
+
+    workflows._dbos.DBOS.list_workflows.assert_called_once_with(
+        workflow_id_prefix="mas-0123456789abcdef",
+        load_input=False,
+        load_output=False,
+    )
+    text = _observation_text(observations[0])
+    assert "<returncode>0</returncode>" in text
+    assert "Agent Workflow Tree" in text
+    assert "workflow_id: mas-0123456789abcdef" in text
+    assert "lifecycle_state: running" in text
+    assert "workflow_id: mas-0123456789abcdef-c001" in text
+    assert "lifecycle_state: waiting_for_parent" in text
+    assert "latest_submission: ready for review" in text
+    assert "trajectory_artifact_path: .mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json" in text
+
+
+def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    child_status = {
+        "workflow_id": "mas-0123456789abcdef-c001",
+        "root_workflow_id": "mas-0123456789abcdef",
+        "lifecycle_state": "failed",
+        "latest_error": "model failed",
+        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "trajectory_artifact_path": (
+            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+        ),
+    }
+    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events", Mock(return_value={"mini_mas_status": child_status}))
+
+    model = DeterministicModel(outputs=[])
+    found = workflows.execute_agent_workflow_actions(
+        message=make_output("status child", [{"command": "mini-mas status mas-0123456789abcdef-c001"}]),
+        model=model,
+        env=Mock(),
+        template_vars={
+            "root_workflow_id": "mas-0123456789abcdef",
+            "workflow_id": "mas-0123456789abcdef",
+        },
+    )
+
+    found_text = _observation_text(found[0])
+    assert "<returncode>0</returncode>" in found_text
+    assert "workflow_id: mas-0123456789abcdef-c001" in found_text
+    assert "lifecycle_state: failed" in found_text
+    assert "latest_error: model failed" in found_text
+
+    workflows._dbos.DBOS.get_all_events.return_value = {}
+    missing = workflows.execute_agent_workflow_actions(
+        message=make_output("missing child", [{"command": "mini-mas status mas-0123456789abcdef-c999"}]),
+        model=model,
+        env=Mock(),
+        template_vars={
+            "root_workflow_id": "mas-0123456789abcdef",
+            "workflow_id": "mas-0123456789abcdef",
+        },
+    )
+
+    missing_text = _observation_text(missing[0])
+    assert "<returncode>1</returncode>" in missing_text
+    assert "Workflow not found in current Agent Workflow Tree: mas-0123456789abcdef-c999" in missing_text
+
+
+def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypatch, tmp_path):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.exceptions import Submitted
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event", Mock(side_effect=lambda key, value: published.append((key, value))))
+
+    model = DeterministicModel(outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.side_effect = Submitted(
+        {
+            "role": "exit",
+            "content": "done",
+            "extra": {"exit_status": "Submitted", "submission": "done"},
+        }
+    )
+
+    _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        task="submit once",
+        step_limit=3,
+    )
+
+    assert [event[0] for event in published] == ["mini_mas_status", "mini_mas_status"]
+    assert published[0][1]["lifecycle_state"] == "running"
+    assert published[0][1]["workflow_tree_id"] == "mas-0123456789abcdef"
+    assert published[1][1]["lifecycle_state"] == "closed"
+    assert published[1][1]["latest_submission"] == "done"
+    assert "messages" not in published[1][1]
+
+    published.clear()
+    limit_model = DeterministicModel(outputs=[make_output("work", [{"command": "echo hi"}], cost=0.1)])
+    limit_env = Mock()
+    limit_env.get_template_vars.return_value = {}
+    limit_env.execute.return_value = {"output": "hi\n", "returncode": 0, "exception_info": ""}
+
+    _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=limit_model,
+        env=limit_env,
+        task="hit limit",
+        step_limit=1,
+    )
+
+    assert published[-1][1]["lifecycle_state"] == "limits_exceeded"
+
+
+def test_agent_workflow_publishes_failed_status(monkeypatch, tmp_path):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.exceptions import InterruptAgentFlow
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event", Mock(side_effect=lambda key, value: published.append(value)))
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    def failing_model(_model, _messages):
+        raise InterruptAgentFlow(
+            {
+                "role": "exit",
+                "content": "model failed",
+                "extra": {"exit_status": "failed", "submission": ""},
+            }
+        )
+
+    monkeypatch.setattr(workflows, "query_model_step", failing_model)
+
+    _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        task="fail",
+        step_limit=3,
+    )
+
+    assert published[-1]["lifecycle_state"] == "failed"
+    assert published[-1]["latest_error"] == "model failed"
 
 
 def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
@@ -523,7 +784,7 @@ def test_root_agent_workflow_keeps_standalone_mas_commands_out_of_bash_step(tmp_
     bash_step.assert_not_called()
     assert result["terminal_state"] == "limits_exceeded"
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
-    assert "MAS command accepted: status" in _observation_text(artifact["messages"][3])
+    assert "Agent Workflow Tree: mas-0123456789abcdef" in _observation_text(artifact["messages"][3])
 
 
 def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, monkeypatch):

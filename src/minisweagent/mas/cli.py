@@ -7,7 +7,8 @@ from typing import Annotated, Any
 import typer
 from rich.console import Console
 
-from minisweagent.mas.runtime import start_root_agent_workflow
+from minisweagent.mas.runtime import get_agent_workflow_status, start_root_agent_workflow
+from minisweagent.mas.status import format_specific_status, format_status_tree
 
 app = typer.Typer(rich_markup_mode="rich", help="Run DBOS-backed mini-SWE-agent MAS commands.")
 console = Console(highlight=False, soft_wrap=True)
@@ -51,6 +52,36 @@ def run(
     if "result" in result:
         console.print(f"result: {result['result']}")
     return result
+
+
+@app.command(help="Inspect a Root Agent Workflow tree or one descendant without waiting for completion.")
+def status(
+    workflow_id: Annotated[str, typer.Argument(help="Root or descendant Workflow Tree ID to inspect.")],
+    system_database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--system-database-url",
+            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
+            show_default=False,
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    result = dict(get_agent_workflow_status(workflow_id=workflow_id, system_database_url=system_database_url))
+    if result["kind"] == "tree":
+        console.print(
+            format_status_tree(
+                result["snapshots"],
+                root_workflow_id=result["root_workflow_id"],
+            ),
+            end="",
+        )
+        return result
+    if result["kind"] == "single":
+        console.print(format_specific_status(result["snapshot"]), end="")
+        return result
+
+    console.print(f"Workflow not found in current Agent Workflow Tree: {result['workflow_id']}")
+    raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

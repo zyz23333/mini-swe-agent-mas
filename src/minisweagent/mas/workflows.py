@@ -13,6 +13,15 @@ from minisweagent.mas.artifacts import (
 )
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
 from minisweagent.mas.runtime import load_dbos
+from minisweagent.mas.status import (
+    STATUS_EVENT_KEY,
+    LifecycleState,
+    format_specific_status,
+    format_status_tree,
+    make_status_snapshot,
+    query_specific_status,
+    query_status_tree,
+)
 
 _dbos = load_dbos()
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
@@ -27,6 +36,28 @@ class AgentWorkflowState:
     n_calls: int = 0
     spawn_count: int = 0
     spawned_child_workflow_ids: set[str] | None = None
+
+
+def _publish_status_snapshot(
+    *,
+    root_workflow_id: str,
+    workflow_id: str,
+    lifecycle_state: LifecycleState,
+    latest_submission: str = "",
+    latest_error: str = "",
+) -> None:
+    snapshot = make_status_snapshot(
+        root_workflow_id=root_workflow_id,
+        workflow_id=workflow_id,
+        lifecycle_state=lifecycle_state,
+        latest_submission=latest_submission,
+        latest_error=latest_error,
+    )
+    try:
+        _dbos.DBOS.set_event(STATUS_EVENT_KEY, snapshot.to_event())
+    except Exception:
+        if _dbos.DBOS.workflow_id is not None:
+            raise
 
 
 def _format_detached_spawn_output(metadata: dict[str, str], task: str) -> str:
@@ -93,6 +124,53 @@ def _dispatch_mas_command(
     existing_child_workflow_ids: set[str],
 ) -> dict:
     """Dispatch a validated standalone MAS command at workflow-control level."""
+    if classification.arguments[:1] == ["status"]:
+        if root_workflow_id is None:
+            return {
+                "output": "mini-mas status requires Agent Workflow context.\n",
+                "returncode": 2,
+                "exception_info": "missing_agent_workflow_context",
+                "extra": {"mas_command_error": "missing_agent_workflow_context"},
+            }
+        if len(classification.arguments) == 1:
+            snapshots = query_status_tree(_dbos.DBOS, root_workflow_id)
+            output = format_status_tree(snapshots, root_workflow_id=root_workflow_id)
+            return {
+                "output": output,
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {"mas_command": classification.arguments},
+            }
+        if len(classification.arguments) == 2:
+            target_workflow_id = classification.arguments[1]
+            snapshot = query_specific_status(
+                _dbos.DBOS,
+                root_workflow_id=root_workflow_id,
+                workflow_id=target_workflow_id,
+            )
+            if snapshot is None:
+                return {
+                    "output": f"Workflow not found in current Agent Workflow Tree: {target_workflow_id}\n",
+                    "returncode": 1,
+                    "exception_info": "workflow_not_found",
+                    "extra": {
+                        "mas_command": classification.arguments,
+                        "mas_command_error": "workflow_not_found",
+                    },
+                }
+            return {
+                "output": format_specific_status(snapshot),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {"mas_command": classification.arguments},
+            }
+        return {
+            "output": "Usage: mini-mas status [workflow-id]\n",
+            "returncode": 2,
+            "exception_info": "invalid_status_arguments",
+            "extra": {"mas_command_error": "invalid_status_arguments"},
+        }
+
     if classification.arguments[:1] == ["spawn"]:
         if root_workflow_id is None or workflow_id is None:
             return {
@@ -234,6 +312,14 @@ def _terminal_result(*, root_workflow_id: str, workflow_id: str, terminal_messag
     }
 
 
+def _lifecycle_state_for_terminal(terminal_state: str) -> LifecycleState:
+    if terminal_state == "limits_exceeded":
+        return "limits_exceeded"
+    if terminal_state in {"failed", "error", "Exception"}:
+        return "failed"
+    return "closed"
+
+
 def _limits_exceeded_message(model) -> dict:
     return model.format_message(
         role="exit",
@@ -350,6 +436,11 @@ def _run_agent_workflow(
     step_limit: int,
     initial_messages: list[dict] | None,
 ) -> dict:
+    _publish_status_snapshot(
+        root_workflow_id=root_workflow_id,
+        workflow_id=workflow_id,
+        lifecycle_state="running",
+    )
     if model is None or env is None:
         metadata = (
             save_root_trajectory_artifact_step(root_workflow_id)
@@ -372,6 +463,13 @@ def _run_agent_workflow(
         workflow_id=workflow_id,
         terminal_message=state.messages[-1],
         state=state,
+    )
+    _publish_status_snapshot(
+        root_workflow_id=root_workflow_id,
+        workflow_id=workflow_id,
+        lifecycle_state=_lifecycle_state_for_terminal(result["terminal_state"]),
+        latest_submission=result["submission"],
+        latest_error="" if result["terminal_state"] != "failed" else state.messages[-1].get("content", ""),
     )
     if workflow_id == root_workflow_id:
         save_root_trajectory_artifact_step(
