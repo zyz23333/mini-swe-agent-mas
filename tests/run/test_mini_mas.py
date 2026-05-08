@@ -3,10 +3,19 @@ import json
 import re
 from unittest.mock import MagicMock, Mock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from minisweagent.mas.cli import app, run
 from minisweagent.mas.runtime import make_root_workflow_id
+from minisweagent.models.test_models import (
+    DeterministicModel,
+    DeterministicResponseAPIToolcallModel,
+    DeterministicToolcallModel,
+    make_output,
+    make_response_api_output,
+    make_toolcall_output,
+)
 
 
 def _mock_dbos_module() -> MagicMock:
@@ -14,6 +23,15 @@ def _mock_dbos_module() -> MagicMock:
     dbos_module.DBOS.workflow.return_value = lambda func: func
     dbos_module.DBOS.step.return_value = lambda func: func
     return dbos_module
+
+
+def _observation_text(message: dict) -> str:
+    if message.get("type") == "function_call_output":
+        return message["output"]
+    content = message.get("content", "")
+    if isinstance(content, list):
+        return content[0]["text"]
+    return content
 
 
 def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
@@ -169,3 +187,148 @@ def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
         importlib.reload(minisweagent.mas.workflows)
 
     dbos_module.DBOS.workflow.assert_called()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_arguments"),
+    [
+        ("mini-mas status", ["status"]),
+        (" mini-mas spawn 'check parser' ", ["spawn", "check parser"]),
+        ("mini-mas wait --any", ["wait", "--any"]),
+    ],
+)
+def test_standalone_mas_commands_are_detected(command, expected_arguments):
+    from minisweagent.mas.commands import MasCommandKind, classify_mas_command
+
+    parsed = classify_mas_command(command)
+
+    assert parsed.kind == MasCommandKind.STANDALONE
+    assert parsed.arguments == expected_arguments
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo mini-mas status",
+        "mini-mas status && echo done",
+        "mini-mas status | cat",
+        "mini-mas status > out.txt",
+        "DEBUG=1 mini-mas status",
+        "for x in 1; do mini-mas status; done",
+        "$(mini-mas status)",
+    ],
+)
+def test_shell_compositions_containing_mini_mas_are_rejected_for_interception(command):
+    from minisweagent.mas.commands import MasCommandKind, classify_mas_command
+
+    parsed = classify_mas_command(command)
+
+    assert parsed.kind == MasCommandKind.INVALID
+    assert "standalone command" in parsed.error
+
+
+@pytest.mark.parametrize("command", ["echo hello", "python -c 'print(42)'"])
+def test_ordinary_bash_without_mini_mas_is_not_intercepted(command):
+    from minisweagent.mas.commands import MasCommandKind, classify_mas_command
+
+    parsed = classify_mas_command(command)
+
+    assert parsed.kind == MasCommandKind.ORDINARY_BASH
+
+
+def test_workflow_action_execution_dispatches_standalone_mas_commands():
+    from minisweagent.mas.workflows import execute_agent_workflow_actions
+
+    message = make_output("dispatch", [{"command": "mini-mas status"}])
+    env = Mock()
+    model = DeterministicModel(outputs=[])
+
+    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+
+    env.execute.assert_not_called()
+    assert len(observations) == 1
+    assert "MAS command accepted: status" in _observation_text(observations[0])
+
+
+def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
+    from minisweagent.mas.workflows import execute_agent_workflow_actions
+
+    message = make_output("bash", [{"command": "echo hello"}])
+    env = Mock()
+    env.execute.return_value = {"output": "hello\n", "returncode": 0, "exception_info": ""}
+    model = DeterministicModel(outputs=[])
+
+    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+
+    env.execute.assert_called_once_with({"command": "echo hello"})
+    assert "<returncode>0</returncode>" in _observation_text(observations[0])
+    assert "hello" in _observation_text(observations[0])
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo before && mini-mas status",
+        "mini-mas status | cat",
+        "DEBUG=1 mini-mas status",
+        "for x in 1; do mini-mas status; done",
+    ],
+)
+def test_workflow_action_execution_rejects_shell_compositions_without_executing_bash(command):
+    from minisweagent.mas.workflows import execute_agent_workflow_actions
+
+    message = make_output("reject", [{"command": command}])
+    env = Mock()
+    model = DeterministicModel(outputs=[])
+
+    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+
+    env.execute.assert_not_called()
+    text = _observation_text(observations[0])
+    assert "<returncode>2</returncode>" in text
+    assert "mini-mas must be issued as a standalone command" in text
+
+
+@pytest.mark.parametrize(
+    ("model", "message", "expected_marker"),
+    [
+        (
+            DeterministicModel(outputs=[]),
+            make_output("text", [{"command": "mini-mas status && echo no"}]),
+            "role",
+        ),
+        (
+            DeterministicToolcallModel(outputs=[]),
+            make_toolcall_output(
+                "tool",
+                [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command": "mini-mas status && echo no"}'},
+                    }
+                ],
+                [{"command": "mini-mas status && echo no", "tool_call_id": "call_0"}],
+            ),
+            "tool_call_id",
+        ),
+        (
+            DeterministicResponseAPIToolcallModel(outputs=[]),
+            make_response_api_output(
+                "responses",
+                [{"command": "mini-mas status && echo no", "tool_call_id": "call_resp_0"}],
+            ),
+            "call_id",
+        ),
+    ],
+)
+def test_mas_rejections_use_existing_model_specific_observation_formatters(model, message, expected_marker):
+    from minisweagent.mas.workflows import execute_agent_workflow_actions
+
+    env = Mock()
+
+    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+
+    env.execute.assert_not_called()
+    assert expected_marker in observations[0]
+    assert "mini-mas must be issued as a standalone command" in _observation_text(observations[0])
