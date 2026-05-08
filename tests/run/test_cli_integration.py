@@ -52,6 +52,41 @@ def test_configure_if_first_time_called():
         mock_configure.assert_called_once()
 
 
+def test_mini_command_does_not_initialize_or_launch_dbos():
+    """Ordinary mini execution must stay outside the DBOS runtime path."""
+    with (
+        patch.dict(sys.modules, {"dbos": Mock()}),
+        patch("minisweagent.run.mini.configure_if_first_time"),
+        patch("minisweagent.run.mini.get_agent") as mock_get_agent,
+        patch("minisweagent.run.mini.get_model") as mock_get_model,
+        patch("minisweagent.run.mini.get_environment") as mock_get_env,
+        patch("minisweagent.run.mini.get_config_from_spec") as mock_get_config,
+    ):
+        dbos_module = sys.modules["dbos"]
+        mock_get_model.return_value = Mock()
+        mock_get_env.return_value = Mock()
+        mock_get_config.return_value = {"agent": {"system_template": "test"}, "env": {}, "model": {}}
+
+        mock_agent = Mock()
+        mock_agent.run.return_value = {"exit_status": "Success", "submission": "Result"}
+        mock_get_agent.return_value = mock_agent
+
+        main(
+            config_spec=[str(DEFAULT_CONFIG_FILE)],
+            model_name="test-model",
+            task="Test task",
+            yolo=False,
+            output=None,
+            model_class=None,
+            agent_class=None,
+            environment_class=None,
+        )
+
+        dbos_module.DBOS.assert_not_called()
+        dbos_module.DBOS.launch.assert_not_called()
+        dbos_module.DBOS.start_workflow.assert_not_called()
+
+
 def test_mini_command_calls_run_interactive():
     """Test that mini command creates agent via get_agent."""
     with (
@@ -92,6 +127,18 @@ def test_mini_command_calls_run_interactive():
         assert args[1] == mock_environment  # env
         # Verify agent.run was called with the task
         mock_agent.run.assert_called_once_with("Test task")
+
+
+def test_project_scripts_add_mini_mas_without_changing_existing_scripts():
+    """The MAS entrypoint is additive and preserves existing script targets."""
+    pyproject_text = Path("pyproject.toml").read_text()
+
+    assert pyproject_text.count('"dbos"') == 1
+    assert 'mini = "minisweagent.run.mini:app"' in pyproject_text
+    assert 'mini-swe-agent = "minisweagent.run.mini:app"' in pyproject_text
+    assert 'mini-extra = "minisweagent.run.utilities.mini_extra:main"' in pyproject_text
+    assert 'mini-e= "minisweagent.run.utilities.mini_extra:main"' in pyproject_text
+    assert 'mini-mas = "minisweagent.mas.cli:app"' in pyproject_text
 
 
 def test_mini_calls_prompt_when_no_task_provided():
