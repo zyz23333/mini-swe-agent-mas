@@ -173,11 +173,11 @@ async def execute_bash_step(env, action: dict) -> dict:
 
 ## Acceptance criteria
 
-- [ ] A concise design note exists under `.scratch/dbos-mas/` or `docs/adr/` describing the target deep **Modules** and their **Interfaces**.
-- [ ] The note explicitly preserves **MAS Command Interception**, **Direct Child Authority Policy**, **Child Status Events**, **First Observable Events**, **Continuation Signals**, and **Close Signals**.
-- [ ] The note states that DBOS workflow-control operations remain in async **Agent Workflow** code and that model calls, bash execution, and trajectory persistence remain DBOS steps.
-- [ ] The note calls out which future behavior is out of scope for this refactor, including **Authority Grants**, **Workspace Isolation**, and Operation Ledger policy.
-- [ ] No production code behavior changes in this slice.
+- [x] A concise design note exists under `.scratch/dbos-mas/` or `docs/adr/` describing the target deep **Modules** and their **Interfaces**.
+- [x] The note explicitly preserves **MAS Command Interception**, **Direct Child Authority Policy**, **Child Status Events**, **First Observable Events**, **Continuation Signals**, and **Close Signals**.
+- [x] The note states that DBOS workflow-control operations remain in async **Agent Workflow** code and that model calls, bash execution, and trajectory persistence remain DBOS steps.
+- [x] The note calls out which future behavior is out of scope for this refactor, including **Authority Grants**, **Workspace Isolation**, and Operation Ledger policy.
+- [x] No production code behavior changes in this slice.
 
 ## Blocked by
 
