@@ -9,7 +9,13 @@ import pytest
 from typer.testing import CliRunner
 
 from minisweagent.mas.cli import app, run
-from minisweagent.mas.runtime import close_agent_workflow, make_root_workflow_id
+from minisweagent.mas.runtime import (
+    close_agent_workflow,
+    continue_agent_workflow,
+    get_agent_workflow_status,
+    make_root_workflow_id,
+    wait_for_agent_workflow,
+)
 from minisweagent.models.test_models import (
     DeterministicModel,
     DeterministicResponseAPIToolcallModel,
@@ -320,16 +326,37 @@ def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
     }
 
 
-def test_external_close_runtime_is_unsupported_until_interactive_root_terminal_exists(monkeypatch):
+@pytest.mark.parametrize(
+    ("runtime_func", "kwargs"),
+    [
+        (get_agent_workflow_status, {"workflow_id": "mas-1111111111111111-c001"}),
+        (wait_for_agent_workflow, {"workflow_id": "mas-1111111111111111-c001", "timeout_seconds": 1.0}),
+        (
+            continue_agent_workflow,
+            {"workflow_id": "mas-1111111111111111-c001", "message": "please continue"},
+        ),
+        (close_agent_workflow, {"workflow_id": "mas-1111111111111111-c001"}),
+    ],
+)
+def test_external_coordination_runtimes_share_unsupported_response_without_dbos(runtime_func, kwargs):
     dbos_module = _mock_dbos_module()
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
-        result = close_agent_workflow(workflow_id="mas-1111111111111111-c001")
+        result = runtime_func(**kwargs)
 
     dbos_module.DBOS.assert_not_called()
     dbos_module.DBOS.launch.assert_not_called()
-    assert result["returncode"] == 2
-    assert result["exception_info"] == "external_coordination_unsupported"
+    assert result == {
+        "kind": "unsupported",
+        "workflow_id": "mas-1111111111111111-c001",
+        "output": (
+            "External mini-mas status, wait, continue, and close are unsupported until terminal commands are routed "
+            "through an Interactive Root Agent Workflow.\n"
+        ),
+        "returncode": 2,
+        "exception_info": "external_coordination_unsupported",
+        "extra": {"mas_command_error": "external_coordination_unsupported"},
+    }
     assert "unsupported until terminal commands are routed through an Interactive Root Agent Workflow" in result["output"]
 
 

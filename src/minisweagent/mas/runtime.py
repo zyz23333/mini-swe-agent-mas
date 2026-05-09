@@ -15,6 +15,7 @@ UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE = (
     "External mini-mas status, wait, continue, and close are unsupported until terminal commands are routed through "
     "an Interactive Root Agent Workflow.\n"
 )
+UNSUPPORTED_EXTERNAL_COORDINATION_ERROR = "external_coordination_unsupported"
 
 
 def load_dbos():
@@ -53,6 +54,18 @@ def _format_run_result(*, root_workflow_id: str, result: Any | None, wait: bool)
     if wait:
         data["result"] = result
     return data
+
+
+def _unsupported_external_coordination_result(*, workflow_id: str) -> dict[str, Any]:
+    """Return the shared unsupported result for naked external coordination commands."""
+    return {
+        "kind": "unsupported",
+        "workflow_id": workflow_id,
+        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
+        "returncode": 2,
+        "exception_info": UNSUPPORTED_EXTERNAL_COORDINATION_ERROR,
+        "extra": {"mas_command_error": UNSUPPORTED_EXTERNAL_COORDINATION_ERROR},
+    }
 
 
 async def _start_root_agent_workflow_async(
@@ -101,14 +114,7 @@ async def _get_agent_workflow_status_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for non-blocking MAS status snapshot or tree lookup."""
-    return {
-        "kind": "unsupported",
-        "workflow_id": workflow_id,
-        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
-        "returncode": 2,
-        "exception_info": "external_coordination_unsupported",
-        "extra": {"mas_command_error": "external_coordination_unsupported"},
-    }
+    return _unsupported_external_coordination_result(workflow_id=workflow_id)
 
 
 def get_agent_workflow_status(
@@ -132,13 +138,7 @@ async def _wait_for_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external waiting on one Child First Observable Event."""
-    return {
-        "workflow_id": workflow_id,
-        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
-        "returncode": 2,
-        "exception_info": "external_coordination_unsupported",
-        "extra": {"mas_command_error": "external_coordination_unsupported"},
-    }
+    return _unsupported_external_coordination_result(workflow_id=workflow_id)
 
 
 def wait_for_agent_workflow(
@@ -173,13 +173,7 @@ async def _continue_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external parent-to-child continuation signaling."""
-    return {
-        "workflow_id": workflow_id,
-        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
-        "returncode": 2,
-        "exception_info": "external_coordination_unsupported",
-        "extra": {"mas_command_error": "external_coordination_unsupported"},
-    }
+    return _unsupported_external_coordination_result(workflow_id=workflow_id)
 
 
 def continue_agent_workflow(
@@ -204,13 +198,7 @@ async def _close_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external parent-to-child neutral close signaling."""
-    return {
-        "workflow_id": workflow_id,
-        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
-        "returncode": 2,
-        "exception_info": "external_coordination_unsupported",
-        "extra": {"mas_command_error": "external_coordination_unsupported"},
-    }
+    return _unsupported_external_coordination_result(workflow_id=workflow_id)
 
 
 def close_agent_workflow(
