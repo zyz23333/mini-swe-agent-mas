@@ -14,6 +14,7 @@ from minisweagent.mas.artifacts import (
     validate_root_workflow_id,
     validate_workflow_id,
 )
+from minisweagent.mas.authority import DirectChildAuthorityPolicy
 from minisweagent.mas.command_dispatch import MasCommandHandler
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
 from minisweagent.mas.runtime import load_dbos
@@ -271,15 +272,7 @@ def _child_metadata_from_status(snapshot: dict[str, Any]) -> dict[str, str]:
     }
 
 
-async def _direct_child_metadata(*, parent_workflow_id: str, child_workflow_id: str | None = None) -> list[dict[str, str]]:
-    if child_workflow_id is not None:
-        snapshot = await query_direct_child_status_async(
-            _dbos.DBOS,
-            parent_workflow_id=parent_workflow_id,
-            child_workflow_id=child_workflow_id,
-        )
-        return [] if snapshot is None else [_child_metadata_from_status(snapshot)]
-
+async def _direct_child_metadata(*, parent_workflow_id: str) -> list[dict[str, str]]:
     snapshots = await query_direct_child_statuses_async(_dbos.DBOS, parent_workflow_id)
     return sorted((_child_metadata_from_status(snapshot) for snapshot in snapshots), key=lambda child: child["workflow_id"])
 
@@ -334,71 +327,14 @@ def _format_close_output(*, target_workflow_id: str, snapshot: dict[str, Any]) -
     return "\n".join(lines) + "\n"
 
 
-async def _validate_parent_direction_target(
-    *,
-    source_workflow_id: str,
-    target_workflow_id: str,
-    command_name: str,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Validate a parent-direction target and return either a status snapshot or an error result."""
-    source_workflow_id = validate_workflow_id(source_workflow_id)
-    target_workflow_id = validate_workflow_id(target_workflow_id)
-    if target_workflow_id == source_workflow_id:
-        return None, {
-            "ok": False,
-            "output": f"Cannot {command_name} the current Agent Workflow.\n",
-            "returncode": 1,
-            "exception_info": f"cannot_{command_name}_current_workflow",
-            "extra": {"mas_command_error": f"cannot_{command_name}_current_workflow"},
-        }
-    if target_workflow_id == root_id_for_workflow(source_workflow_id):
-        return None, {
-            "ok": False,
-            "output": f"Cannot {command_name} the Root Agent Workflow.\n",
-            "returncode": 1,
-            "exception_info": f"cannot_{command_name}_root_workflow",
-            "extra": {"mas_command_error": f"cannot_{command_name}_root_workflow"},
-        }
-
-    snapshot = await query_direct_child_status_async(
-        _dbos.DBOS,
-        parent_workflow_id=source_workflow_id,
-        child_workflow_id=target_workflow_id,
-    )
-    if snapshot is None:
-        return None, {
-            "ok": False,
-            "output": f"Workflow is not a direct Child Agent Workflow of {source_workflow_id}: {target_workflow_id}\n",
-            "returncode": 1,
-            "exception_info": "workflow_not_direct_child",
-            "extra": {"mas_command_error": "workflow_not_direct_child"},
-        }
-    if snapshot.get("lifecycle_state") != "waiting_for_parent":
-        return None, {
-            "ok": False,
-            "output": f"Workflow is not waiting for parent direction: {target_workflow_id}\n",
-            "returncode": 1,
-            "exception_info": "workflow_not_waiting_for_parent",
-            "extra": {"mas_command_error": "workflow_not_waiting_for_parent"},
-        }
-    return snapshot, None
-
-
 async def send_continuation_signal_async(
     *,
     source_workflow_id: str,
     target_workflow_id: str,
     content: str,
+    target_status: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate a child workflow and send a continuation signal through DBOS messages."""
-    snapshot, error = await _validate_parent_direction_target(
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=target_workflow_id,
-        command_name="continue",
-    )
-    if error is not None:
-        return error
-
+    """Send a continuation signal after Direct Child Authority Policy validation."""
     signal = make_continuation_signal(
         source_workflow_id=source_workflow_id,
         target_workflow_id=target_workflow_id,
@@ -410,7 +346,7 @@ async def send_continuation_signal_async(
         "output": _format_continue_output(
             target_workflow_id=target_workflow_id,
             content=content,
-            snapshot=snapshot,
+            snapshot=target_status,
         ),
         "returncode": 0,
         "exception_info": "",
@@ -418,7 +354,7 @@ async def send_continuation_signal_async(
             "mas_command": ["continue", target_workflow_id, content],
             "continued_workflow_id": target_workflow_id,
             "continuation_signal": signal,
-            "target_status": snapshot,
+            "target_status": target_status,
         },
     }
 
@@ -427,16 +363,9 @@ async def send_close_signal_async(
     *,
     source_workflow_id: str,
     target_workflow_id: str,
+    target_status: dict[str, Any],
 ) -> dict[str, Any]:
-    """Validate a child workflow and send a neutral close signal through DBOS messages."""
-    snapshot, error = await _validate_parent_direction_target(
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=target_workflow_id,
-        command_name="close",
-    )
-    if error is not None:
-        return error
-
+    """Send a neutral close signal after Direct Child Authority Policy validation."""
     signal = make_close_signal(
         source_workflow_id=source_workflow_id,
         target_workflow_id=target_workflow_id,
@@ -446,7 +375,7 @@ async def send_close_signal_async(
         "ok": True,
         "output": _format_close_output(
             target_workflow_id=target_workflow_id,
-            snapshot=snapshot,
+            snapshot=target_status,
         ),
         "returncode": 0,
         "exception_info": "",
@@ -454,7 +383,7 @@ async def send_close_signal_async(
             "mas_command": ["close", target_workflow_id],
             "closed_workflow_id": target_workflow_id,
             "close_signal": signal,
-            "target_status": snapshot,
+            "target_status": target_status,
         },
     }
 
@@ -501,34 +430,39 @@ async def _wait_for_direct_child_first_observable_events_for_handler(
     )
 
 
-async def _direct_child_metadata_for_handler(
-    parent_workflow_id: str, child_workflow_id: str | None
-) -> list[dict[str, str]]:
-    return await _direct_child_metadata(parent_workflow_id=parent_workflow_id, child_workflow_id=child_workflow_id)
+async def _direct_child_metadata_for_handler(parent_workflow_id: str, child_workflow_id: str | None) -> list[dict[str, str]]:
+    if child_workflow_id is not None:
+        raise ValueError("Explicit child metadata requests must use Direct Child Authority Policy")
+    return await _direct_child_metadata(parent_workflow_id=parent_workflow_id)
 
 
 async def _send_continuation_signal_for_handler(
-    source_workflow_id: str, target_workflow_id: str, content: str
+    source_workflow_id: str, target_workflow_id: str, content: str, target_status: dict[str, Any]
 ) -> dict[str, Any]:
     return await send_continuation_signal_async(
         source_workflow_id=source_workflow_id,
         target_workflow_id=target_workflow_id,
         content=content,
+        target_status=target_status,
     )
 
 
-async def _send_close_signal_for_handler(source_workflow_id: str, target_workflow_id: str) -> dict[str, Any]:
+async def _send_close_signal_for_handler(
+    source_workflow_id: str, target_workflow_id: str, target_status: dict[str, Any]
+) -> dict[str, Any]:
     return await send_close_signal_async(
         source_workflow_id=source_workflow_id,
         target_workflow_id=target_workflow_id,
+        target_status=target_status,
     )
 
 
 def _make_mas_command_handler() -> MasCommandHandler:
+    authority_policy = DirectChildAuthorityPolicy(query_direct_child_status=_query_direct_child_status)
     return MasCommandHandler(
         current_workflow_id=_current_agent_workflow_id,
         query_direct_child_statuses=_query_direct_child_statuses,
-        query_direct_child_status=_query_direct_child_status,
+        authority_policy=authority_policy,
         spawn_detached_children=_spawn_detached_children_for_handler,
         wait_for_direct_child_first_observable_events=_wait_for_direct_child_first_observable_events_for_handler,
         direct_child_metadata=_direct_child_metadata_for_handler,

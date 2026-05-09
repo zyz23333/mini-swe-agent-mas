@@ -509,6 +509,130 @@ def test_mas_command_handler_accepts_classified_standalone_command():
     }
 
 
+def test_explicit_parent_direction_commands_share_authority_policy_path():
+    from minisweagent.mas.command_dispatch import MasCommandHandler
+    from minisweagent.mas.commands import classify_mas_command
+
+    calls = []
+    child_snapshot = {
+        "root_workflow_id": "mas-0123456789abcdef",
+        "workflow_id": "mas-0123456789abcdef-c001",
+        "lifecycle_state": "waiting_for_parent",
+        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "trajectory_artifact_path": (
+            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+        ),
+    }
+
+    class RecordingPolicy:
+        async def require_direct_child(self, parent_workflow_id, target_workflow_id):
+            calls.append(("direct", parent_workflow_id, target_workflow_id))
+            return child_snapshot
+
+        async def require_waiting_direct_child(self, parent_workflow_id, target_workflow_id, command_name):
+            calls.append(("waiting", parent_workflow_id, target_workflow_id, command_name))
+            return child_snapshot
+
+    async def wait_for_direct_child_first_observable_events(_parent_workflow_id, child_workflow_ids, _wait_all, _timeout):
+        assert child_workflow_ids == ["mas-0123456789abcdef-c001"]
+        return [], ["mas-0123456789abcdef-c001"], True
+
+    async def send_continuation_signal(_source_workflow_id, target_workflow_id, content, snapshot):
+        return {
+            "output": f"continued {target_workflow_id}: {content}\n",
+            "returncode": 0,
+            "exception_info": "",
+            "extra": {"target_status": snapshot},
+        }
+
+    async def send_close_signal(_source_workflow_id, target_workflow_id, snapshot):
+        return {
+            "output": f"closed {target_workflow_id}\n",
+            "returncode": 0,
+            "exception_info": "",
+            "extra": {"target_status": snapshot},
+        }
+
+    handler = MasCommandHandler(
+        current_workflow_id=lambda: "mas-0123456789abcdef",
+        authority_policy=RecordingPolicy(),
+        wait_for_direct_child_first_observable_events=wait_for_direct_child_first_observable_events,
+        send_continuation_signal=send_continuation_signal,
+        send_close_signal=send_close_signal,
+    )
+
+    for command in [
+        "mini-mas status mas-0123456789abcdef-c001",
+        "mini-mas wait mas-0123456789abcdef-c001",
+        'mini-mas continue mas-0123456789abcdef-c001 "go"',
+        "mini-mas close mas-0123456789abcdef-c001",
+    ]:
+        result = asyncio.run(
+            handler.execute(
+                classify_mas_command(command),
+                spawn_index=1,
+                existing_child_workflow_ids=set(),
+            )
+        )
+        assert result["returncode"] == 0
+
+    assert calls == [
+        ("direct", "mas-0123456789abcdef", "mas-0123456789abcdef-c001"),
+        ("direct", "mas-0123456789abcdef", "mas-0123456789abcdef-c001"),
+        ("waiting", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "continue"),
+        ("waiting", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "close"),
+    ]
+
+
+def test_direct_child_authority_policy_success_and_rejection_paths():
+    from minisweagent.mas.authority import AuthorityCommandError, AuthorizedChild, DirectChildAuthorityPolicy
+
+    snapshots = {
+        "mas-0123456789abcdef-c001": {
+            "root_workflow_id": "mas-0123456789abcdef",
+            "workflow_id": "mas-0123456789abcdef-c001",
+            "lifecycle_state": "waiting_for_parent",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+        },
+        "mas-0123456789abcdef-c002": {
+            "root_workflow_id": "mas-0123456789abcdef",
+            "workflow_id": "mas-0123456789abcdef-c002",
+            "lifecycle_state": "waiting_for_child",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c002.traj.json"
+            ),
+        },
+    }
+
+    async def query_direct_child_status(parent_workflow_id, target_workflow_id):
+        assert parent_workflow_id == "mas-0123456789abcdef"
+        return snapshots.get(target_workflow_id)
+
+    policy = DirectChildAuthorityPolicy(query_direct_child_status=query_direct_child_status)
+
+    authorized = asyncio.run(
+        policy.require_direct_child("mas-0123456789abcdef", "mas-0123456789abcdef-c001")
+    )
+    not_direct = asyncio.run(
+        policy.require_direct_child("mas-0123456789abcdef", "mas-0123456789abcdef-c001-c001")
+    )
+    not_waiting = asyncio.run(
+        policy.require_waiting_direct_child("mas-0123456789abcdef", "mas-0123456789abcdef-c002", "continue")
+    )
+
+    assert isinstance(authorized, AuthorizedChild)
+    assert authorized.workflow_id == "mas-0123456789abcdef-c001"
+    assert authorized.metadata()["trajectory_artifact_path"].endswith("mas-0123456789abcdef-c001.traj.json")
+    assert isinstance(not_direct, AuthorityCommandError)
+    assert not_direct.exception_info == "workflow_not_direct_child"
+    assert isinstance(not_waiting, AuthorityCommandError)
+    assert not_waiting.exception_info == "workflow_not_waiting_for_parent"
+
+
 def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     import minisweagent.mas.workflows as workflows
 

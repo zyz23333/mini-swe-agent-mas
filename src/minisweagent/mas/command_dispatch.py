@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from minisweagent.mas.artifacts import validate_workflow_id
+from minisweagent.mas.authority import AuthorityCommandError, AuthorizedChild
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind
 from minisweagent.mas.status import format_direct_child_statuses, format_specific_status, root_id_for_workflow
 
@@ -46,12 +47,11 @@ class CloseCommandRequest:
 
 
 StatusList = Callable[[str], Awaitable[list[dict[str, Any]]]]
-StatusOne = Callable[[str, str], Awaitable[dict[str, Any] | None]]
 SpawnChildren = Callable[[str, str, int, list[str], set[str]], Awaitable[list[dict[str, str]]]]
 WaitFirstObservable = Callable[[str, list[str], bool, float | None], Awaitable[tuple[list[dict[str, Any]], list[str], bool]]]
 DirectChildMetadata = Callable[[str, str | None], Awaitable[list[dict[str, str]]]]
-ContinuationSender = Callable[[str, str, str], Awaitable[dict[str, Any]]]
-CloseSender = Callable[[str, str], Awaitable[dict[str, Any]]]
+ContinuationSender = Callable[[str, str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
+CloseSender = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
 def _parse_timeout_seconds(raw_timeout: str) -> float:
@@ -183,6 +183,30 @@ def _snapshot_workflow_id(snapshot: dict[str, Any]) -> str:
     return str(snapshot.get("workflow_id", ""))
 
 
+def _authority_result_error(result: Any) -> dict[str, Any] | None:
+    if isinstance(result, AuthorityCommandError):
+        return result.to_command_result()
+    return None
+
+
+def _authority_result_snapshot(result: Any) -> dict[str, Any]:
+    if isinstance(result, AuthorizedChild):
+        return result.snapshot
+    if isinstance(result, dict):
+        return result
+    raise TypeError(f"Unsupported Direct Child Authority Policy result: {type(result)!r}")
+
+
+def _child_metadata_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
+    return {
+        "task": "",
+        "root_workflow_id": str(snapshot["root_workflow_id"]),
+        "workflow_id": str(snapshot["workflow_id"]),
+        "run_directory": str(snapshot["run_directory"]),
+        "trajectory_artifact_path": str(snapshot["trajectory_artifact_path"]),
+    }
+
+
 def _format_still_running_ids(still_running_ids: list[str]) -> str:
     return ", ".join(still_running_ids) if still_running_ids else "none"
 
@@ -271,7 +295,7 @@ class MasCommandHandler:
         *,
         current_workflow_id: Callable[[], str | None],
         query_direct_child_statuses: StatusList | None = None,
-        query_direct_child_status: StatusOne | None = None,
+        authority_policy: Any | None = None,
         spawn_detached_children: SpawnChildren | None = None,
         wait_for_direct_child_first_observable_events: WaitFirstObservable | None = None,
         direct_child_metadata: DirectChildMetadata | None = None,
@@ -280,7 +304,7 @@ class MasCommandHandler:
     ) -> None:
         self.current_workflow_id = current_workflow_id
         self.query_direct_child_statuses = query_direct_child_statuses
-        self.query_direct_child_status = query_direct_child_status
+        self.authority_policy = authority_policy
         self.spawn_detached_children = spawn_detached_children
         self.wait_for_direct_child_first_observable_events = wait_for_direct_child_first_observable_events
         self.direct_child_metadata = direct_child_metadata
@@ -335,17 +359,12 @@ class MasCommandHandler:
             }
         if len(classification.arguments) == 2:
             target_workflow_id = classification.arguments[1]
-            snapshot = await self.query_direct_child_status(current_workflow_id, target_workflow_id)
-            if snapshot is None:
-                return {
-                    "output": f"Workflow is not a direct Child Agent Workflow of {current_workflow_id}: {target_workflow_id}\n",
-                    "returncode": 1,
-                    "exception_info": "workflow_not_direct_child",
-                    "extra": {
-                        "mas_command": classification.arguments,
-                        "mas_command_error": "workflow_not_direct_child",
-                    },
-                }
+            authority_result = await self.authority_policy.require_direct_child(current_workflow_id, target_workflow_id)
+            error = _authority_result_error(authority_result)
+            if error is not None:
+                error["extra"] = {"mas_command": classification.arguments, **error.get("extra", {})}
+                return error
+            snapshot = _authority_result_snapshot(authority_result)
             return {
                 "output": format_specific_status(snapshot),
                 "returncode": 0,
@@ -432,20 +451,23 @@ class MasCommandHandler:
                 "exception_info": str(exc),
                 "extra": {"mas_command_error": "invalid_wait_arguments"},
             }
-        children = await self.direct_child_metadata(current_workflow_id, request.workflow_id)
+        if request.workflow_id is not None:
+            authority_result = await self.authority_policy.require_direct_child(current_workflow_id, request.workflow_id)
+            error = _authority_result_error(authority_result)
+            if error is not None:
+                error["extra"] = {"mas_command": classification.arguments, **error.get("extra", {})}
+                return error
+            children = [_child_metadata_from_snapshot(_authority_result_snapshot(authority_result))]
+        else:
+            children = await self.direct_child_metadata(current_workflow_id, None)
         if not children:
-            output = (
-                f"Workflow is not a direct Child Agent Workflow of {current_workflow_id}: {request.workflow_id}\n"
-                if request.workflow_id
-                else "No current child workflows found for mini-mas wait.\n"
-            )
             return {
-                "output": output,
+                "output": "No current child workflows found for mini-mas wait.\n",
                 "returncode": 1,
-                "exception_info": "workflow_not_direct_child" if request.workflow_id else "no_child_workflows",
+                "exception_info": "no_child_workflows",
                 "extra": {
                     "mas_command": classification.arguments,
-                    "mas_command_error": "workflow_not_direct_child" if request.workflow_id else "no_child_workflows",
+                    "mas_command_error": "no_child_workflows",
                 },
             }
         wait_all = request.wait_all or request.workflow_id is not None
@@ -491,7 +513,22 @@ class MasCommandHandler:
                 "exception_info": str(exc),
                 "extra": {"mas_command_error": "invalid_continue_arguments"},
             }
-        result = await self.send_continuation_signal(current_workflow_id, request.workflow_id, request.content)
+        authority_result = await self.authority_policy.require_waiting_direct_child(
+            current_workflow_id,
+            request.workflow_id,
+            "continue",
+        )
+        error = _authority_result_error(authority_result)
+        if error is not None:
+            error["extra"] = {"mas_command": classification.arguments, **error.get("extra", {})}
+            return error
+        snapshot = _authority_result_snapshot(authority_result)
+        result = await self.send_continuation_signal(
+            current_workflow_id,
+            request.workflow_id,
+            request.content,
+            snapshot,
+        )
         result["extra"] = {"mas_command": classification.arguments, **result.get("extra", {})}
         result.pop("ok", None)
         return result
@@ -509,7 +546,17 @@ class MasCommandHandler:
                 "exception_info": str(exc),
                 "extra": {"mas_command_error": "invalid_close_arguments"},
             }
-        result = await self.send_close_signal(current_workflow_id, request.workflow_id)
+        authority_result = await self.authority_policy.require_waiting_direct_child(
+            current_workflow_id,
+            request.workflow_id,
+            "close",
+        )
+        error = _authority_result_error(authority_result)
+        if error is not None:
+            error["extra"] = {"mas_command": classification.arguments, **error.get("extra", {})}
+            return error
+        snapshot = _authority_result_snapshot(authority_result)
+        result = await self.send_close_signal(current_workflow_id, request.workflow_id, snapshot)
         result["extra"] = {"mas_command": classification.arguments, **result.get("extra", {})}
         result.pop("ok", None)
         return result
