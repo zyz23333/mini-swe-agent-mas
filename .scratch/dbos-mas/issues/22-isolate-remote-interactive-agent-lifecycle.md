@@ -8,6 +8,10 @@ Type: AFK
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Move **Remote Interactive Agent** lifecycle behavior into a dedicated **Module** or clearly isolated **Interface**. A **Child Agent Workflow** that reaches first submission should publish `waiting_for_parent`, publish its **First Observable Event**, save its trajectory, wait for a parent-direction message, and then either inject a **Continuation Signal** as a normal user message or close neutrally on a **Close Signal**.

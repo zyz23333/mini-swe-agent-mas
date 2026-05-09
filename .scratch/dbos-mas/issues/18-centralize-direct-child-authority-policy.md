@@ -8,6 +8,10 @@ Type: AFK
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Create a deep **Module** for the **Direct Child Authority Policy**. Workflow-layer `status`, `wait`, `continue`, and `close` handling should ask this **Module** whether the current **Parent Agent Workflow** may observe, wait for, continue, or close a target **Child Agent Workflow**.

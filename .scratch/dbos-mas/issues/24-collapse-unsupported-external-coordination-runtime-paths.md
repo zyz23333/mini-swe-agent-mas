@@ -8,6 +8,10 @@ Type: AFK
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Reduce duplication in the External MAS CLI runtime path for unsupported `status`, `wait`, `continue`, and `close` commands. These naked external/operator coordination commands remain unsupported until terminal commands are routed through an **Interactive Root Agent Workflow**, but the unsupported response should be generated through one shared path.

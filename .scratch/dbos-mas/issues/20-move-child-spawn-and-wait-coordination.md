@@ -8,6 +8,10 @@ Type: AFK
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Move **Detached Spawn**, **Waited Spawn**, and `mini-mas wait` behavior into a Child Coordination **Module**. The **Module** should own deterministic child Workflow Tree ID allocation, child workflow enqueueing, child metadata, wait-any and wait-all synchronization, timeout summaries, and still-running child workflow IDs.

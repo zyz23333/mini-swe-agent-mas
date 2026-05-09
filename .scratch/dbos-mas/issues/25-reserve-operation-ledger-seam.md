@@ -8,6 +8,10 @@ Type: HITL
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Design, but do not implement, the future **Operation Ledger** **Seam** for model query and ordinary bash side-effect recovery. The design should describe where `query_model_step` and `execute_bash_step` would pass through an operation-recording **Interface** so DBOS recovery can later distinguish started, completed, reusable, retryable, and fail-closed operations.

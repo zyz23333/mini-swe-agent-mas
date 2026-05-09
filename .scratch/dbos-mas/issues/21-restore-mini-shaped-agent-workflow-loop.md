@@ -8,6 +8,10 @@ Type: AFK
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Refactor the **Agent Workflow** runner so its external shape resembles mini-swe-agent's core loop: query model, execute bash-shaped actions with **MAS Command Interception**, append model-specific observations, stop on terminal exit, and save the trajectory. DBOS-specific complexity, command dispatch, status publication, and child lifecycle behavior should sit behind deeper **Modules** and **Adapters**.

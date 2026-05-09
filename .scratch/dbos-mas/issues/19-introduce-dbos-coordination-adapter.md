@@ -8,6 +8,10 @@ Type: AFK
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Introduce a DBOS Coordination **Adapter** that owns the DBOS event and message primitives used by **Agent Workflows**. Business logic should publish **Child Status Events**, publish **First Observable Events**, wait for first observable child states, and receive or send parent-direction messages through this **Adapter** instead of directly touching DBOS event keys throughout `workflows.py`.

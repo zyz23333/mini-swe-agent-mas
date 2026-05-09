@@ -8,6 +8,10 @@ Type: AFK
 
 .scratch/dbos-mas/PRD.md
 
+## Refactor map reference
+
+This issue must follow `.scratch/dbos-mas/issues/16-record-mas-deep-module-refactor-map.md` and any design note produced from it. Preserve the module boundaries, DBOS step/workflow-control boundaries, and out-of-scope constraints recorded there; do not invent alternate MAS module names, authority models, DBOS behavior, or command fallbacks.
+
 ## What to build
 
 Move workflow-layer **MAS Command** handling behind one deep **Module** so the **Agent Workflow** loop no longer owns the `status`, `spawn`, `wait`, `continue`, and `close` dispatch tree directly. The loop should classify bash-shaped actions, reject non-standalone `mini-mas` usage, send standalone commands to the new command handler, and execute ordinary bash through the existing checkpointed bash step.
