@@ -411,6 +411,82 @@ def test_agent_workflows_are_async_dbos_workflows():
     )
 
 
+def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    mas_agent_class = workflows.MasAgent
+    created_agents = []
+    run_calls = []
+
+    class RecordingMasAgent:
+        def __init__(self, *, root_workflow_id, workflow_id, model, env, step_limit):
+            self.root_workflow_id = root_workflow_id
+            self.workflow_id = workflow_id
+            self.model = model
+            self.env = env
+            self.step_limit = step_limit
+            created_agents.append(self)
+
+        async def run(self, *, task="", initial_messages=None):
+            run_calls.append((self.workflow_id, task, initial_messages))
+            return {
+                "status": "recorded",
+                "terminal_state": "recorded",
+                "root_workflow_id": self.root_workflow_id,
+                "workflow_id": self.workflow_id,
+                "task": task,
+                "initial_messages": initial_messages,
+            }
+
+    monkeypatch.setattr(workflows, "MasAgent", RecordingMasAgent)
+
+    result = _call_root_agent_workflow(
+        workflows.root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=Mock(),
+        env=Mock(),
+        task="delegate through agent",
+        step_limit=7,
+        initial_messages=[{"role": "user", "content": "seed"}],
+    )
+
+    assert result == {
+        "status": "recorded",
+        "terminal_state": "recorded",
+        "root_workflow_id": "mas-0123456789abcdef",
+        "workflow_id": "mas-0123456789abcdef",
+        "task": "delegate through agent",
+        "initial_messages": [{"role": "user", "content": "seed"}],
+    }
+    assert len(created_agents) == 1
+    assert created_agents[0].model is not None
+    assert created_agents[0].env is not None
+    assert created_agents[0].step_limit == 7
+    assert run_calls == [
+        ("mas-0123456789abcdef", "delegate through agent", [{"role": "user", "content": "seed"}])
+    ]
+
+    child_result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "child task",
+        model=Mock(),
+        env=Mock(),
+        step_limit=5,
+    )
+
+    assert child_result["root_workflow_id"] == "mas-0123456789abcdef"
+    assert child_result["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert child_result["task"] == "child task"
+    assert len(created_agents) == 2
+    assert created_agents[1].step_limit == 5
+    assert run_calls[-1] == ("mas-0123456789abcdef-c001", "child task", None)
+    assert not hasattr(mas_agent_class, "__dbos_class_info__")
+    for method_name in ("run", "step", "query", "execute_actions", "add_messages", "get_template_vars"):
+        assert callable(getattr(mas_agent_class, method_name))
+
+
 def test_model_bash_and_trajectory_operations_are_registered_as_dbos_steps():
     """Model calls, ordinary bash execution, and trajectory persistence are checkpointed as DBOS steps."""
     dbos_module = _mock_recording_dbos_module()

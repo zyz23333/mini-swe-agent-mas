@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from inspect import isawaitable
 from typing import Any
 
@@ -48,18 +47,6 @@ def _child_coordinator() -> ChildCoordinator:
     return ChildCoordinator(adapter=_coordination_adapter())
 
 
-@dataclass
-class AgentWorkflowState:
-    """Mutable state for one ordinary Agent Workflow loop."""
-
-    messages: list[dict]
-    cost: float = 0.0
-    n_calls: int = 0
-    spawn_count: int = 0
-    first_observable_published: bool = False
-    spawned_child_workflow_ids: set[str] | None = None
-
-
 async def _publish_status_snapshot(
     *,
     root_workflow_id: str,
@@ -95,7 +82,7 @@ async def _publish_first_observable_event(
 
 
 async def _publish_first_observable_event_once(
-    state: AgentWorkflowState,
+    agent: MasAgent,
     *,
     root_workflow_id: str,
     workflow_id: str,
@@ -103,9 +90,9 @@ async def _publish_first_observable_event_once(
     latest_submission: str = "",
     latest_error: str = "",
 ) -> dict[str, str] | None:
-    if state.first_observable_published:
+    if agent.first_observable_published:
         return None
-    state.first_observable_published = True
+    agent.first_observable_published = True
     return await _publish_first_observable_event(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
@@ -353,31 +340,13 @@ async def execute_agent_workflow_actions(*, message: dict, model, env, template_
     return model.format_observation_messages(message, outputs, template_vars)
 
 
-def _template_vars(*, model, env, state: AgentWorkflowState, task: str, root_workflow_id: str, workflow_id: str) -> dict:
-    data = {}
-    if hasattr(env, "get_template_vars"):
-        data |= env.get_template_vars()
-    if hasattr(model, "get_template_vars"):
-        data |= model.get_template_vars()
-    data |= {
-        "task": task,
-        "n_model_calls": state.n_calls,
-        "model_cost": state.cost,
-        "root_workflow_id": root_workflow_id,
-        "workflow_id": workflow_id,
-        "spawn_index": state.spawn_count,
-        "existing_child_workflow_ids": state.spawned_child_workflow_ids or set(),
-    }
-    return data
-
-
-def _terminal_result(*, root_workflow_id: str, workflow_id: str, terminal_message: dict, state: AgentWorkflowState) -> dict:
+def _terminal_result(*, root_workflow_id: str, workflow_id: str, terminal_message: dict, agent: MasAgent) -> dict:
     terminal_extra = terminal_message.get("extra", {})
     terminal_state = terminal_extra.get("exit_status", "unknown")
     submission = terminal_extra.get("submission", "")
     model_stats = {
-        "instance_cost": state.cost,
-        "api_calls": state.n_calls,
+        "instance_cost": agent.cost,
+        "api_calls": agent.n_calls,
     }
     metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
     return {
@@ -443,55 +412,222 @@ def _continuation_user_message(model, signal: dict) -> dict:
     )
 
 
-async def _run_agent_workflow_loop(
-    *,
-    root_workflow_id: str,
-    workflow_id: str,
-    model,
-    env,
-    task: str,
-    step_limit: int,
-    initial_messages: list[dict] | None = None,
-    state: AgentWorkflowState | None = None,
-) -> AgentWorkflowState:
-    state = state or AgentWorkflowState(
-        messages=list(initial_messages) if initial_messages is not None else _initial_messages(model, task)
-    )
-    if state.spawned_child_workflow_ids is None:
-        state.spawned_child_workflow_ids = set()
-    while True:
-        if 0 < step_limit <= state.n_calls:
-            state.messages.append(_limits_exceeded_message(model))
-            return state
+class MasAgent:
+    """Plain per-workflow MAS agent loop; DBOS decorators stay on module-level functions."""
 
-        state.n_calls += 1
-        try:
-            message = query_model_step(model, state.messages)
-            message = await _maybe_await(message)
-            state.cost += message.get("extra", {}).get("cost", 0.0)
-            state.messages.append(message)
-            observations = await execute_agent_workflow_actions(
-                message=message,
-                model=model,
-                env=env,
-                template_vars=_template_vars(
-                    model=model,
-                    env=env,
-                    state=state,
-                    task=task,
-                    root_workflow_id=root_workflow_id,
-                    workflow_id=workflow_id,
-                ),
-            )
-            state.messages.extend(observations)
-            state.spawn_count += sum(
-                observation.get("extra", {}).get("spawned_child_count", 0) for observation in observations
-            )
-        except InterruptAgentFlow as flow:
-            state.messages.extend(flow.messages)
+    def __init__(self, *, root_workflow_id: str, workflow_id: str, model, env, step_limit: int) -> None:
+        self.root_workflow_id = root_workflow_id
+        self.workflow_id = workflow_id
+        self.model = model
+        self.env = env
+        self.step_limit = step_limit
+        self.task = ""
+        self.messages: list[dict] = []
+        self.cost = 0.0
+        self.n_calls = 0
+        self.spawn_count = 0
+        self.first_observable_published = False
+        self.spawned_child_workflow_ids: set[str] = set()
 
-        if state.messages and state.messages[-1].get("role") == "exit":
-            return state
+    async def run(self, *, task: str = "", initial_messages: list[dict] | None = None) -> dict:
+        """Run the MAS Agent Workflow until a terminal state or parent direction wait."""
+        self.task = task
+        if self.model is None or self.env is None:
+            return await self._record_started_workflow()
+
+        self.messages = list(initial_messages) if initial_messages is not None else _initial_messages(self.model, task)
+        while True:
+            await self._publish_status("running")
+            await self._run_until_terminal_message()
+            result = _terminal_result(
+                root_workflow_id=self.root_workflow_id,
+                workflow_id=self.workflow_id,
+                terminal_message=self.messages[-1],
+                agent=self,
+            )
+            lifecycle_state = _lifecycle_state_for_terminal(result["terminal_state"])
+            latest_error = _latest_error_for_terminal(result["terminal_state"], self.messages[-1])
+
+            if self._should_wait_for_parent(result):
+                waiting_result = await self._wait_for_parent_after_submission(result)
+                parent_direction_signal = waiting_result.get("parent_direction_signal")
+                if _is_continuation_signal(parent_direction_signal):
+                    self.add_messages(_continuation_user_message(self.model, parent_direction_signal))
+                    self.first_observable_published = False
+                    continue
+                if _is_close_signal(parent_direction_signal):
+                    return await self._close_after_parent_signal(waiting_result, result)
+                return waiting_result
+
+            await self._publish_status(
+                lifecycle_state,
+                latest_submission=result["submission"],
+                latest_error=latest_error,
+            )
+            if self.workflow_id != self.root_workflow_id and lifecycle_state in {"failed", "limits_exceeded"}:
+                await _publish_first_observable_event_once(
+                    self,
+                    root_workflow_id=self.root_workflow_id,
+                    workflow_id=self.workflow_id,
+                    lifecycle_state=lifecycle_state,
+                    latest_submission=result["submission"],
+                    latest_error=latest_error,
+                )
+            await self._save_trajectory(
+                status=result["terminal_state"],
+                model_stats=result["model_stats"],
+                submission=result["submission"],
+            )
+            return result
+
+    async def step(self) -> list[dict]:
+        """Query the model, execute bash-shaped actions, and append observations."""
+        return await self.execute_actions(await self.query())
+
+    async def query(self) -> dict:
+        """Query the model through the DBOS model step and append the model message."""
+        self.n_calls += 1
+        message = await _maybe_await(query_model_step(self.model, self.messages))
+        self.cost += message.get("extra", {}).get("cost", 0.0)
+        self.add_messages(message)
+        return message
+
+    async def execute_actions(self, message: dict) -> list[dict]:
+        """Execute MAS-aware actions and append model-specific observation messages."""
+        observations = await execute_agent_workflow_actions(
+            message=message,
+            model=self.model,
+            env=self.env,
+            template_vars=self.get_template_vars(),
+        )
+        self.add_messages(*observations)
+        self.spawn_count += sum(
+            observation.get("extra", {}).get("spawned_child_count", 0) for observation in observations
+        )
+        return observations
+
+    def add_messages(self, *messages: dict) -> list[dict]:
+        self.messages.extend(messages)
+        return list(messages)
+
+    def get_template_vars(self, **kwargs) -> dict:
+        data = {}
+        if hasattr(self.env, "get_template_vars"):
+            data |= self.env.get_template_vars()
+        if hasattr(self.model, "get_template_vars"):
+            data |= self.model.get_template_vars()
+        data |= {
+            "task": self.task,
+            "n_model_calls": self.n_calls,
+            "model_cost": self.cost,
+            "root_workflow_id": self.root_workflow_id,
+            "workflow_id": self.workflow_id,
+            "spawn_index": self.spawn_count,
+            "existing_child_workflow_ids": self.spawned_child_workflow_ids,
+        }
+        data |= kwargs
+        return data
+
+    async def _run_until_terminal_message(self) -> None:
+        while True:
+            if 0 < self.step_limit <= self.n_calls:
+                self.add_messages(_limits_exceeded_message(self.model))
+                return
+            try:
+                await self.step()
+            except InterruptAgentFlow as flow:
+                self.add_messages(*flow.messages)
+            if self.messages and self.messages[-1].get("role") == "exit":
+                return
+
+    async def _record_started_workflow(self) -> dict:
+        await self._publish_status("running")
+        metadata = await self._save_trajectory(status="started")
+        return {"status": "started", "terminal_state": "started", **metadata}
+
+    async def _publish_status(
+        self,
+        lifecycle_state: LifecycleState,
+        *,
+        latest_submission: str = "",
+        latest_error: str = "",
+    ) -> None:
+        await _publish_status_snapshot(
+            root_workflow_id=self.root_workflow_id,
+            workflow_id=self.workflow_id,
+            lifecycle_state=lifecycle_state,
+            latest_submission=latest_submission,
+            latest_error=latest_error,
+        )
+
+    async def _save_trajectory(
+        self,
+        *,
+        status: str,
+        model_stats: dict | None = None,
+        submission: str = "",
+    ) -> dict[str, str]:
+        if self.workflow_id == self.root_workflow_id:
+            return await _maybe_await(
+                save_root_trajectory_artifact_step(
+                    self.root_workflow_id,
+                    status=status,
+                    messages=self.messages or None,
+                    model_stats=model_stats,
+                    submission=submission,
+                )
+            )
+        return await _maybe_await(
+            save_child_trajectory_artifact_step(
+                self.root_workflow_id,
+                self.workflow_id,
+                status=status,
+                messages=self.messages or None,
+                model_stats=model_stats,
+                submission=submission,
+            )
+        )
+
+    def _should_wait_for_parent(self, result: dict[str, Any]) -> bool:
+        return self.workflow_id != self.root_workflow_id and result["terminal_state"] == "Submitted"
+
+    async def _wait_for_parent_after_submission(self, result: dict[str, Any]) -> dict[str, Any]:
+        waiting_result = {
+            **result,
+            "status": "waiting_for_parent",
+            "terminal_state": "waiting_for_parent",
+            "latest_submission": result["submission"],
+        }
+        await self._publish_status("waiting_for_parent", latest_submission=result["submission"])
+        await _publish_first_observable_event_once(
+            self,
+            root_workflow_id=self.root_workflow_id,
+            workflow_id=self.workflow_id,
+            lifecycle_state="waiting_for_parent",
+            latest_submission=result["submission"],
+        )
+        await self._save_trajectory(
+            status="waiting_for_parent",
+            model_stats=result["model_stats"],
+            submission=result["submission"],
+        )
+        # This receive is intentionally in async workflow code, not a DBOS step.
+        waiting_result["parent_direction_signal"] = await _wait_for_parent_direction_signal()
+        return waiting_result
+
+    async def _close_after_parent_signal(self, waiting_result: dict[str, Any], submitted_result: dict[str, Any]) -> dict:
+        closed_result = {
+            **waiting_result,
+            "status": "closed",
+            "terminal_state": "closed",
+        }
+        await self._publish_status("closed", latest_submission=submitted_result["submission"])
+        await self._save_trajectory(
+            status="closed",
+            model_stats=submitted_result["model_stats"],
+            submission=submitted_result["submission"],
+        )
+        return closed_result
 
 
 @_dbos.DBOS.step()
@@ -577,146 +713,14 @@ async def _run_agent_workflow_with_context(
     step_limit: int,
     initial_messages: list[dict] | None,
 ) -> dict:
-    if model is None or env is None:
-        await _publish_status_snapshot(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
-            lifecycle_state="running",
-        )
-        metadata = (
-            await _maybe_await(save_root_trajectory_artifact_step(root_workflow_id))
-            if workflow_id == root_workflow_id
-            else await _maybe_await(save_child_trajectory_artifact_step(root_workflow_id, workflow_id))
-        )
-        return {"status": "started", "terminal_state": "started", **metadata}
-
-    state = AgentWorkflowState(
-        messages=list(initial_messages) if initial_messages is not None else _initial_messages(model, task)
+    agent = MasAgent(
+        root_workflow_id=root_workflow_id,
+        workflow_id=workflow_id,
+        model=model,
+        env=env,
+        step_limit=step_limit,
     )
-    while True:
-        await _publish_status_snapshot(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
-            lifecycle_state="running",
-        )
-        state = await _run_agent_workflow_loop(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
-            model=model,
-            env=env,
-            task=task,
-            step_limit=step_limit,
-            state=state,
-        )
-        result = _terminal_result(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
-            terminal_message=state.messages[-1],
-            state=state,
-        )
-        lifecycle_state = _lifecycle_state_for_terminal(result["terminal_state"])
-        latest_error = _latest_error_for_terminal(result["terminal_state"], state.messages[-1])
-
-        if workflow_id != root_workflow_id and result["terminal_state"] == "Submitted":
-            waiting_result = {
-                **result,
-                "status": "waiting_for_parent",
-                "terminal_state": "waiting_for_parent",
-                "latest_submission": result["submission"],
-            }
-            await _publish_status_snapshot(
-                root_workflow_id=root_workflow_id,
-                workflow_id=workflow_id,
-                lifecycle_state="waiting_for_parent",
-                latest_submission=result["submission"],
-            )
-            await _publish_first_observable_event_once(
-                state,
-                root_workflow_id=root_workflow_id,
-                workflow_id=workflow_id,
-                lifecycle_state="waiting_for_parent",
-                latest_submission=result["submission"],
-            )
-            await _maybe_await(
-                save_child_trajectory_artifact_step(
-                    root_workflow_id,
-                    workflow_id,
-                    status="waiting_for_parent",
-                    messages=state.messages,
-                    model_stats=result["model_stats"],
-                    submission=result["submission"],
-                )
-            )
-            # This receive is intentionally in async workflow code, not a DBOS step.
-            parent_direction_signal = await _wait_for_parent_direction_signal()
-            waiting_result["parent_direction_signal"] = parent_direction_signal
-            if _is_continuation_signal(parent_direction_signal):
-                state.messages.append(_continuation_user_message(model, parent_direction_signal))
-                state.first_observable_published = False
-                continue
-            if _is_close_signal(parent_direction_signal):
-                closed_result = {
-                    **waiting_result,
-                    "status": "closed",
-                    "terminal_state": "closed",
-                }
-                await _publish_status_snapshot(
-                    root_workflow_id=root_workflow_id,
-                    workflow_id=workflow_id,
-                    lifecycle_state="closed",
-                    latest_submission=result["submission"],
-                )
-                await _maybe_await(
-                    save_child_trajectory_artifact_step(
-                        root_workflow_id,
-                        workflow_id,
-                        status="closed",
-                        messages=state.messages,
-                        model_stats=result["model_stats"],
-                        submission=result["submission"],
-                    )
-                )
-                return closed_result
-            return waiting_result
-
-        await _publish_status_snapshot(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
-            lifecycle_state=lifecycle_state,
-            latest_submission=result["submission"],
-            latest_error=latest_error,
-        )
-        if workflow_id != root_workflow_id and lifecycle_state in {"failed", "limits_exceeded"}:
-            await _publish_first_observable_event_once(
-                state,
-                root_workflow_id=root_workflow_id,
-                workflow_id=workflow_id,
-                lifecycle_state=lifecycle_state,
-                latest_submission=result["submission"],
-                latest_error=latest_error,
-            )
-        if workflow_id == root_workflow_id:
-            await _maybe_await(
-                save_root_trajectory_artifact_step(
-                    root_workflow_id,
-                    status=result["terminal_state"],
-                    messages=state.messages,
-                    model_stats=result["model_stats"],
-                    submission=result["submission"],
-                )
-            )
-        else:
-            await _maybe_await(
-                save_child_trajectory_artifact_step(
-                    root_workflow_id,
-                    workflow_id,
-                    status=result["terminal_state"],
-                    messages=state.messages,
-                    model_stats=result["model_stats"],
-                    submission=result["submission"],
-                )
-            )
-        return result
+    return await agent.run(task=task, initial_messages=initial_messages)
 
 
 @_dbos.DBOS.workflow()

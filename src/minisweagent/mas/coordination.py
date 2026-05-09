@@ -38,6 +38,10 @@ def _child_metadata_from_status(snapshot: dict[str, Any], *, task: str = "") -> 
     }
 
 
+def _is_missing_dbos_runtime_error(exc: Exception) -> bool:
+    return "No DBOS was created yet" in str(exc)
+
+
 @dataclass(frozen=True)
 class SpawnChildrenResult:
     """Structured Child Coordination result for detached child startup."""
@@ -110,8 +114,10 @@ class DBOSCoordinationAdapter:
         )
         try:
             await _maybe_await(self.dbos_api.set_event_async(STATUS_EVENT_KEY, snapshot.to_event()))
-        except Exception:
-            if self.dbos_api.workflow_id is not None:
+        except Exception as exc:
+            if self._has_active_dbos_runtime():
+                raise
+            if not _is_missing_dbos_runtime_error(exc):
                 raise
 
     async def publish_first_observable(
@@ -134,14 +140,21 @@ class DBOSCoordinationAdapter:
         event = snapshot.to_event()
         try:
             await _maybe_await(self.dbos_api.set_event_async(FIRST_OBSERVABLE_EVENT_KEY, event))
-        except Exception:
-            if self.dbos_api.workflow_id is not None:
+        except Exception as exc:
+            if self._has_active_dbos_runtime():
+                raise
+            if not _is_missing_dbos_runtime_error(exc):
                 raise
         return event
 
     async def query_direct_child_statuses(self, parent_workflow_id: str) -> list[dict[str, Any]]:
         """Query direct child statuses through DBOS workflow metadata."""
-        return await query_direct_child_statuses_async(self.dbos_api, parent_workflow_id)
+        try:
+            return await query_direct_child_statuses_async(self.dbos_api, parent_workflow_id)
+        except Exception as exc:
+            if self._has_active_dbos_runtime() or not _is_missing_dbos_runtime_error(exc):
+                raise
+            return []
 
     async def query_direct_child_status(
         self,
@@ -150,11 +163,16 @@ class DBOSCoordinationAdapter:
         child_workflow_id: str,
     ) -> dict[str, Any] | None:
         """Query one direct child status through DBOS workflow metadata."""
-        return await query_direct_child_status_async(
-            self.dbos_api,
-            parent_workflow_id=parent_workflow_id,
-            child_workflow_id=child_workflow_id,
-        )
+        try:
+            return await query_direct_child_status_async(
+                self.dbos_api,
+                parent_workflow_id=parent_workflow_id,
+                child_workflow_id=child_workflow_id,
+            )
+        except Exception as exc:
+            if self._has_active_dbos_runtime() or not _is_missing_dbos_runtime_error(exc):
+                raise
+            return None
 
     async def direct_child_metadata(self, *, parent_workflow_id: str) -> list[dict[str, str]]:
         """Return direct child artifact metadata from latest status snapshots."""
@@ -241,6 +259,12 @@ class DBOSCoordinationAdapter:
     async def receive_parent_direction(self, *, topic: str, timeout_seconds: float) -> dict | str | None:
         """Receive one parent-direction workflow message."""
         return await _maybe_await(self.dbos_api.recv_async(topic, timeout_seconds=timeout_seconds))
+
+    def _has_active_dbos_runtime(self) -> bool:
+        """Best-effort check used only to keep direct unit-test workflow calls lightweight."""
+        module = getattr(self.dbos_api, "__module__", "")
+        dbos_module = __import__(module, fromlist=["_dbos_global_instance"]) if module else None
+        return getattr(dbos_module, "_dbos_global_instance", None) is not None
 
 
 class ChildCoordinator:
