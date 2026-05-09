@@ -1,4 +1,4 @@
-# Support recursive Descendant Agent Workflow coordination
+# Support recursive direct-child Agent Workflow coordination
 
 Status: ready-for-agent
 Category: enhancement
@@ -10,20 +10,39 @@ Type: AFK
 
 ## What to build
 
-Allow a Child Agent Workflow to act as a Parent Agent Workflow for its own children. Recursive delegation should preserve the Agent Workflow Tree, deterministic Workflow Tree IDs, shared Root Run Directory, and the same status, wait, continue, and close coordination semantics used for first-level children.
+Allow a Child Agent Workflow to act as a Parent Agent Workflow for its own direct children while enforcing the **Direct Child Authority Policy**. Recursive delegation should preserve the Agent Workflow Tree, deterministic Workflow Tree IDs, shared Root Run Directory, and the same status, wait, continue, and close coordination semantics used for first-level children, but only across direct parent-child boundaries.
 
-This slice should demonstrate a root, child, and grandchild workflow coordinated through MAS commands.
+This slice should demonstrate a root, child, and grandchild workflow coordinated through MAS commands without granting the root direct control over the grandchild.
+
+## Design constraints
+
+- A Parent Agent Workflow coordinates only its direct Child Agent Workflows by default.
+- The Root Agent Workflow has no special tree-wide Coordination Authority.
+- The child agent of my child agent is not my child agent.
+- Broader subtree-wide or tree-wide control is out of scope for this slice and belongs to a future Coordination Authority Model with explicit Authority Grants.
+- Workflow-layer MAS dispatch should use the DBOS workflow context, such as `DBOS.workflow_id`, as the authoritative current workflow identity rather than relying on manually threaded template variables.
+- Direct-child scope should be resolved from DBOS parent workflow metadata where possible, such as `parent_workflow_id`, rather than from broad root-tree prefix scans.
 
 ## Acceptance criteria
 
-- [ ] A Child Agent Workflow can issue `mini-mas spawn "task"` and `mini-mas spawn "task A" "task B"` as Standalone MAS Commands.
-- [ ] Grandchild Workflow Tree IDs append another `-cNNN` segment, for example `mas-<16hex>-c001-c001`.
+- [ ] A Child Agent Workflow can issue `mini-mas spawn "task"` as a Standalone MAS Command and start a grandchild Agent Workflow.
+- [ ] A Child Agent Workflow can issue `mini-mas spawn "task A" "task B"` as a Standalone MAS Command and start one grandchild Agent Workflow per task.
+- [ ] Grandchild Workflow Tree IDs append another deterministic `-cNNN` segment to their direct parent ID, for example `mas-<16hex>-c001-c001`.
+- [ ] Sibling grandchildren under the same Child Agent Workflow receive stable IDs such as `-c001` and `-c002`.
+- [ ] Grandchildren under different Child Agent Workflows do not collide with each other or with root-level Child Agent Workflow IDs.
 - [ ] Descendant Agent Workflows share the Root Agent Workflow's Run Directory.
-- [ ] `mini-mas status` represents recursive parent-child relationships in the Agent Workflow Tree.
-- [ ] `mini-mas wait`, `mini-mas continue`, and `mini-mas close` work for descendants according to existing command semantics.
-- [ ] Descendant wait semantics use First Observable Events for child-to-parent observable state, not final DBOS workflow results.
-- [ ] Recursive descendant coordination uses the same async Agent Workflow layer and awaited DBOS workflow-control APIs as first-level child coordination.
-- [ ] Tests cover root-child-grandchild spawning, sibling ID generation, descendant artifact paths, and recursive status/wait behavior.
+- [ ] Descendant Trajectory Artifacts use deterministic paths under the Root Agent Workflow's Run Directory and include the full descendant Workflow Tree ID.
+- [ ] `mini-mas status` from a Parent Agent Workflow reports that parent's direct Child Agent Workflows only, excluding the parent itself, grandchildren, siblings, ancestors, and workflows outside the tree.
+- [ ] `mini-mas status <workflow-id>` from a Parent Agent Workflow succeeds only when the target is that parent's direct Child Agent Workflow.
+- [ ] `mini-mas wait --any`, `mini-mas wait --all`, and bounded wait from a Parent Agent Workflow wait only for that parent's direct Child Agent Workflows.
+- [ ] `mini-mas wait <workflow-id>` from a Parent Agent Workflow succeeds only when the target is that parent's direct Child Agent Workflow.
+- [ ] Waited Spawn and `mini-mas wait` for recursive direct children synchronize through First Observable Events keyed by child workflow identifiers, not through `WorkflowHandle.get_result()` or final DBOS workflow completion.
+- [ ] `mini-mas continue <workflow-id> "message"` succeeds only when the target is a waiting direct Child Agent Workflow.
+- [ ] `mini-mas close <workflow-id>` succeeds only when the target is a waiting direct Child Agent Workflow.
+- [ ] Root Agent Workflow attempts to status, wait for, continue, or close a grandchild directly return clear model-visible errors and do not send DBOS messages.
+- [ ] Child Agent Workflow attempts to status, wait for, continue, or close siblings, ancestors, root, unknown workflows, or workflows outside the tree return clear model-visible errors and do not send DBOS messages.
+- [ ] Recursive direct-child coordination uses the same async Agent Workflow layer and awaited DBOS workflow-control APIs as first-level child coordination.
+- [ ] Tests cover root-child-grandchild spawning, repeated-task grandchild spawning, sibling ID generation, descendant artifact paths, direct-child status/wait behavior, and invalid transitive-control attempts.
 
 ## Blocked by
 
@@ -39,10 +58,12 @@ This slice should demonstrate a root, child, and grandchild workflow coordinated
 ## Agent Brief
 
 **Category:** enhancement
-**Summary:** Support recursive Descendant Agent Workflow coordination so a Child Agent Workflow can become a Parent Agent Workflow for its own children.
+**Summary:** Support recursive direct-child Agent Workflow coordination so a Child Agent Workflow can become a Parent Agent Workflow for its own direct children.
 
 **Current behavior:**
 The MAS subsystem supports Root Agent Workflows, first-level Child Agent Workflow spawning, repeated-task Detached Spawn, Waited Spawn, `mini-mas wait`, `mini-mas status`, Continuation Signals, and neutral Close Signals. Child Agent Workflows reuse the same Agent Workflow loop as roots, and Workflow Tree IDs already allow additional `-cNNN` descendant segments.
+
+The MAS domain model now uses the **Direct Child Authority Policy**. A Parent Agent Workflow coordinates only its direct Child Agent Workflows by default. The Root Agent Workflow has no special tree-wide Coordination Authority, so the child agent of my child agent is not my child agent.
 
 The explicit blockers for this slice are complete:
 
@@ -51,31 +72,34 @@ The explicit blockers for this slice are complete:
 - Continuation Signals for Remote Interactive Agents are done.
 - Neutral Close Signals for Remote Interactive Agents are done.
 
-The remaining gap is proving and hardening recursive coordination. A Child Agent Workflow must be able to issue Standalone MAS Commands that create and coordinate its own Child Agent Workflows while preserving the Root Agent Workflow's Run Directory, deterministic Workflow Tree IDs, Agent Workflow Tree visibility, and existing async DBOS coordination semantics.
+The remaining gap is proving and hardening recursive coordination under that direct-child policy. A Child Agent Workflow must be able to issue Standalone MAS Commands that create and coordinate its own direct Child Agent Workflows while preserving the Root Agent Workflow's Run Directory, deterministic Workflow Tree IDs, and existing async DBOS coordination semantics. The implementation must avoid treating the full Root Agent Workflow Tree as the current parent's coordination scope.
 
 **Desired behavior:**
 A Child Agent Workflow should be able to emit `mini-mas spawn "task"` and `mini-mas spawn "task A" "task B"` as Standalone MAS Commands. These commands should start grandchild Agent Workflows through the same async Agent Workflow coordination layer and child workflow queue used for first-level children.
 
-Grandchild Workflow Tree IDs should encode their recursive position by appending another `-cNNN` segment to the Child Agent Workflow ID. For example, if the root is `mas-<16hex>` and its first child is `mas-<16hex>-c001`, that child's first child should be `mas-<16hex>-c001-c001`. Sibling numbering should remain deterministic within each Parent Agent Workflow, so sibling grandchildren under the same child use `-c001`, `-c002`, and so on without colliding with root-level children or descendants under other parents.
+Grandchild Workflow Tree IDs should encode their recursive position by appending another `-cNNN` segment to the direct parent Child Agent Workflow ID. For example, if the root is `mas-<16hex>` and its first child is `mas-<16hex>-c001`, that child's first child should be `mas-<16hex>-c001-c001`. Sibling numbering should remain deterministic within each Parent Agent Workflow, so sibling grandchildren under the same child use `-c001`, `-c002`, and so on without colliding with root-level children or descendants under other parents.
 
 All Descendant Agent Workflows in one Agent Workflow Tree should share the Root Agent Workflow's Run Directory. Their Trajectory Artifacts should live under that same Run Directory and use deterministic paths based on their full Workflow Tree IDs.
 
-`mini-mas status` should represent recursive parent-child relationships in the Agent Workflow Tree rather than flattening descendant state in a way that hides hierarchy. Status output should continue to expose lightweight lifecycle state, latest submission or error when present, Run Directory, and exact Trajectory Artifact path.
+`mini-mas status` without a workflow ID should report the current Parent Agent Workflow's direct Child Agent Workflows only. It should not include the parent itself, grandchildren, siblings, ancestors, or workflows outside the current tree. `mini-mas status <workflow-id>` should inspect exactly one direct Child Agent Workflow and should return a clear model-visible error for a grandchild, sibling, ancestor, root, unknown workflow, or workflow outside the current tree.
 
-`mini-mas wait`, `mini-mas continue`, and `mini-mas close` should work for descendants according to the existing command semantics. A Parent Agent Workflow's implicit wait scope should cover the children it currently coordinates, not unrelated siblings or ancestors. Explicit workflow ID operations should validate that the target belongs to the current Agent Workflow Tree and is in the current Parent Agent Workflow's valid coordination scope. Invalid attempts to coordinate the Root Agent Workflow, an ancestor, a sibling, a workflow outside the tree, an unknown workflow, or a workflow that is not waiting for parent direction should return clear model-visible errors and must not send parent-to-child signals.
+`mini-mas wait --any`, `mini-mas wait --all`, and bounded wait should wait only for the current Parent Agent Workflow's direct Child Agent Workflows. `mini-mas wait <workflow-id>` should succeed only for one direct Child Agent Workflow. All wait behavior must synchronize on First Observable Events keyed by child workflow identifiers, not on final DBOS workflow results.
 
-Waited Spawn and `mini-mas wait` for recursive descendants must continue to synchronize on First Observable Events keyed by child workflow identifiers. They must not use final DBOS workflow results as the synchronization primitive.
+`mini-mas continue <workflow-id> "message"` and `mini-mas close <workflow-id>` should succeed only when the target is a waiting direct Child Agent Workflow of the current Parent Agent Workflow. Invalid attempts to continue or close grandchildren, siblings, ancestors, root, unknown workflows, workflows outside the tree, or workflows that are not waiting for parent direction should return clear model-visible errors and must not send DBOS messages.
 
 Recursive coordination must preserve the architectural boundary from the PRD and ADRs: Standalone MAS Commands are intercepted at the Agent Workflow layer, workflow-control operations are awaited through async DBOS APIs, and ordinary model calls, bash execution, and Trajectory Artifact persistence remain behind DBOS step boundaries.
 
+Workflow-layer MAS dispatch should use the DBOS workflow context, such as `DBOS.workflow_id`, as the authoritative current workflow identity. Direct-child scope should be resolved from DBOS parent workflow metadata where possible, such as `parent_workflow_id`, rather than from broad root-tree prefix scans or manually threaded template variables.
+
 **Key interfaces:**
 - Standalone MAS Command dispatch - should work from both Root Agent Workflows and Child Agent Workflows without changing model adapter action parsing.
-- Child Agent Workflow startup - should accept a recursive parent Workflow Tree ID and create one child per task using deterministic descendant IDs.
+- Current workflow identity - should come from the DBOS workflow context, such as `DBOS.workflow_id`, when dispatching in-workflow MAS Commands.
+- Child Agent Workflow startup - should accept a recursive parent Workflow Tree ID and create one direct child per task using deterministic descendant IDs.
 - Workflow Tree ID allocation - should allocate sibling `-cNNN` segments relative to the current Parent Agent Workflow, not globally across the Root Agent Workflow.
-- Agent Workflow Tree status representation - should expose recursive parent-child relationships for root, child, grandchild, and sibling descendants.
-- Wait scope resolution - should distinguish the current Parent Agent Workflow's coordinated children from unrelated descendants in the same Root Agent Workflow Tree.
-- First Observable Event waiting - should keep using child-keyed DBOS events for descendant Waited Spawn and `mini-mas wait`.
-- Parent-to-child signaling - should validate recursive descendant targets and deliver Continuation Signals and Close Signals through async DBOS messages, outside DBOS steps.
+- Direct-child status lookup - should report only direct Child Agent Workflows for `mini-mas status` without a target.
+- Direct-child target validation - should ensure explicit `status`, `wait`, `continue`, and `close` targets are direct Child Agent Workflows of the current Parent Agent Workflow.
+- First Observable Event waiting - should keep using child-keyed DBOS events for Waited Spawn and `mini-mas wait`.
+- Parent-to-child signaling - should deliver Continuation Signals and Close Signals only across a direct parent-child boundary through async DBOS messages, outside DBOS steps.
 - Trajectory Artifact metadata - should preserve one shared Root Run Directory while using each descendant's full Workflow Tree ID for deterministic artifact paths.
 
 **Acceptance criteria:**
@@ -86,20 +110,23 @@ Recursive coordination must preserve the architectural boundary from the PRD and
 - [ ] Grandchildren under different Child Agent Workflows do not collide with each other or with root-level Child Agent Workflow IDs.
 - [ ] Descendant Agent Workflows share the Root Agent Workflow's Run Directory.
 - [ ] Descendant Trajectory Artifacts use deterministic paths under the Root Agent Workflow's Run Directory and include the full descendant Workflow Tree ID.
-- [ ] `mini-mas status` represents root, child, and grandchild relationships in the Agent Workflow Tree.
-- [ ] `mini-mas status <workflow-id>` can inspect a recursive descendant by Workflow Tree ID.
-- [ ] `mini-mas wait` from a Child Agent Workflow waits only for children in that Child Agent Workflow's valid coordination scope unless an explicit valid descendant workflow ID is provided.
-- [ ] `mini-mas wait <workflow-id>` works for recursive descendants by waiting on First Observable Events keyed by the target workflow ID.
-- [ ] Waited Spawn and `mini-mas wait` for descendants do not wait on `WorkflowHandle.get_result()` or final DBOS workflow completion.
-- [ ] `mini-mas continue <workflow-id> "message"` works from a Child Agent Workflow for a waiting descendant in its valid coordination scope.
-- [ ] `mini-mas close <workflow-id>` works from a Child Agent Workflow for a waiting descendant in its valid coordination scope.
-- [ ] Recursive continue and close delivery use parent-to-child DBOS messages at the async Agent Workflow layer, outside DBOS steps.
-- [ ] Invalid descendant coordination attempts return clear model-visible errors and do not send DBOS messages.
-- [ ] Tests cover root-child-grandchild spawning, repeated-task grandchild spawning, sibling ID generation, descendant artifact paths, recursive status output, recursive wait behavior, and recursive continue/close validation.
+- [ ] `mini-mas status` from a Parent Agent Workflow reports that parent's direct Child Agent Workflows only, excluding the parent itself, grandchildren, siblings, ancestors, and workflows outside the tree.
+- [ ] `mini-mas status <workflow-id>` from a Parent Agent Workflow succeeds only when the target is that parent's direct Child Agent Workflow.
+- [ ] `mini-mas wait --any`, `mini-mas wait --all`, and bounded wait from a Parent Agent Workflow wait only for that parent's direct Child Agent Workflows.
+- [ ] `mini-mas wait <workflow-id>` from a Parent Agent Workflow succeeds only when the target is that parent's direct Child Agent Workflow.
+- [ ] Waited Spawn and `mini-mas wait` for recursive direct children synchronize through First Observable Events keyed by child workflow identifiers, not through `WorkflowHandle.get_result()` or final DBOS workflow completion.
+- [ ] `mini-mas continue <workflow-id> "message"` succeeds only when the target is a waiting direct Child Agent Workflow.
+- [ ] `mini-mas close <workflow-id>` succeeds only when the target is a waiting direct Child Agent Workflow.
+- [ ] Root Agent Workflow attempts to status, wait for, continue, or close a grandchild directly return clear model-visible errors and do not send DBOS messages.
+- [ ] Child Agent Workflow attempts to status, wait for, continue, or close siblings, ancestors, root, unknown workflows, or workflows outside the tree return clear model-visible errors and do not send DBOS messages.
+- [ ] Recursive direct-child coordination uses the same async Agent Workflow layer and awaited DBOS workflow-control APIs as first-level child coordination.
+- [ ] Tests cover root-child-grandchild spawning, repeated-task grandchild spawning, sibling ID generation, descendant artifact paths, direct-child status/wait behavior, and invalid transitive-control attempts.
 
 **Out of scope:**
 - Changing the Standalone MAS Command syntax or adding a separate model tool schema.
 - Changing ordinary `mini` behavior or initializing DBOS from the non-MAS command path.
+- Adding subtree-wide, tree-wide, or operator-wide Authority Grants.
+- Implementing the Interactive Root Agent Workflow terminal control model.
 - Adding dedicated history, logs, grep, diff, or inspector commands.
 - Solving Shared Workspace isolation, parent-level patch reconciliation, or merge workflow.
 - Adding cancel, kill, retry, fork, or queue mutation commands.

@@ -16,9 +16,11 @@ Inside an **Agent Workflow**, a model still emits bash-shaped actions. If the ac
 
 The MVP supports recursive delegation through an **Agent Workflow Tree**. **Workflow Tree IDs** use readable, deterministic IDs such as `mas-a7f3c9d4e8b11234-c001-c002`. Every **Agent Workflow** writes a **Trajectory Artifact** under the current **Run Directory**, and MAS commands return exact artifact paths so parent agents can inspect history with ordinary shell tools.
 
+The MVP uses a **Direct Child Authority Policy** for coordination. A **Parent Agent Workflow** can coordinate only its direct **Child Agent Workflows** by default. The child agent of my child agent is not my child agent: a grandchild is part of the same **Agent Workflow Tree**, but it is not controlled by the grandparent unless a future **Coordination Authority Model** introduces broader **Authority Grants**. The **Root Agent Workflow** has no special tree-wide authority under the MVP policy.
+
 `mini-mas spawn` accepts repeated task arguments such as `mini-mas spawn "task A" "task B"` and starts one Child Agent Workflow per task. `mini-mas spawn --wait` defaults to waiting for any started child to publish a First Observable Event; `mini-mas spawn --wait --all` waits for all started children to become observable. `mini-mas spawn --wait --timeout <seconds>` bounds only the waiting phase and does not cancel, close, fail, or retry started children.
 
-Wait operations use child workflow identifiers to wait for First Observable Events, not final DBOS workflow results. Child-to-parent observable state is published through DBOS events keyed by child workflow identifiers; parent-to-child Continuation Signals and Close Signals are delivered as DBOS workflow messages.
+Wait operations use direct child workflow identifiers to wait for First Observable Events, not final DBOS workflow results. Child-to-parent observable state is published through DBOS events keyed by child workflow identifiers; parent-to-child Continuation Signals and Close Signals are delivered as DBOS workflow messages only across a direct parent-child boundary.
 
 ## User Stories
 
@@ -31,17 +33,17 @@ Wait operations use child workflow identifiers to wait for First Observable Even
 7. As a Parent Agent Workflow, I want `mini-mas spawn --wait` to wait for the first observable child by default, so that I can react quickly to whichever child becomes actionable first.
 8. As a Parent Agent Workflow, I want `mini-mas spawn --wait --all`, so that I can start several children and wait until all of them become observable.
 9. As a Parent Agent Workflow, I want `mini-mas spawn --wait --timeout <seconds>`, so that I can bound the waited-spawn wait phase without stopping the children.
-10. As a Parent Agent Workflow, I want `mini-mas wait --all`, so that I can gather all currently relevant child First Observable Events.
-11. As a Parent Agent Workflow, I want `mini-mas wait --any`, so that I can react to whichever child becomes observable first.
-12. As a Parent Agent Workflow, I want `mini-mas wait --timeout <seconds>`, so that I can use bounded waiting and regain control when no relevant child becomes observable before the timeout.
-13. As a Parent Agent Workflow, I want `mini-mas status`, so that I can inspect the current Agent Workflow Tree without blocking.
-14. As a Parent Agent Workflow, I want `mini-mas status <workflow-id>`, so that I can inspect a specific descendant.
-15. As a Parent Agent Workflow, I want `mini-mas continue <workflow-id> "message"`, so that I can ask a Remote Interactive Agent to keep working from its existing trajectory.
-16. As a Parent Agent Workflow, I want `mini-mas close <workflow-id>`, so that I can end a Remote Interactive Agent without implying acceptance or rejection.
+10. As a Parent Agent Workflow, I want `mini-mas wait --all`, so that I can gather First Observable Events from my direct Child Agent Workflows.
+11. As a Parent Agent Workflow, I want `mini-mas wait --any`, so that I can react to whichever direct Child Agent Workflow becomes observable first.
+12. As a Parent Agent Workflow, I want `mini-mas wait --timeout <seconds>`, so that I can use bounded waiting and regain control when no direct Child Agent Workflow becomes observable before the timeout.
+13. As a Parent Agent Workflow, I want `mini-mas status`, so that I can inspect my direct Child Agent Workflows without blocking.
+14. As a Parent Agent Workflow, I want `mini-mas status <workflow-id>`, so that I can inspect a specific direct Child Agent Workflow.
+15. As a Parent Agent Workflow, I want `mini-mas continue <workflow-id> "message"`, so that I can ask a direct Remote Interactive Agent to keep working from its existing trajectory.
+16. As a Parent Agent Workflow, I want `mini-mas close <workflow-id>`, so that I can end a direct Remote Interactive Agent without implying acceptance or rejection.
 17. As a Child Agent Workflow, I want to enter `waiting_for_parent` after producing a submission, so that my parent can decide whether I should continue or close.
 18. As a Child Agent Workflow, I want a Continuation Signal to become a normal user message in my trajectory, so that I can continue with the same linear message history model.
 19. As a Child Agent Workflow, I want a Close Signal to end my workflow, so that I do not keep waiting indefinitely once no further work is requested.
-20. As a Descendant Agent Workflow, I want to spawn my own child workflows, so that MAS supports recursive delegation.
+20. As a Descendant Agent Workflow, I want to spawn and coordinate my own direct child workflows, so that MAS supports recursive delegation without granting transitive control.
 21. As a developer, I want workflow IDs to encode tree position, so that recursive relationships are readable in logs and CLI output.
 22. As a developer, I want all artifacts for one Root Agent Workflow under one Run Directory, so that history search is scoped and not polluted by unrelated MAS runs.
 23. As a Parent Agent Workflow, I want status and wait results to include exact Trajectory Artifact paths, so that I can inspect full child history using ordinary bash tools.
@@ -84,6 +86,9 @@ Wait operations use child workflow identifiers to wait for First Observable Even
 - `root_agent_workflow`, `child_agent_workflow`, MAS command dispatch, spawn, wait, continue, and close are implemented with `async def` / `await` rather than blocking workflow-control calls.
 - Blocking model, environment, and filesystem operations remain behind DBOS step boundaries; they may be synchronous steps or async steps as long as the Agent Workflow layer awaits them through DBOS-supported APIs.
 - The MVP command set is limited to `run`, `spawn`, `status`, `wait`, `continue`, and `close`.
+- The MVP uses the Direct Child Authority Policy: a Parent Agent Workflow can observe, wait for, continue, and close only its direct Child Agent Workflows by default.
+- The Root Agent Workflow does not have special tree-wide coordination authority in the MVP.
+- Broader subtree-wide or tree-wide control is deferred to a future Coordination Authority Model and explicit Authority Grants.
 - `mini-mas spawn` accepts one or more repeated task arguments and starts one Child Agent Workflow per task.
 - `mini-mas spawn` defaults to Detached Spawn.
 - `mini-mas spawn --wait` requests Waited Spawn and defaults to wait-any behavior.
@@ -94,7 +99,9 @@ Wait operations use child workflow identifiers to wait for First Observable Even
 - Waited Spawn and `mini-mas wait` wait for First Observable Events, not final DBOS workflow results.
 - A First Observable Event is set when a Child Agent Workflow first reaches a parent-actionable state: `waiting_for_parent`, `failed`, or `limits_exceeded`.
 - Child-to-parent observable state uses DBOS events keyed by child workflow identifiers; parent-to-child Continuation Signals and Close Signals use DBOS workflow messages.
-- `mini-mas wait` supports waiting for one workflow, all workflows, any workflow, and bounded timeout-based waiting.
+- `mini-mas wait` supports waiting for direct Child Agent Workflows with wait-any, wait-all, one direct child, and bounded timeout-based waiting.
+- `mini-mas status` without a workflow ID reports direct Child Agent Workflows only; it does not include the parent itself or deeper descendants.
+- `mini-mas status <workflow-id>`, `mini-mas wait <workflow-id>`, `mini-mas continue <workflow-id>`, and `mini-mas close <workflow-id>` must validate that the target is a direct Child Agent Workflow of the current Parent Agent Workflow.
 - Remote Interactive Agents wait for either a Continuation Signal or a Close Signal after producing a submission.
 - A Continuation Signal is injected into the child trajectory as a normal user message with metadata identifying MAS continuation.
 - A Close Signal ends a Remote Interactive Agent and does not mean accepted or aborted.
@@ -111,6 +118,7 @@ Wait operations use child workflow identifiers to wait for First Observable Even
 - Recursive spawn is supported through an Agent Workflow Tree.
 - Root Workflow Tree IDs use `mas-<16hex>`.
 - Descendant Workflow Tree IDs append `-cNNN` segments to the parent workflow ID.
+- Recursive coordination remains local at each layer: a child may coordinate its own children, but a grandparent does not coordinate grandchildren under the Direct Child Authority Policy.
 - All Agent Workflows in one tree share one Run Directory.
 - Trajectory Artifacts live under a trajectories area scoped by the Root Agent Workflow.
 - Shared Workspace is allowed for the MVP, but it is a known correctness risk.
@@ -137,10 +145,11 @@ Wait operations use child workflow identifiers to wait for First Observable Even
 - `spawn --wait` default wait-any behavior should be tested separately from `spawn --wait --all`.
 - `spawn --wait --timeout` behavior should be tested for wait-any timeout, wait-all partial timeout, ready child snapshots, still-running child IDs, and preservation of running child workflows.
 - `spawn --timeout` without `--wait` should be tested as an invalid command.
-- `wait --any`, `wait --all`, one-workflow waiting, and timeout behavior should be tested against First Observable Events using deterministic child workflows or DBOS test doubles.
+- `wait --any`, `wait --all`, one-direct-child waiting, and timeout behavior should be tested against First Observable Events using deterministic child workflows or DBOS test doubles.
 - Tests should prove Waited Spawn and `mini-mas wait` synchronize through child DBOS events rather than child-to-parent send messages or final workflow results.
 - Workflow-control tests should cover async MAS coordination behavior without asserting incidental internal DBOS function IDs.
-- Status output should be tested to ensure it includes workflow ID, status, latest submission or error, trajectory path, and run directory.
+- Status output should be tested to ensure it includes workflow ID, status, latest submission or error, trajectory path, and run directory for direct Child Agent Workflows.
+- Tests should prove that a Parent Agent Workflow cannot status, wait for, continue, or close grandchildren, siblings, ancestors, or workflows outside its direct child boundary.
 - Observation formatting should be tested with existing model adapter patterns so MAS does not break toolcall, Responses API, or text-based observation handling.
 - Existing tests for default and interactive agents provide prior art for deterministic model outputs, message history assertions, and command execution behavior.
 - Existing model action parser tests provide prior art for preserving the bash-shaped action contract.
@@ -162,6 +171,7 @@ Wait operations use child workflow identifiers to wait for First Observable Even
 - A model-provider-specific idempotency key implementation.
 - A separate `mini-mas` model tool schema.
 - Direct DBOS conversion of the existing default or interactive agent classes.
+- Tree-wide or subtree-wide Coordination Authority Grants.
 - Guaranteeing that multiple Agent Workflows can safely mutate a Shared Workspace.
 
 ## Further Notes

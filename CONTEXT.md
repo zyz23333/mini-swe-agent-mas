@@ -52,6 +52,10 @@ _Avoid_: Internal mini-mas
 A child agent whose post-submission continuation is controlled by its **Parent Agent Workflow** instead of a local terminal user.
 _Avoid_: TTY agent, long-running worker
 
+**Interactive Root Agent Workflow**:
+A **Root Agent Workflow** whose next action is supplied by an external terminal user through DBOS messages instead of by a model query.
+_Avoid_: External shell controller, terminal superuser
+
 **Continuation Signal**:
 A parent-to-child message that asks a **Remote Interactive Agent** to continue working from its existing trajectory.
 _Avoid_: New task command, resume event
@@ -92,22 +96,55 @@ _Avoid_: Safe workspace, isolated worktree
 The separation of child agent file changes into independent worktrees or directories before parent-level reconciliation.
 _Avoid_: Bash serialization, command locking
 
+**Direct Child Control Boundary**:
+A coordination rule where a **Parent Agent Workflow** observes, waits for, continues, and closes only its direct **Child Agent Workflows** by default.
+_Avoid_: Full descendant control, transitive child control
+
+**Coordination Authority Model**:
+The rules that determine which **Agent Workflows** a requester may observe, wait for, continue, or close.
+_Avoid_: Role system, permission hack
+
+**Coordination Authority**:
+Permission for an **Agent Workflow** or operator to coordinate **Agent Workflows** within an **Authority Scope**.
+_Avoid_: Ownership, dominance
+
+**Authority Scope**:
+The set of **Agent Workflows** covered by a **Coordination Authority**.
+_Avoid_: Reach, visibility radius
+
+**Direct Child Authority Policy**:
+The current MVP **Coordination Authority Model** where a **Parent Agent Workflow** can coordinate only its direct **Child Agent Workflows** by default.
+_Avoid_: Full-tree authority, transitive authority
+
+**Authority Grant**:
+An explicit assignment of **Coordination Authority** that can differ from the default **Direct Child Authority Policy**.
+_Avoid_: Special case, bypass
+
 ## Relationships
 
 - A **Parent Agent Workflow** can start zero or more **Child Agent Workflows**.
 - A **Child Agent Workflow** belongs to exactly one **Parent Agent Workflow** when started through **MAS Command Interception**.
+- A **Parent Agent Workflow** directly controls only its direct **Child Agent Workflows**.
+- A **Descendant Agent Workflow** that is not a direct child is not treated as the parent's **Child Agent Workflow** under the current **Direct Child Control Boundary**.
+- The current MVP uses the **Direct Child Authority Policy** and does not include broader **Authority Grants**.
+- The **Root Agent Workflow** does not have special tree-wide **Coordination Authority** under the current **Direct Child Authority Policy**.
+- Future **Coordination Authority Models** may add broader **Authority Scopes** such as subtree-wide or tree-wide coordination.
 - A **Root Agent Workflow** owns one **Agent Workflow Tree**.
 - A **Descendant Agent Workflow** belongs to the same **Run Directory** as its **Root Agent Workflow**.
 - **Workflow Tree IDs** use the form `mas-<16hex>` for roots and append `-cNNN` segments for descendants.
 - A **Standalone MAS Command** issued inside an **Agent Workflow** is handled through **MAS Command Interception**.
 - An **External MAS CLI** command is used outside an **Agent Workflow** and does not itself imply a parent-child workflow relationship.
 - A **Remote Interactive Agent** waits for either a **Continuation Signal** or a **Close Signal** after producing a submission.
+- An **Interactive Root Agent Workflow** receives terminal user commands as agent actions and still follows the current **Coordination Authority Model**.
 - A **Close Signal** ends a **Remote Interactive Agent** without judging whether the child output was accepted or rejected.
 - A **Child Status Event** reports coarse lifecycle states such as `running`, `waiting_for_parent`, `closed`, `failed`, and `limits_exceeded`.
 - A **First Observable Event** is set when a **Child Agent Workflow** first reaches `waiting_for_parent`, `failed`, or `limits_exceeded`.
 - The MVP exposes lightweight child events such as `status`, `latest_submission`, and `latest_error`; full trajectory data remains outside DBOS events.
 - **Trajectory Artifacts** live under `.mini-mas/runs/<root-workflow-id>/trajectories/<workflow-id>.traj.json`.
 - `mini-mas status` and `mini-mas wait` return the exact **Trajectory Artifact** path and **Run Directory** for full history inspection.
+- `mini-mas status` without a workflow ID reports the current **Parent Agent Workflow**'s direct **Child Agent Workflows**, not the parent itself and not deeper descendants.
+- `mini-mas status <workflow-id>` inspects one direct **Child Agent Workflow** and respects the **Direct Child Control Boundary**.
+- `mini-mas wait`, `mini-mas continue`, and `mini-mas close` respect the **Direct Child Control Boundary** in the current MVP.
 - Full history search is performed with ordinary bash tools against **Trajectory Artifacts**, not with dedicated `mini-mas` history, logs, or grep commands.
 - `mini-mas spawn "task A" "task B"` starts one **Child Agent Workflow** per repeated task argument.
 - `mini-mas spawn` defaults to **Detached Spawn**.
@@ -150,9 +187,17 @@ _Avoid_: Bash serialization, command locking
 > **Dev:** "Where should a parent agent search for child history?"
 > **Domain expert:** "Use the exact Trajectory Artifact path returned by status or wait, scoped to the current Run Directory."
 
+> **Dev:** "Can a parent agent directly continue a grandchild agent?"
+> **Domain expert:** "No. Under the Direct Child Control Boundary, the child agent of my child agent is not my child agent."
+
+> **Dev:** "Does opening the MAS terminal give the user tree-wide control?"
+> **Domain expert:** "No. In the Interactive Root Agent Workflow model, terminal commands enter through the root agent, and the root agent follows the same Coordination Authority Model as any other Parent Agent Workflow."
+
 ## Flagged Ambiguities
 
 - "mini-mas command" can mean both an internal agent-issued command and the external shell command. Resolved: use **MAS Command** for the internal bash-level request and **External MAS CLI** for the real command run outside an **Agent Workflow**.
 - "close" can sound like acceptance or cancellation. Resolved: **Close Signal** is neutral and only means no further work is requested.
 - "serialize bash steps" can sound like **Workspace Isolation**. Resolved: global command serialization does not protect the full read-reason-write window across multiple agent turns.
 - "wait for a child handle" can sound like waiting for the final DBOS workflow result. Resolved: `mini-mas wait` waits for a **First Observable Event** for a child workflow identifier.
+- "descendant" can sound like it grants transitive control. Resolved: the current MVP follows the **Direct Child Control Boundary**; broader multi-level control models are future design space.
+- "role" can sound like a fixed RBAC role. Resolved: use **Coordination Authority Model**, **Coordination Authority**, **Authority Scope**, and **Authority Grant** for MAS coordination permissions.
