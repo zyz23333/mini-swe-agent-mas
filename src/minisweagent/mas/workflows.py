@@ -16,6 +16,7 @@ from minisweagent.mas.artifacts import (
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
 from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.status import (
+    FIRST_OBSERVABLE_EVENT_KEY,
     STATUS_EVENT_KEY,
     LifecycleState,
     format_specific_status,
@@ -27,6 +28,8 @@ from minisweagent.mas.status import (
 
 _dbos = load_dbos()
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
+PARENT_DIRECTION_TOPIC = "mini_mas_parent_direction"
+PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS = 60 * 60 * 24 * 30
 
 
 async def _maybe_await(value):
@@ -41,6 +44,7 @@ class AgentWorkflowState:
     cost: float = 0.0
     n_calls: int = 0
     spawn_count: int = 0
+    first_observable_published: bool = False
     spawned_child_workflow_ids: set[str] | None = None
 
 
@@ -64,6 +68,62 @@ async def _publish_status_snapshot(
     except Exception:
         if _dbos.DBOS.workflow_id is not None:
             raise
+
+
+async def _publish_first_observable_event(
+    *,
+    root_workflow_id: str,
+    workflow_id: str,
+    lifecycle_state: LifecycleState,
+    latest_submission: str = "",
+    latest_error: str = "",
+) -> dict[str, str]:
+    """Publish the one-time child event that parent wait operations synchronize on."""
+    snapshot = make_status_snapshot(
+        root_workflow_id=root_workflow_id,
+        workflow_id=workflow_id,
+        lifecycle_state=lifecycle_state,
+        latest_submission=latest_submission,
+        latest_error=latest_error,
+    )
+    event = snapshot.to_event()
+    try:
+        await _maybe_await(_dbos.DBOS.set_event_async(FIRST_OBSERVABLE_EVENT_KEY, event))
+    except Exception:
+        if _dbos.DBOS.workflow_id is not None:
+            raise
+    return event
+
+
+async def _publish_first_observable_event_once(
+    state: AgentWorkflowState,
+    *,
+    root_workflow_id: str,
+    workflow_id: str,
+    lifecycle_state: LifecycleState,
+    latest_submission: str = "",
+    latest_error: str = "",
+) -> dict[str, str] | None:
+    if state.first_observable_published:
+        return None
+    state.first_observable_published = True
+    return await _publish_first_observable_event(
+        root_workflow_id=root_workflow_id,
+        workflow_id=workflow_id,
+        lifecycle_state=lifecycle_state,
+        latest_submission=latest_submission,
+        latest_error=latest_error,
+    )
+
+
+async def _wait_for_parent_direction_signal() -> dict | str:
+    """Keep the child workflow waiting until the parent sends an actual direction signal."""
+    while True:
+        signal = await _maybe_await(
+            _dbos.DBOS.recv_async(PARENT_DIRECTION_TOPIC, timeout_seconds=PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS)
+        )
+        if signal is not None:
+            return signal
 
 
 def _format_detached_spawn_output(metadata: dict[str, str], task: str) -> str:
@@ -318,6 +378,12 @@ def _terminal_result(*, root_workflow_id: str, workflow_id: str, terminal_messag
     }
 
 
+def _latest_error_for_terminal(terminal_state: str, terminal_message: dict) -> str:
+    if _lifecycle_state_for_terminal(terminal_state) != "failed":
+        return ""
+    return terminal_message.get("content", "")
+
+
 def _lifecycle_state_for_terminal(terminal_state: str) -> LifecycleState:
     if terminal_state == "limits_exceeded":
         return "limits_exceeded"
@@ -473,13 +539,59 @@ async def _run_agent_workflow(
         terminal_message=state.messages[-1],
         state=state,
     )
+    lifecycle_state = _lifecycle_state_for_terminal(result["terminal_state"])
+    latest_error = _latest_error_for_terminal(result["terminal_state"], state.messages[-1])
+
+    if workflow_id != root_workflow_id and result["terminal_state"] == "Submitted":
+        waiting_result = {
+            **result,
+            "status": "waiting_for_parent",
+            "terminal_state": "waiting_for_parent",
+            "latest_submission": result["submission"],
+        }
+        await _publish_status_snapshot(
+            root_workflow_id=root_workflow_id,
+            workflow_id=workflow_id,
+            lifecycle_state="waiting_for_parent",
+            latest_submission=result["submission"],
+        )
+        await _publish_first_observable_event_once(
+            state,
+            root_workflow_id=root_workflow_id,
+            workflow_id=workflow_id,
+            lifecycle_state="waiting_for_parent",
+            latest_submission=result["submission"],
+        )
+        await _maybe_await(
+            save_child_trajectory_artifact_step(
+                root_workflow_id,
+                workflow_id,
+                status="waiting_for_parent",
+                messages=state.messages,
+                model_stats=result["model_stats"],
+                submission=result["submission"],
+            )
+        )
+        # This receive is intentionally in async workflow code, not a DBOS step.
+        waiting_result["parent_direction_signal"] = await _wait_for_parent_direction_signal()
+        return waiting_result
+
     await _publish_status_snapshot(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
-        lifecycle_state=_lifecycle_state_for_terminal(result["terminal_state"]),
+        lifecycle_state=lifecycle_state,
         latest_submission=result["submission"],
-        latest_error="" if result["terminal_state"] != "failed" else state.messages[-1].get("content", ""),
+        latest_error=latest_error,
     )
+    if workflow_id != root_workflow_id and lifecycle_state in {"failed", "limits_exceeded"}:
+        await _publish_first_observable_event_once(
+            state,
+            root_workflow_id=root_workflow_id,
+            workflow_id=workflow_id,
+            lifecycle_state=lifecycle_state,
+            latest_submission=result["submission"],
+            latest_error=latest_error,
+        )
     if workflow_id == root_workflow_id:
         await _maybe_await(
             save_root_trajectory_artifact_step(

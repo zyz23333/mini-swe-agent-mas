@@ -50,7 +50,9 @@ def _observation_text(message: dict) -> str:
 
 
 def _call_root_agent_workflow(workflow_func, *args, **kwargs):
-    return asyncio.run(getattr(workflow_func, "__wrapped__", workflow_func)(*args, **kwargs))
+    while hasattr(workflow_func, "__wrapped__"):
+        workflow_func = workflow_func.__wrapped__
+    return asyncio.run(workflow_func(*args, **kwargs))
 
 
 def _recording_child_queue():
@@ -700,6 +702,164 @@ def test_agent_workflow_publishes_failed_status(monkeypatch, tmp_path):
 
     assert published[-1]["lifecycle_state"] == "failed"
     assert published[-1]["latest_error"] == "model failed"
+
+
+def test_child_workflow_waits_after_first_submission_and_sets_first_observable_event(monkeypatch, tmp_path):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.exceptions import Submitted
+    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    received = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        received.append((topic, timeout_seconds))
+        return {"type": "close"}
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "recv",
+        Mock(side_effect=AssertionError("Child waiting must use recv_async")),
+    )
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send_async",
+        Mock(side_effect=AssertionError("Child status must not use child-to-parent send")),
+    )
+
+    model = DeterministicModel(outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.side_effect = Submitted(
+        {
+            "role": "exit",
+            "content": "child done",
+            "extra": {"exit_status": "Submitted", "submission": "child done"},
+        }
+    )
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "submit once",
+        model=model,
+        env=env,
+        step_limit=3,
+    )
+
+    assert result["terminal_state"] == "waiting_for_parent"
+    assert result["latest_submission"] == "child done"
+    assert received == [(workflows.PARENT_DIRECTION_TOPIC, workflows.PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS)]
+    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in status_events] == ["running", "waiting_for_parent"]
+    waiting_event = status_events[-1]
+    assert waiting_event["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert waiting_event["latest_submission"] == "child done"
+    assert (
+        waiting_event["trajectory_artifact_path"]
+        == ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+    )
+    first_observable_events = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    assert first_observable_events == [waiting_event]
+
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    assert artifact["info"]["exit_status"] == "waiting_for_parent"
+    assert artifact["info"]["submission"] == "child done"
+    assert artifact["messages"][-1]["extra"] == {"exit_status": "Submitted", "submission": "child done"}
+
+
+def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monkeypatch, tmp_path):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.exceptions import InterruptAgentFlow
+    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "recv_async",
+        Mock(side_effect=AssertionError("Failed or limited child should not wait for parent direction")),
+    )
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    async def failing_model(_model, _messages):
+        raise InterruptAgentFlow(
+            {
+                "role": "exit",
+                "content": "model failed",
+                "extra": {"exit_status": "failed", "submission": ""},
+            }
+        )
+
+    monkeypatch.setattr(workflows, "query_model_step", failing_model)
+
+    _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "fail",
+        model=model,
+        env=env,
+        step_limit=3,
+    )
+
+    first_observable = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    assert first_observable == [
+        {
+            "root_workflow_id": "mas-0123456789abcdef",
+            "workflow_id": "mas-0123456789abcdef-c001",
+            "workflow_tree_id": "mas-0123456789abcdef-c001",
+            "lifecycle_state": "failed",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+            "latest_error": "model failed",
+        }
+    ]
+
+    published.clear()
+
+    async def replay_model_response(_model, _messages):
+        return make_output("work", [{"command": "echo hi"}], cost=0.1)
+
+    monkeypatch.setattr(workflows, "query_model_step", replay_model_response)
+    monkeypatch.setattr(
+        workflows,
+        "execute_bash_step",
+        lambda _env, _action: {"output": "hi\n", "returncode": 0, "exception_info": ""},
+    )
+
+    _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c002",
+        "hit limit",
+        model=model,
+        env=env,
+        step_limit=1,
+    )
+
+    first_observable = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    assert first_observable[-1]["workflow_id"] == "mas-0123456789abcdef-c002"
+    assert first_observable[-1]["lifecycle_state"] == "limits_exceeded"
 
 
 def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
