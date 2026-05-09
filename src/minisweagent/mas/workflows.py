@@ -15,6 +15,7 @@ from minisweagent.mas.artifacts import (
 )
 from minisweagent.mas.authority import DirectChildAuthorityPolicy
 from minisweagent.mas.command_dispatch import MasCommandHandler
+from minisweagent.mas.command_results import MasCommandResultFormatter
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
 from minisweagent.mas.coordination import ChildCoordinator, DBOSCoordinationAdapter
 from minisweagent.mas.remote_lifecycle import (
@@ -121,35 +122,6 @@ async def _wait_for_parent_direction_signal() -> dict | str:
             return signal
 
 
-def _format_continue_output(*, target_workflow_id: str, content: str, snapshot: dict[str, Any]) -> str:
-    lines = [
-        "Continuation signal sent",
-        f"workflow_id: {target_workflow_id}",
-        f"lifecycle_state: {snapshot['lifecycle_state']}",
-        f"message: {content}",
-        f"run_directory: {snapshot['run_directory']}",
-        f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
-    ]
-    return "\n".join(lines) + "\n"
-
-
-def _format_close_output(*, target_workflow_id: str, snapshot: dict[str, Any]) -> str:
-    lines = [
-        "Close signal sent",
-        f"workflow_id: {target_workflow_id}",
-        f"lifecycle_state: {snapshot['lifecycle_state']}",
-    ]
-    if snapshot.get("latest_submission"):
-        lines.append(f"latest_submission: {snapshot['latest_submission']}")
-    lines.extend(
-        [
-            f"run_directory: {snapshot['run_directory']}",
-            f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
-        ]
-    )
-    return "\n".join(lines) + "\n"
-
-
 async def send_continuation_signal_async(
     *,
     source_workflow_id: str,
@@ -168,22 +140,15 @@ async def send_continuation_signal_async(
         signal=signal,
         topic=PARENT_DIRECTION_TOPIC,
     )
-    return {
-        "ok": True,
-        "output": _format_continue_output(
-            target_workflow_id=target_workflow_id,
-            content=content,
-            snapshot=target_status,
-        ),
-        "returncode": 0,
-        "exception_info": "",
-        "extra": {
-            "mas_command": ["continue", target_workflow_id, content],
-            "continued_workflow_id": target_workflow_id,
-            "continuation_signal": signal,
-            "target_status": target_status,
-        },
-    }
+    result = MasCommandResultFormatter().continuation_sent(
+        mas_command=["continue", target_workflow_id, content],
+        target_workflow_id=target_workflow_id,
+        content=content,
+        target_status=target_status,
+        signal=signal,
+    )
+    result["ok"] = True
+    return result
 
 
 async def send_close_signal_async(
@@ -202,21 +167,14 @@ async def send_close_signal_async(
         signal=signal,
         topic=PARENT_DIRECTION_TOPIC,
     )
-    return {
-        "ok": True,
-        "output": _format_close_output(
-            target_workflow_id=target_workflow_id,
-            snapshot=target_status,
-        ),
-        "returncode": 0,
-        "exception_info": "",
-        "extra": {
-            "mas_command": ["close", target_workflow_id],
-            "closed_workflow_id": target_workflow_id,
-            "close_signal": signal,
-            "target_status": target_status,
-        },
-    }
+    result = MasCommandResultFormatter().close_sent(
+        mas_command=["close", target_workflow_id],
+        target_workflow_id=target_workflow_id,
+        target_status=target_status,
+        signal=signal,
+    )
+    result["ok"] = True
+    return result
 
 
 async def _query_direct_child_statuses(parent_workflow_id: str) -> list[dict[str, Any]]:

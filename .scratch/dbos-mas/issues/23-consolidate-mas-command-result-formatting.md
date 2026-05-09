@@ -1,6 +1,6 @@
 # Consolidate MAS command result formatting
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 Type: AFK
 
@@ -20,12 +20,12 @@ The formatting **Module** should preserve existing output compatibility while ma
 
 ## Acceptance criteria
 
-- [ ] `status` output still includes direct child workflow ID, lifecycle state, latest submission or error when present, run directory, and trajectory artifact path.
-- [ ] `spawn` output still includes started child metadata and waited-spawn summaries.
-- [ ] `wait` output still includes wait mode, ready children, still-running child workflow IDs, run directory, and trajectory artifact paths.
-- [ ] `continue` and `close` outputs still include target workflow metadata and signal result details.
-- [ ] Error results still include stable return code, exception info, and `mas_command_error` extras.
-- [ ] Existing CLI and workflow command output tests pass.
+- [x] `status` output still includes direct child workflow ID, lifecycle state, latest submission or error when present, run directory, and trajectory artifact path.
+- [x] `spawn` output still includes started child metadata and waited-spawn summaries.
+- [x] `wait` output still includes wait mode, ready children, still-running child workflow IDs, run directory, and trajectory artifact paths.
+- [x] `continue` and `close` outputs still include target workflow metadata and signal result details.
+- [x] Error results still include stable return code, exception info, and `mas_command_error` extras.
+- [x] Existing CLI and workflow command output tests pass.
 
 ## Blocked by
 
@@ -67,15 +67,15 @@ The formatting **Module** should preserve existing output compatibility while ma
 > - Parent-direction signal senders - should preserve continuation and close signal behavior while aligning their returned command result shape with the shared formatting path.
 >
 > **Acceptance criteria:**
-> - [ ] `status` result output still includes direct child workflow ID, lifecycle state, latest submission or latest error when present, run directory, and trajectory artifact path.
-> - [ ] `spawn` result output still includes started child metadata for detached spawn and waited-spawn summaries for waited spawn.
-> - [ ] `wait` result output still includes wait mode, ready children, still-running child workflow IDs, run directory, and trajectory artifact paths.
-> - [ ] `continue` result output still includes target workflow metadata and continuation signal result details.
-> - [ ] `close` result output still includes target workflow metadata and close signal result details.
-> - [ ] Command argument errors, missing Agent Workflow context errors, Direct Child Authority Policy errors, and external/operator coordination errors continue to include stable `returncode`, `exception_info`, and `mas_command_error` extras.
-> - [ ] Command-specific success extras remain compatible with existing workflow logic, including `spawned_child_count`, child workflow identifiers, ready child snapshots, still-running child workflow IDs, target status snapshots, continuation signal data, and close signal data.
-> - [ ] The formatting interface has focused tests that verify success and error result shapes without requiring a full DBOS workflow run.
-> - [ ] Existing CLI and workflow command output tests pass without weakening assertions.
+> - [x] `status` result output still includes direct child workflow ID, lifecycle state, latest submission or latest error when present, run directory, and trajectory artifact path.
+> - [x] `spawn` result output still includes started child metadata for detached spawn and waited-spawn summaries for waited spawn.
+> - [x] `wait` result output still includes wait mode, ready children, still-running child workflow IDs, run directory, and trajectory artifact paths.
+> - [x] `continue` result output still includes target workflow metadata and continuation signal result details.
+> - [x] `close` result output still includes target workflow metadata and close signal result details.
+> - [x] Command argument errors, missing Agent Workflow context errors, Direct Child Authority Policy errors, and external/operator coordination errors continue to include stable `returncode`, `exception_info`, and `mas_command_error` extras.
+> - [x] Command-specific success extras remain compatible with existing workflow logic, including `spawned_child_count`, child workflow identifiers, ready child snapshots, still-running child workflow IDs, target status snapshots, continuation signal data, and close signal data.
+> - [x] The formatting interface has focused tests that verify success and error result shapes without requiring a full DBOS workflow run.
+> - [x] Existing CLI and workflow command output tests pass without weakening assertions.
 >
 > **Out of scope:**
 > - Changing MAS command syntax or adding command fallbacks.
@@ -85,3 +85,20 @@ The formatting **Module** should preserve existing output compatibility while ma
 > - Changing child spawn, wait, First Observable Event, Child Status Event, Continuation Signal, or Close Signal semantics.
 > - Renaming the main Agent Workflow module or broadening this slice into the larger Agent Workflow refactor.
 > - Adding new external/operator `status`, `wait`, `continue`, or `close` behavior.
+
+> *This was generated by AI during execution.*
+>
+> Implemented the MAS command result formatting module:
+> - Added `src/minisweagent/mas/command_results.py` with `MasCommandResultFormatter`, which owns model-visible MAS command result dictionaries containing `output`, `returncode`, `exception_info`, and `extra`.
+> - Updated `MasCommandHandler` so `status`, `spawn`, `wait`, argument errors, missing Agent Workflow context errors, and Direct Child Authority Policy errors delegate observation result construction to the formatter while preserving command parsing and domain coordination boundaries.
+> - Updated continuation and close signal senders so they keep constructing and sending parent-direction signals, but use the shared formatter for target metadata, signal details, and success extras.
+> - Added a focused formatter test covering waited-spawn success shape, continuation and close signal result shapes, and stable error result shape without requiring a DBOS workflow run.
+>
+> Verification:
+> - `uv run --python 3.11 pytest tests/run/test_mini_mas.py::test_mas_command_result_formatter_owns_success_and_error_shapes -q` first failed as expected because `minisweagent.mas.command_results` did not exist, then passed after implementation.
+> - `uv run --python 3.11 pytest tests/run/test_mini_mas.py::test_child_coordinator_owns_spawn_and_wait_domain_behavior tests/run/test_mini_mas.py::test_explicit_parent_direction_commands_share_authority_policy_path tests/run/test_mini_mas.py::test_workflow_continue_sends_parent_to_child_continuation_signal tests/run/test_mini_mas.py::test_workflow_close_sends_parent_to_child_neutral_close_signal -q` passed: 4 passed.
+> - `uv run --python 3.11 pytest tests/run/test_mini_mas.py -q` passed: 99 passed.
+> - `uv run --python 3.11 --extra dev ruff check src/minisweagent/mas tests/run/test_mini_mas.py` passed.
+> - `uv run --python 3.11 pytest tests -q` passed: 618 passed, 33 skipped, 1 warning.
+> - `git diff --check` passed.
+> - `make lint`, `make test-backend`, and `make test-frontend` were attempted, but this checkout has no corresponding make targets.
