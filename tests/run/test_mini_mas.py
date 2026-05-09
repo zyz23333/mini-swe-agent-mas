@@ -509,6 +509,99 @@ def test_mas_command_handler_accepts_classified_standalone_command():
     }
 
 
+def test_dbos_coordination_adapter_owns_status_first_observable_wait_and_messages(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.mas.coordination import DBOSCoordinationAdapter
+    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
+
+    dbos_api = Mock()
+    published = []
+    received = []
+    sent = []
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        assert workflow_id == "mas-0123456789abcdef-c001"
+        assert key == FIRST_OBSERVABLE_EVENT_KEY
+        assert timeout_seconds == 0.25
+        return {
+            "workflow_id": workflow_id,
+            "lifecycle_state": "waiting_for_parent",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+        }
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        received.append((topic, timeout_seconds))
+        return {"type": "close"}
+
+    async def send_async(destination_id, message, topic=None):
+        sent.append((destination_id, message, topic))
+
+    dbos_api.workflow_id = "mas-0123456789abcdef"
+    dbos_api.set_event_async = Mock(side_effect=set_event_async)
+    dbos_api.get_event_async = Mock(side_effect=get_event_async)
+    dbos_api.asyncio_wait = Mock(wraps=asyncio.wait)
+    dbos_api.recv_async = Mock(side_effect=recv_async)
+    dbos_api.send_async = Mock(side_effect=send_async)
+    dbos_api.set_event = Mock(side_effect=AssertionError("Adapter must use async status/event publication"))
+    dbos_api.recv = Mock(side_effect=AssertionError("Adapter must use async message receive"))
+    dbos_api.send = Mock(side_effect=AssertionError("Adapter must use async message send"))
+
+    adapter = DBOSCoordinationAdapter(
+        dbos_api=dbos_api,
+        child_agent_queue=Mock(),
+        set_workflow_id=lambda _workflow_id: patch("builtins.id"),
+        child_agent_workflow=workflows.child_agent_workflow,
+    )
+
+    assert adapter.current_agent_workflow_id() == "mas-0123456789abcdef"
+    asyncio.run(
+        adapter.publish_status(
+            root_workflow_id="mas-0123456789abcdef",
+            workflow_id="mas-0123456789abcdef",
+            lifecycle_state="waiting_for_child",
+        )
+    )
+    asyncio.run(
+        adapter.publish_first_observable(
+            root_workflow_id="mas-0123456789abcdef",
+            workflow_id="mas-0123456789abcdef-c001",
+            lifecycle_state="waiting_for_parent",
+        )
+    )
+    ready, still_running, timed_out = asyncio.run(
+        adapter.wait_for_first_observable_events(
+            child_workflow_ids=["mas-0123456789abcdef-c001"],
+            wait_all=False,
+            timeout_seconds=0.25,
+        )
+    )
+    signal = asyncio.run(adapter.receive_parent_direction(topic=workflows.PARENT_DIRECTION_TOPIC, timeout_seconds=3))
+    asyncio.run(
+        adapter.send_parent_direction(
+            target_workflow_id="mas-0123456789abcdef-c001",
+            signal={"type": "close"},
+            topic=workflows.PARENT_DIRECTION_TOPIC,
+        )
+    )
+
+    assert [(key, value["lifecycle_state"]) for key, value in published] == [
+        (STATUS_EVENT_KEY, "waiting_for_child"),
+        (FIRST_OBSERVABLE_EVENT_KEY, "waiting_for_parent"),
+    ]
+    assert ready[0]["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert still_running == []
+    assert timed_out is False
+    assert signal == {"type": "close"}
+    assert received == [(workflows.PARENT_DIRECTION_TOPIC, 3)]
+    assert sent == [("mas-0123456789abcdef-c001", {"type": "close"}, workflows.PARENT_DIRECTION_TOPIC)]
+
+
 def test_explicit_parent_direction_commands_share_authority_policy_path():
     from minisweagent.mas.command_dispatch import MasCommandHandler
     from minisweagent.mas.commands import classify_mas_command

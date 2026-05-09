@@ -17,16 +17,9 @@ from minisweagent.mas.artifacts import (
 from minisweagent.mas.authority import DirectChildAuthorityPolicy
 from minisweagent.mas.command_dispatch import MasCommandHandler
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
+from minisweagent.mas.coordination import DBOSCoordinationAdapter
 from minisweagent.mas.runtime import load_dbos
-from minisweagent.mas.status import (
-    FIRST_OBSERVABLE_EVENT_KEY,
-    STATUS_EVENT_KEY,
-    LifecycleState,
-    make_status_snapshot,
-    query_direct_child_status_async,
-    query_direct_child_statuses_async,
-    root_id_for_workflow,
-)
+from minisweagent.mas.status import LifecycleState
 
 _dbos = load_dbos()
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
@@ -39,9 +32,16 @@ async def _maybe_await(value):
 
 
 def _current_agent_workflow_id() -> str | None:
-    """Return the current DBOS workflow ID only when DBOS exposes a real workflow context."""
-    workflow_id = _dbos.DBOS.workflow_id
-    return workflow_id if isinstance(workflow_id, str) else None
+    return _coordination_adapter().current_agent_workflow_id()
+
+
+def _coordination_adapter() -> DBOSCoordinationAdapter:
+    return DBOSCoordinationAdapter(
+        dbos_api=_dbos.DBOS,
+        child_agent_queue=child_agent_queue,
+        set_workflow_id=_dbos.SetWorkflowID,
+        child_agent_workflow=child_agent_workflow,
+    )
 
 
 @dataclass
@@ -64,18 +64,13 @@ async def _publish_status_snapshot(
     latest_submission: str = "",
     latest_error: str = "",
 ) -> None:
-    snapshot = make_status_snapshot(
+    await _coordination_adapter().publish_status(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         lifecycle_state=lifecycle_state,
         latest_submission=latest_submission,
         latest_error=latest_error,
     )
-    try:
-        await _maybe_await(_dbos.DBOS.set_event_async(STATUS_EVENT_KEY, snapshot.to_event()))
-    except Exception:
-        if _dbos.DBOS.workflow_id is not None:
-            raise
 
 
 async def _publish_first_observable_event(
@@ -86,21 +81,13 @@ async def _publish_first_observable_event(
     latest_submission: str = "",
     latest_error: str = "",
 ) -> dict[str, str]:
-    """Publish the one-time child event that parent wait operations synchronize on."""
-    snapshot = make_status_snapshot(
+    return await _coordination_adapter().publish_first_observable(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         lifecycle_state=lifecycle_state,
         latest_submission=latest_submission,
         latest_error=latest_error,
     )
-    event = snapshot.to_event()
-    try:
-        await _maybe_await(_dbos.DBOS.set_event_async(FIRST_OBSERVABLE_EVENT_KEY, event))
-    except Exception:
-        if _dbos.DBOS.workflow_id is not None:
-            raise
-    return event
 
 
 async def _publish_first_observable_event_once(
@@ -127,15 +114,12 @@ async def _publish_first_observable_event_once(
 async def _wait_for_parent_direction_signal() -> dict | str:
     """Keep the child workflow waiting until the parent sends an actual direction signal."""
     while True:
-        signal = await _maybe_await(
-            _dbos.DBOS.recv_async(PARENT_DIRECTION_TOPIC, timeout_seconds=PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS)
+        signal = await _coordination_adapter().receive_parent_direction(
+            topic=PARENT_DIRECTION_TOPIC,
+            timeout_seconds=PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
         )
         if signal is not None:
             return signal
-
-
-def _snapshot_workflow_id(snapshot: dict[str, Any]) -> str:
-    return str(snapshot.get("workflow_id", ""))
 
 
 def _next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
@@ -146,8 +130,11 @@ def _next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
 
 
 async def _enqueue_child_agent_workflow(*, root_workflow_id: str, child_workflow_id: str, task: str) -> None:
-    with _dbos.SetWorkflowID(child_workflow_id):
-        await child_agent_queue.enqueue_async(child_agent_workflow, root_workflow_id, child_workflow_id, task)
+    await _coordination_adapter().enqueue_child_agent_workflow(
+        root_workflow_id=root_workflow_id,
+        child_workflow_id=child_workflow_id,
+        task=task,
+    )
 
 
 async def _spawn_detached_child(
@@ -197,8 +184,7 @@ async def _spawn_detached_children(
 
 
 async def _wait_for_first_observable_event(workflow_id: str, timeout_seconds: float) -> dict[str, Any] | None:
-    event = await _maybe_await(_dbos.DBOS.get_event_async(workflow_id, FIRST_OBSERVABLE_EVENT_KEY, timeout_seconds))
-    return event if isinstance(event, dict) else None
+    return await _coordination_adapter().wait_for_first_observable_event(workflow_id, timeout_seconds)
 
 
 async def _wait_for_first_observable_events(
@@ -207,31 +193,11 @@ async def _wait_for_first_observable_events(
     wait_all: bool,
     timeout_seconds: float | None,
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
-    if not child_workflow_ids:
-        return [], [], False
-
-    per_child_timeout = timeout_seconds if timeout_seconds is not None else 60
-    waits = [
-        asyncio.create_task(_wait_for_first_observable_event(workflow_id, per_child_timeout))
-        for workflow_id in child_workflow_ids
-    ]
-    done, pending = await _maybe_await(
-        _dbos.DBOS.asyncio_wait(
-            waits,
-            timeout=timeout_seconds,
-            return_when=asyncio.ALL_COMPLETED if wait_all else asyncio.FIRST_COMPLETED,
-        )
+    return await _coordination_adapter().wait_for_first_observable_events(
+        child_workflow_ids=child_workflow_ids,
+        wait_all=wait_all,
+        timeout_seconds=timeout_seconds,
     )
-
-    ready_snapshots = [task.result() for task in done if task.result() is not None]
-    ready_ids = {_snapshot_workflow_id(snapshot) for snapshot in ready_snapshots}
-    still_running_ids = [workflow_id for workflow_id in child_workflow_ids if workflow_id not in ready_ids]
-    timed_out = not ready_snapshots or (wait_all and len(ready_snapshots) < len(child_workflow_ids))
-
-    for pending_task in pending:
-        pending_task.cancel()
-
-    return sorted(ready_snapshots, key=_snapshot_workflow_id), still_running_ids, timed_out
 
 
 async def _wait_for_direct_child_first_observable_events_with_status(
@@ -241,40 +207,16 @@ async def _wait_for_direct_child_first_observable_events_with_status(
     wait_all: bool,
     timeout_seconds: float | None,
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
-    """Publish the parent's transient child-wait status around First Observable Event waiting."""
-    root_workflow_id = root_id_for_workflow(parent_workflow_id)
-    await _publish_status_snapshot(
-        root_workflow_id=root_workflow_id,
-        workflow_id=parent_workflow_id,
-        lifecycle_state="waiting_for_child",
+    return await _coordination_adapter().wait_for_direct_child_first_observable_events(
+        parent_workflow_id=parent_workflow_id,
+        child_workflow_ids=child_workflow_ids,
+        wait_all=wait_all,
+        timeout_seconds=timeout_seconds,
     )
-    try:
-        return await _wait_for_first_observable_events(
-            child_workflow_ids=child_workflow_ids,
-            wait_all=wait_all,
-            timeout_seconds=timeout_seconds,
-        )
-    finally:
-        await _publish_status_snapshot(
-            root_workflow_id=root_workflow_id,
-            workflow_id=parent_workflow_id,
-            lifecycle_state="running",
-        )
-
-
-def _child_metadata_from_status(snapshot: dict[str, Any]) -> dict[str, str]:
-    return {
-        "task": "",
-        "root_workflow_id": str(snapshot["root_workflow_id"]),
-        "workflow_id": str(snapshot["workflow_id"]),
-        "run_directory": str(snapshot["run_directory"]),
-        "trajectory_artifact_path": str(snapshot["trajectory_artifact_path"]),
-    }
 
 
 async def _direct_child_metadata(*, parent_workflow_id: str) -> list[dict[str, str]]:
-    snapshots = await query_direct_child_statuses_async(_dbos.DBOS, parent_workflow_id)
-    return sorted((_child_metadata_from_status(snapshot) for snapshot in snapshots), key=lambda child: child["workflow_id"])
+    return await _coordination_adapter().direct_child_metadata(parent_workflow_id=parent_workflow_id)
 
 
 def make_continuation_signal(*, source_workflow_id: str, target_workflow_id: str, content: str) -> dict[str, str]:
@@ -340,7 +282,11 @@ async def send_continuation_signal_async(
         target_workflow_id=target_workflow_id,
         content=content,
     )
-    await _maybe_await(_dbos.DBOS.send_async(target_workflow_id, signal, PARENT_DIRECTION_TOPIC))
+    await _coordination_adapter().send_parent_direction(
+        target_workflow_id=target_workflow_id,
+        signal=signal,
+        topic=PARENT_DIRECTION_TOPIC,
+    )
     return {
         "ok": True,
         "output": _format_continue_output(
@@ -370,7 +316,11 @@ async def send_close_signal_async(
         source_workflow_id=source_workflow_id,
         target_workflow_id=target_workflow_id,
     )
-    await _maybe_await(_dbos.DBOS.send_async(target_workflow_id, signal, PARENT_DIRECTION_TOPIC))
+    await _coordination_adapter().send_parent_direction(
+        target_workflow_id=target_workflow_id,
+        signal=signal,
+        topic=PARENT_DIRECTION_TOPIC,
+    )
     return {
         "ok": True,
         "output": _format_close_output(
@@ -389,12 +339,11 @@ async def send_close_signal_async(
 
 
 async def _query_direct_child_statuses(parent_workflow_id: str) -> list[dict[str, Any]]:
-    return await query_direct_child_statuses_async(_dbos.DBOS, parent_workflow_id)
+    return await _coordination_adapter().query_direct_child_statuses(parent_workflow_id)
 
 
 async def _query_direct_child_status(parent_workflow_id: str, child_workflow_id: str) -> dict[str, Any] | None:
-    return await query_direct_child_status_async(
-        _dbos.DBOS,
+    return await _coordination_adapter().query_direct_child_status(
         parent_workflow_id=parent_workflow_id,
         child_workflow_id=child_workflow_id,
     )
