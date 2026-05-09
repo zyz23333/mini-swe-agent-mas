@@ -134,6 +134,7 @@ _Avoid_: Special case, bypass
 - **Workflow Tree IDs** use the form `mas-<16hex>` for roots and append `-cNNN` segments for descendants.
 - A **Standalone MAS Command** issued inside an **Agent Workflow** is handled through **MAS Command Interception**.
 - An **External MAS CLI** command is used outside an **Agent Workflow** and does not itself imply a parent-child workflow relationship.
+- Naked external/operator `status`, `wait`, `continue`, and `close` commands are not maintained as coordination authority paths in the current design.
 - A **Remote Interactive Agent** waits for either a **Continuation Signal** or a **Close Signal** after producing a submission.
 - An **Interactive Root Agent Workflow** receives terminal user commands as agent actions and still follows the current **Coordination Authority Model**.
 - A **Close Signal** ends a **Remote Interactive Agent** without judging whether the child output was accepted or rejected.
@@ -142,8 +143,13 @@ _Avoid_: Special case, bypass
 - The MVP exposes lightweight child events such as `status`, `latest_submission`, and `latest_error`; full trajectory data remains outside DBOS events.
 - **Trajectory Artifacts** live under `.mini-mas/runs/<root-workflow-id>/trajectories/<workflow-id>.traj.json`.
 - `mini-mas status` and `mini-mas wait` return the exact **Trajectory Artifact** path and **Run Directory** for full history inspection.
+- Workflow-layer `mini-mas status`, `mini-mas wait`, `mini-mas continue`, and `mini-mas close` derive the current **Parent Agent Workflow** from `DBOS.workflow_id`.
+- Direct child scope is resolved from DBOS workflow metadata where `parent_workflow_id == DBOS.workflow_id`.
+- `root_workflow_id` is derived for artifact paths and display; it is not a status, wait, or control scope input.
 - `mini-mas status` without a workflow ID reports the current **Parent Agent Workflow**'s direct **Child Agent Workflows**, not the parent itself and not deeper descendants.
 - `mini-mas status <workflow-id>` inspects one direct **Child Agent Workflow** and respects the **Direct Child Control Boundary**.
+- `mini-mas wait <workflow-id>` waits for one direct **Child Agent Workflow** and respects the **Direct Child Control Boundary**.
+- Explicit workflow IDs in `status <workflow-id>`, `wait <workflow-id>`, `continue <workflow-id>`, and `close <workflow-id>` are target identifiers, not scope overrides.
 - `mini-mas wait`, `mini-mas continue`, and `mini-mas close` respect the **Direct Child Control Boundary** in the current MVP.
 - Full history search is performed with ordinary bash tools against **Trajectory Artifacts**, not with dedicated `mini-mas` history, logs, or grep commands.
 - `mini-mas spawn "task A" "task B"` starts one **Child Agent Workflow** per repeated task argument.
@@ -190,6 +196,9 @@ _Avoid_: Special case, bypass
 > **Dev:** "Can a parent agent directly continue a grandchild agent?"
 > **Domain expert:** "No. Under the Direct Child Control Boundary, the child agent of my child agent is not my child agent."
 
+> **Dev:** "Can `mini-mas wait <workflow-id>` wait for a grandchild if I know the ID?"
+> **Domain expert:** "No. The explicit workflow ID is only a target. The scope still comes from the current DBOS workflow context, so the target must be a direct child."
+
 > **Dev:** "Does opening the MAS terminal give the user tree-wide control?"
 > **Domain expert:** "No. In the Interactive Root Agent Workflow model, terminal commands enter through the root agent, and the root agent follows the same Coordination Authority Model as any other Parent Agent Workflow."
 
@@ -201,3 +210,5 @@ _Avoid_: Special case, bypass
 - "wait for a child handle" can sound like waiting for the final DBOS workflow result. Resolved: `mini-mas wait` waits for a **First Observable Event** for a child workflow identifier.
 - "descendant" can sound like it grants transitive control. Resolved: the current MVP follows the **Direct Child Control Boundary**; broader multi-level control models are future design space.
 - "role" can sound like a fixed RBAC role. Resolved: use **Coordination Authority Model**, **Coordination Authority**, **Authority Scope**, and **Authority Grant** for MAS coordination permissions.
+- "explicit workflow ID" can sound like a scope override. Resolved: explicit IDs in workflow-layer commands identify a target only; authority still comes from `DBOS.workflow_id` and DBOS `parent_workflow_id` metadata.
+- "external CLI" can sound like operator superuser access. Resolved: naked external/operator query and control paths are not maintained in the current design; future terminal control should enter through an **Interactive Root Agent Workflow**.
