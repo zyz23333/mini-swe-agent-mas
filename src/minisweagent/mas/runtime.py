@@ -200,3 +200,53 @@ def wait_for_agent_workflow(
             system_database_url=system_database_url,
         )
     )
+
+
+def parent_id_for_workflow(workflow_id: str) -> str:
+    """Return the encoded immediate parent Workflow Tree ID for a descendant."""
+    workflow_id = validate_workflow_id(workflow_id)
+    parent_id, separator, _child_suffix = workflow_id.rpartition("-c")
+    if not separator:
+        return root_id_for_workflow(workflow_id)
+    return validate_workflow_id(parent_id)
+
+
+async def _continue_agent_workflow_async(
+    *,
+    workflow_id: str,
+    message: str,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Async implementation for external parent-to-child continuation signaling."""
+    dbos_module = load_dbos()
+    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+
+    from minisweagent.mas import workflows
+
+    dbos_module.DBOS.launch()
+
+    workflow_id = validate_workflow_id(workflow_id)
+    root_workflow_id = root_id_for_workflow(workflow_id)
+    source_workflow_id = parent_id_for_workflow(workflow_id)
+    return await workflows.send_continuation_signal_async(
+        root_workflow_id=root_workflow_id,
+        source_workflow_id=source_workflow_id,
+        target_workflow_id=workflow_id,
+        content=message,
+    )
+
+
+def continue_agent_workflow(
+    *,
+    workflow_id: str,
+    message: str,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Initialize DBOS and send a continuation signal to one waiting Child Agent Workflow."""
+    return asyncio.run(
+        _continue_agent_workflow_async(
+            workflow_id=workflow_id,
+            message=message,
+            system_database_url=system_database_url,
+        )
+    )

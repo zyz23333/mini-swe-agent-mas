@@ -1582,6 +1582,377 @@ def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monk
     assert "still_running_child_workflow_ids: mas-0123456789abcdef-c001" in text
 
 
+def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
+        assert root_workflow_id == "mas-0123456789abcdef"
+        assert workflow_id == "mas-0123456789abcdef-c001"
+        return {
+            "workflow_id": workflow_id,
+            "root_workflow_id": root_workflow_id,
+            "lifecycle_state": "waiting_for_parent",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+            "latest_submission": "first answer",
+        }
+
+    sent = []
+
+    async def send_async(destination_id, message, topic=None):
+        sent.append((destination_id, message, topic))
+
+    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    monkeypatch.setattr(workflows._dbos.DBOS, "send_async", Mock(side_effect=send_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send",
+        Mock(side_effect=AssertionError("Continuation must use send_async outside DBOS steps")),
+        raising=False,
+    )
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output(
+                "continue child",
+                [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "please revise"'}],
+            ),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
+    )
+
+    assert sent == [
+        (
+            "mas-0123456789abcdef-c001",
+            {
+                "type": "continuation",
+                "signal_type": "mas_continuation",
+                "content": "please revise",
+                "source_workflow_id": "mas-0123456789abcdef",
+                "target_workflow_id": "mas-0123456789abcdef-c001",
+            },
+            workflows.PARENT_DIRECTION_TOPIC,
+        )
+    ]
+    text = _observation_text(observations[0])
+    assert "<returncode>0</returncode>" in text
+    assert "Continuation signal sent" in text
+    assert "workflow_id: mas-0123456789abcdef-c001" in text
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_error"),
+    [
+        ("mini-mas continue mas-0123456789abcdef root", "Cannot continue the Root Agent Workflow"),
+        ("mini-mas continue mas-fedcba9876543210-c001 no", "Workflow not found in current Agent Workflow Tree"),
+        ("mini-mas continue mas-0123456789abcdef-c002 no", "Workflow not found in current Agent Workflow Tree"),
+    ],
+)
+def test_workflow_continue_rejects_root_outside_tree_and_missing_children(monkeypatch, command, expected_error):
+    import minisweagent.mas.workflows as workflows
+
+    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
+        assert root_workflow_id == "mas-0123456789abcdef"
+        assert workflow_id == "mas-0123456789abcdef-c002"
+
+    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send_async",
+        Mock(side_effect=AssertionError("Invalid continuation must not send a DBOS message")),
+    )
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("bad continue", [{"command": command}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
+    )
+
+    text = _observation_text(observations[0])
+    assert "<returncode>1</returncode>" in text
+    assert expected_error in text
+
+
+def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send_async",
+        Mock(side_effect=AssertionError("Sibling continuation must not send a DBOS message")),
+    )
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("bad continue", [{"command": "mini-mas continue mas-0123456789abcdef-c002 no"}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef-c001",
+            },
+        )
+    )
+
+    text = _observation_text(observations[0])
+    assert "<returncode>1</returncode>" in text
+    assert "Workflow not found in current Agent Workflow Tree: mas-0123456789abcdef-c002" in text
+
+
+@pytest.mark.parametrize(
+    ("model", "message", "expected_marker"),
+    [
+        (
+            DeterministicModel(outputs=[]),
+            make_output("continue", [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "go on"'}]),
+            "role",
+        ),
+        (
+            DeterministicToolcallModel(outputs=[]),
+            make_toolcall_output(
+                "tool",
+                [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "bash",
+                            "arguments": '{"command": "mini-mas continue mas-0123456789abcdef-c001 \\"go on\\""}',
+                        },
+                    }
+                ],
+                [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "go on"', "tool_call_id": "call_0"}],
+            ),
+            "tool_call_id",
+        ),
+        (
+            DeterministicResponseAPIToolcallModel(outputs=[]),
+            make_response_api_output(
+                "responses",
+                [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "go on"', "tool_call_id": "call_resp_0"}],
+            ),
+            "call_id",
+        ),
+    ],
+)
+def test_mas_continue_uses_existing_model_specific_observation_formatters(monkeypatch, model, message, expected_marker):
+    import minisweagent.mas.workflows as workflows
+
+    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
+        return {
+            "workflow_id": workflow_id,
+            "root_workflow_id": root_workflow_id,
+            "lifecycle_state": "waiting_for_parent",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+        }
+
+    async def send_async(_destination_id, _message, topic=None):
+        assert topic == workflows.PARENT_DIRECTION_TOPIC
+
+    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    monkeypatch.setattr(workflows._dbos.DBOS, "send_async", Mock(side_effect=send_async))
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=message,
+            model=model,
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
+    )
+
+    assert expected_marker in observations[0]
+    assert "Continuation signal sent" in _observation_text(observations[0])
+
+
+def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(monkeypatch, tmp_path):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.exceptions import Submitted
+    from minisweagent.mas.status import STATUS_EVENT_KEY
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    received = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        received.append((topic, timeout_seconds))
+        if len(received) == 1:
+            return {
+                "type": "continuation",
+                "signal_type": "mas_continuation",
+                "content": "please revise",
+                "source_workflow_id": "mas-0123456789abcdef",
+                "target_workflow_id": "mas-0123456789abcdef-c001",
+            }
+        return {"type": "close"}
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "recv",
+        Mock(side_effect=AssertionError("Child continuation waiting must use recv_async")),
+    )
+
+    model = DeterministicModel(
+        outputs=[
+            make_output("first", [{"command": "submit first"}], cost=0.1),
+            make_output("second", [{"command": "submit second"}], cost=0.1),
+        ]
+    )
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.side_effect = [
+        Submitted(
+            {
+                "role": "exit",
+                "content": "first submission",
+                "extra": {"exit_status": "Submitted", "submission": "first submission"},
+            }
+        ),
+        Submitted(
+            {
+                "role": "exit",
+                "content": "second submission",
+                "extra": {"exit_status": "Submitted", "submission": "second submission"},
+            }
+        ),
+    ]
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "submit once",
+        model=model,
+        env=env,
+        step_limit=4,
+    )
+
+    assert result["terminal_state"] == "waiting_for_parent"
+    assert result["latest_submission"] == "second submission"
+    assert len(received) == 2
+    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in status_events] == [
+        "running",
+        "waiting_for_parent",
+        "running",
+        "waiting_for_parent",
+    ]
+    assert status_events[-1]["latest_submission"] == "second submission"
+
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    messages = artifact["messages"]
+    continuation_messages = [
+        message
+        for message in messages
+        if message.get("role") == "user"
+        and message.get("extra", {}).get("mas", {}).get("signal_type") == "mas_continuation"
+    ]
+    assert len(continuation_messages) == 1
+    assert continuation_messages[0]["content"] == "please revise"
+    assert continuation_messages[0]["extra"]["mas"]["source_workflow_id"] == "mas-0123456789abcdef"
+    assert messages[-1]["extra"] == {"exit_status": "Submitted", "submission": "second submission"}
+    assert artifact["info"]["exit_status"] == "waiting_for_parent"
+    assert artifact["info"]["submission"] == "second submission"
+
+
+def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch, tmp_path):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.exceptions import InterruptAgentFlow, Submitted
+    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        assert topic == workflows.PARENT_DIRECTION_TOPIC
+        assert timeout_seconds == workflows.PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS
+        return {
+            "type": "continuation",
+            "signal_type": "mas_continuation",
+            "content": "try again",
+            "source_workflow_id": "mas-0123456789abcdef",
+            "target_workflow_id": "mas-0123456789abcdef-c001",
+        }
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+
+    model = DeterministicModel(outputs=[make_output("first", [{"command": "submit first"}], cost=0.1)])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.side_effect = Submitted(
+        {
+            "role": "exit",
+            "content": "first submission",
+            "extra": {"exit_status": "Submitted", "submission": "first submission"},
+        }
+    )
+
+    async def query_model_step(_model, messages):
+        if any(message.get("extra", {}).get("mas", {}).get("signal_type") == "mas_continuation" for message in messages):
+            raise InterruptAgentFlow(
+                {
+                    "role": "exit",
+                    "content": "model failed after continuation",
+                    "extra": {"exit_status": "failed", "submission": ""},
+                }
+            )
+        return _model.query(messages)
+
+    monkeypatch.setattr(workflows, "query_model_step", query_model_step)
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "submit once",
+        model=model,
+        env=env,
+        step_limit=4,
+    )
+
+    assert result["terminal_state"] == "failed"
+    assert result["status"] == "failed"
+    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    assert status_events[-1]["lifecycle_state"] == "failed"
+    assert status_events[-1]["latest_error"] == "model failed after continuation"
+    first_observable_events = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in first_observable_events] == ["waiting_for_parent", "failed"]
+
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    assert artifact["info"]["exit_status"] == "failed"
+    assert artifact["messages"][-1]["content"] == "model failed after continuation"
+
+
 def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
     ready = {
         "workflow_id": "mas-2222222222222222-c001",
@@ -1625,6 +1996,36 @@ def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
     assert "wait_mode: one" in cli_result.stdout
     assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
     assert "latest_submission: ready" in cli_result.stdout
+
+
+def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.continue_agent_workflow",
+        Mock(
+            return_value={
+                "ok": True,
+                "output": (
+                    "Continuation signal sent\n"
+                    "workflow_id: mas-2222222222222222-c001\n"
+                    "lifecycle_state: waiting_for_parent\n"
+                    "message: go on\n"
+                    "run_directory: .mini-mas/runs/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/runs/mas-2222222222222222/trajectories/"
+                    "mas-2222222222222222-c001.traj.json\n"
+                ),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {},
+            }
+        ),
+    )
+
+    cli_result = CliRunner().invoke(app, ["continue", "mas-2222222222222222-c001", "go on"])
+
+    assert cli_result.exit_code == 0
+    assert "Continuation signal sent" in cli_result.stdout
+    assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "message: go on" in cli_result.stdout
 
 
 @pytest.mark.parametrize("command", ["history", "logs", "grep"])

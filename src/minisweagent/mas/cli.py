@@ -7,7 +7,12 @@ from typing import Annotated, Any
 import typer
 from rich.console import Console
 
-from minisweagent.mas.runtime import get_agent_workflow_status, start_root_agent_workflow, wait_for_agent_workflow
+from minisweagent.mas.runtime import (
+    continue_agent_workflow,
+    get_agent_workflow_status,
+    start_root_agent_workflow,
+    wait_for_agent_workflow,
+)
 from minisweagent.mas.status import format_specific_status, format_status_tree
 from minisweagent.mas.workflows import _format_wait_summary_output
 
@@ -121,6 +126,32 @@ def wait(
     )
     if result["timed_out"]:
         raise typer.Exit(code=1)
+    return result
+
+
+@app.command("continue", help="Send a Continuation Signal to one waiting Child Agent Workflow.")
+def continue_(
+    workflow_id: Annotated[str, typer.Argument(help="Waiting Child Workflow Tree ID to continue.")],
+    message: Annotated[str, typer.Argument(help="Continuation message to append to the child trajectory.")],
+    system_database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--system-database-url",
+            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
+            show_default=False,
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    result = dict(
+        continue_agent_workflow(
+            workflow_id=workflow_id,
+            message=message,
+            system_database_url=system_database_url,
+        )
+    )
+    console.print(result["output"], end="")
+    if result["returncode"] != 0:
+        raise typer.Exit(code=result["returncode"])
     return result
 
 
