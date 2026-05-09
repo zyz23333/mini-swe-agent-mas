@@ -24,6 +24,8 @@ Workflow-layer MAS Commands derive the current **Parent Agent Workflow** identit
 
 Wait operations use direct child workflow identifiers to wait for First Observable Events, not final DBOS workflow results. `mini-mas wait` waits over the current Parent Agent Workflow's direct children; `mini-mas wait <workflow-id>` waits for one explicit target only after validating that the target is a direct Child Agent Workflow of the current Parent Agent Workflow. Child-to-parent observable state is published through DBOS events keyed by child workflow identifiers; parent-to-child Continuation Signals and Close Signals are delivered as DBOS workflow messages only across a direct parent-child boundary.
 
+During `mini-mas wait` and the wait phase of `mini-mas spawn --wait`, the waiting Agent Workflow may publish `waiting_for_child` as its latest lightweight lifecycle state. This state means the Agent Workflow is waiting for direct Child Agent Workflow First Observable Events. It is not itself a First Observable Event, does not make the workflow parent-actionable, and does not authorize parent-direction signals.
+
 ## User Stories
 
 1. As a developer, I want to run `mini-mas` as a separate command, so that I can use MAS features without changing the ordinary `mini` workflow.
@@ -107,6 +109,8 @@ Wait operations use direct child workflow identifiers to wait for First Observab
 - A Waited Spawn timeout returns started child metadata, any ready First Observable Events, and still-running child workflow IDs without cancelling, closing, failing, or retrying child workflows.
 - `mini-mas spawn --timeout <seconds>` without `--wait` is invalid because Detached Spawn has no wait phase.
 - Waited Spawn and `mini-mas wait` wait for First Observable Events, not final DBOS workflow results.
+- An Agent Workflow may publish `waiting_for_child` as its latest lightweight status while executing `mini-mas wait` or the wait phase of `mini-mas spawn --wait`.
+- `waiting_for_child` is a coordination state of the waiting Agent Workflow, not a parent-actionable Child Agent Workflow state.
 - A First Observable Event is set when a Child Agent Workflow first reaches a parent-actionable state: `waiting_for_parent`, `failed`, or `limits_exceeded`.
 - Child-to-parent observable state uses DBOS events keyed by child workflow identifiers; parent-to-child Continuation Signals and Close Signals use DBOS workflow messages.
 - `mini-mas wait` supports waiting for direct Child Agent Workflows with wait-any, wait-all, one direct child, and bounded timeout-based waiting.
@@ -115,9 +119,11 @@ Wait operations use direct child workflow identifiers to wait for First Observab
 - Remote Interactive Agents wait for either a Continuation Signal or a Close Signal after producing a submission.
 - A Continuation Signal is injected into the child trajectory as a normal user message with metadata identifying MAS continuation.
 - A Close Signal ends a Remote Interactive Agent and does not mean accepted or aborted.
-- Child Status Events are lightweight and include coarse states such as `running`, `waiting_for_parent`, `closed`, `failed`, and `limits_exceeded`.
+- Child Status Events are lightweight and include coarse states such as `running`, `waiting_for_child`, `waiting_for_parent`, `closed`, `failed`, and `limits_exceeded`.
 - Child Status Events may be updated repeatedly and represent the latest lightweight state.
 - A First Observable Event is set once per Child Agent Workflow and is the synchronization target for Waited Spawn and `mini-mas wait`.
+- `waiting_for_child` must not be written to the First Observable Event key.
+- `mini-mas continue` and `mini-mas close` must continue to authorize only targets whose latest status is `waiting_for_parent`, not `waiting_for_child`.
 - The MVP exposes lightweight status, latest submission, and latest error data through DBOS events read by workflow-layer MAS Commands.
 - Full history remains in Trajectory Artifacts, not DBOS events.
 - `status`, `wait`, and `spawn` outputs include exact Trajectory Artifact paths and the Run Directory.
@@ -154,6 +160,8 @@ Wait operations use direct child workflow identifiers to wait for First Observab
 - `spawn` default detach behavior should be tested separately from `spawn --wait`.
 - `spawn --wait` default wait-any behavior should be tested separately from `spawn --wait --all`.
 - `spawn --wait --timeout` behavior should be tested for wait-any timeout, wait-all partial timeout, ready child snapshots, still-running child IDs, and preservation of running child workflows.
+- `spawn --wait` and `mini-mas wait` should be tested to publish `waiting_for_child` before waiting and restore `running` after the wait finishes, including timeout paths.
+- Tests should prove `waiting_for_child` is not published as a First Observable Event and does not authorize `continue` or `close`.
 - `spawn --timeout` without `--wait` should be tested as an invalid command.
 - `wait --any`, `wait --all`, one-direct-child waiting, and timeout behavior should be tested against First Observable Events using deterministic child workflows or DBOS test doubles.
 - Tests should prove Waited Spawn and `mini-mas wait` synchronize through child DBOS events rather than child-to-parent send messages or final workflow results.
