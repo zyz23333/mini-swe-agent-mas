@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from minisweagent.mas.artifacts import validate_workflow_id
-from minisweagent.mas.status import root_id_for_workflow
+
+from .status_events import root_id_for_workflow
 
 DirectChildStatusLookup = Callable[[str, str], Awaitable[dict[str, Any] | None]]
 

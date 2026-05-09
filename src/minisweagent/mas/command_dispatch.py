@@ -11,7 +11,8 @@ from minisweagent.mas.authority import AuthorityCommandError, AuthorizedChild
 from minisweagent.mas.command_results import MasCommandResultFormatter
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind
 from minisweagent.mas.coordination import ChildCoordinator
-from minisweagent.mas.status import root_id_for_workflow
+
+from .status_events import root_id_for_workflow
 
 
 @dataclass(frozen=True)

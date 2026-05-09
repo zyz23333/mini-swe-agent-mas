@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from minisweagent.mas.coordination import ChildWaitResult
-from minisweagent.mas.status import format_direct_child_statuses, format_specific_status
+
+from .status_events import format_direct_child_statuses, format_specific_status
 
 
 class MasCommandResultFormatter:

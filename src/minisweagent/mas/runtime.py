@@ -79,7 +79,7 @@ async def _start_root_agent_workflow_async(
 
     dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
 
-    from minisweagent.mas.workflows import root_agent_workflow
+    from minisweagent.mas.mas_agent import root_agent_workflow
 
     dbos_module.DBOS.launch()
 

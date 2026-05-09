@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from typer.testing import CliRunner
 
+from minisweagent.mas import status_events as mas_status_events
 from minisweagent.mas.cli import app, run
 from minisweagent.mas.runtime import (
     close_agent_workflow,
@@ -15,6 +16,14 @@ from minisweagent.mas.runtime import (
     get_agent_workflow_status,
     make_root_workflow_id,
     wait_for_agent_workflow,
+)
+from minisweagent.mas.signals import (
+    PARENT_DIRECTION_TOPIC,
+    PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
+    continuation_user_message,
+    is_close_signal,
+    is_continuation_signal,
+    make_continuation_signal,
 )
 from minisweagent.models.test_models import (
     DeterministicModel,
@@ -482,7 +491,7 @@ def test_trajectory_artifact_save_overwrites_same_workflow_path(tmp_path, monkey
 def test_root_agent_workflow_writes_trajectory_artifact(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     result = _call_root_agent_workflow(workflows.root_agent_workflow, "mas-0123456789abcdef")
 
@@ -504,7 +513,7 @@ def test_root_agent_workflow_writes_trajectory_artifact(tmp_path, monkeypatch):
 def test_child_agent_workflow_writes_artifact_under_root_run_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
@@ -532,15 +541,15 @@ def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
     dbos_module = _mock_dbos_module()
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
-        import minisweagent.mas.workflows
+        import minisweagent.mas.mas_agent
 
-        importlib.reload(minisweagent.mas.workflows)
+        importlib.reload(minisweagent.mas.mas_agent)
 
     dbos_module.DBOS.workflow.assert_called()
 
 
 def test_agent_workflows_are_async_dbos_workflows():
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     assert inspect.iscoroutinefunction(getattr(workflows.root_agent_workflow, "__wrapped__", workflows.root_agent_workflow))
     assert inspect.iscoroutinefunction(
@@ -549,7 +558,7 @@ def test_agent_workflows_are_async_dbos_workflows():
 
 
 def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     mas_agent_class = workflows.MasAgent
     created_agents = []
@@ -625,8 +634,8 @@ def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
 
 
 def test_remote_interactive_lifecycle_is_isolated_from_mas_agent_loop():
+    import minisweagent.mas.mas_agent as workflows
     import minisweagent.mas.remote_lifecycle as remote_lifecycle
-    import minisweagent.mas.workflows as workflows
 
     lifecycle = remote_lifecycle.RemoteInteractiveAgentLifecycle(
         root_workflow_id="mas-0123456789abcdef",
@@ -640,16 +649,20 @@ def test_remote_interactive_lifecycle_is_isolated_from_mas_agent_loop():
         step_limit=3,
     )
 
-    signal = lifecycle.make_continuation_signal(source_workflow_id="mas-0123456789abcdef", content="continue")
+    signal = make_continuation_signal(
+        source_workflow_id="mas-0123456789abcdef",
+        target_workflow_id="mas-0123456789abcdef-c001",
+        content="continue",
+    )
 
     assert agent.remote_lifecycle.root_workflow_id == "mas-0123456789abcdef"
     assert agent.remote_lifecycle.workflow_id == "mas-0123456789abcdef-c001"
     assert signal["target_workflow_id"] == "mas-0123456789abcdef-c001"
-    assert lifecycle.is_continuation_signal({"signal_type": "mas_continuation"})
-    assert lifecycle.is_close_signal({"signal_type": "mas_close"})
+    assert is_continuation_signal({"signal_type": "mas_continuation"})
+    assert is_close_signal({"signal_type": "mas_close"})
     assert callable(lifecycle.wait_after_submission)
     assert callable(lifecycle.close_after_parent_signal)
-    assert remote_lifecycle.continuation_user_message(
+    assert continuation_user_message(
         Mock(format_message=Mock(return_value={"role": "user"})),
         {"signal_type": "mas_continuation"},
     ) == {"role": "user"}
@@ -660,9 +673,9 @@ def test_model_bash_and_trajectory_operations_are_registered_as_dbos_steps():
     dbos_module = _mock_recording_dbos_module()
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
-        import minisweagent.mas.workflows
+        import minisweagent.mas.mas_agent
 
-        importlib.reload(minisweagent.mas.workflows)
+        importlib.reload(minisweagent.mas.mas_agent)
 
     assert "query_model_step" in dbos_module.registered_steps
     assert "execute_bash_step" in dbos_module.registered_steps
@@ -718,7 +731,7 @@ def test_ordinary_bash_without_mini_mas_is_not_intercepted(command):
 
 
 def test_workflow_action_execution_dispatches_standalone_mas_commands():
-    from minisweagent.mas.workflows import execute_agent_workflow_actions
+    from minisweagent.mas.mas_agent import execute_agent_workflow_actions
 
     message = make_output("dispatch", [{"command": "mini-mas wait --any"}])
     env = Mock()
@@ -754,9 +767,8 @@ def test_mas_command_handler_accepts_classified_standalone_command():
 
 
 def test_dbos_coordination_adapter_owns_status_first_observable_wait_and_messages(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.mas.coordination import DBOSCoordinationAdapter
-    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
 
     dbos_api = Mock()
     published = []
@@ -768,7 +780,7 @@ def test_dbos_coordination_adapter_owns_status_first_observable_wait_and_message
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
         assert workflow_id == "mas-0123456789abcdef-c001"
-        assert key == FIRST_OBSERVABLE_EVENT_KEY
+        assert key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY
         assert timeout_seconds == 0.25
         return {
             "workflow_id": workflow_id,
@@ -825,25 +837,25 @@ def test_dbos_coordination_adapter_owns_status_first_observable_wait_and_message
             timeout_seconds=0.25,
         )
     )
-    signal = asyncio.run(adapter.receive_parent_direction(topic=workflows.PARENT_DIRECTION_TOPIC, timeout_seconds=3))
+    signal = asyncio.run(adapter.receive_parent_direction(topic=PARENT_DIRECTION_TOPIC, timeout_seconds=3))
     asyncio.run(
         adapter.send_parent_direction(
             target_workflow_id="mas-0123456789abcdef-c001",
             signal={"type": "close"},
-            topic=workflows.PARENT_DIRECTION_TOPIC,
+            topic=PARENT_DIRECTION_TOPIC,
         )
     )
 
     assert [(key, value["lifecycle_state"]) for key, value in published] == [
-        (STATUS_EVENT_KEY, "waiting_for_child"),
-        (FIRST_OBSERVABLE_EVENT_KEY, "waiting_for_parent"),
+        (mas_status_events.STATUS_EVENT_KEY, "waiting_for_child"),
+        (mas_status_events.FIRST_OBSERVABLE_EVENT_KEY, "waiting_for_parent"),
     ]
     assert ready[0]["workflow_id"] == "mas-0123456789abcdef-c001"
     assert still_running == []
     assert timed_out is False
     assert signal == {"type": "close"}
-    assert received == [(workflows.PARENT_DIRECTION_TOPIC, 3)]
-    assert sent == [("mas-0123456789abcdef-c001", {"type": "close"}, workflows.PARENT_DIRECTION_TOPIC)]
+    assert received == [(PARENT_DIRECTION_TOPIC, 3)]
+    assert sent == [("mas-0123456789abcdef-c001", {"type": "close"}, PARENT_DIRECTION_TOPIC)]
 
 
 def test_child_coordinator_owns_spawn_and_wait_domain_behavior():
@@ -1102,7 +1114,7 @@ def test_direct_child_authority_policy_success_and_rejection_paths():
 
 
 def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     events_by_workflow = {
@@ -1161,7 +1173,7 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
 
 
 def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_status = {
@@ -1223,9 +1235,8 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
 
 
 def test_status_snapshot_accepts_waiting_for_child_lifecycle_state():
-    from minisweagent.mas.status import make_status_snapshot
 
-    snapshot = make_status_snapshot(
+    snapshot = mas_status_events.make_status_snapshot(
         root_workflow_id="mas-0123456789abcdef",
         workflow_id="mas-0123456789abcdef-c001",
         lifecycle_state="waiting_for_child",
@@ -1235,7 +1246,7 @@ def test_status_snapshot_accepts_waiting_for_child_lifecycle_state():
 
 
 def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypatch, tmp_path):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.exceptions import Submitted
 
     monkeypatch.chdir(tmp_path)
@@ -1298,7 +1309,7 @@ def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypat
 
 
 def test_agent_workflow_publishes_failed_status(monkeypatch, tmp_path):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.exceptions import InterruptAgentFlow
 
     monkeypatch.chdir(tmp_path)
@@ -1344,9 +1355,8 @@ def test_agent_workflow_publishes_failed_status(monkeypatch, tmp_path):
 
 
 def test_child_workflow_waits_after_first_submission_and_sets_first_observable_event(monkeypatch, tmp_path):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.exceptions import Submitted
-    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
 
     monkeypatch.chdir(tmp_path)
     published = []
@@ -1396,8 +1406,8 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
 
     assert result["terminal_state"] == "waiting_for_parent"
     assert result["latest_submission"] == "child done"
-    assert received == [(workflows.PARENT_DIRECTION_TOPIC, workflows.PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS)]
-    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    assert received == [(PARENT_DIRECTION_TOPIC, PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS)]
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
     assert [event["lifecycle_state"] for event in status_events] == ["running", "waiting_for_parent"]
     waiting_event = status_events[-1]
     assert waiting_event["workflow_id"] == "mas-0123456789abcdef-c001"
@@ -1406,7 +1416,7 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
         waiting_event["trajectory_artifact_path"]
         == ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
     )
-    first_observable_events = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    first_observable_events = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert first_observable_events == [waiting_event]
 
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
@@ -1416,9 +1426,8 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
 
 
 def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, tmp_path):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.exceptions import Submitted
-    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
 
     monkeypatch.chdir(tmp_path)
     published = []
@@ -1428,8 +1437,8 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
         published.append((key, value))
 
     async def recv_async(topic=None, timeout_seconds=60):
-        assert topic == workflows.PARENT_DIRECTION_TOPIC
-        assert timeout_seconds == workflows.PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS
+        assert topic == PARENT_DIRECTION_TOPIC
+        assert timeout_seconds == PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS
         return {
             "type": "close",
             "signal_type": "mas_close",
@@ -1471,13 +1480,13 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
     assert result["latest_submission"] == "child done"
     assert result["parent_direction_signal"]["signal_type"] == "mas_close"
 
-    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
     assert [event["lifecycle_state"] for event in status_events] == ["running", "waiting_for_parent", "closed"]
     closed_event = status_events[-1]
     assert closed_event["latest_submission"] == "child done"
     assert closed_event["trajectory_artifact_path"] == result["trajectory_artifact_path"]
 
-    first_observable_events = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    first_observable_events = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert [event["lifecycle_state"] for event in first_observable_events] == ["waiting_for_parent"]
 
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
@@ -1487,9 +1496,8 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
 
 
 def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monkeypatch, tmp_path):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.exceptions import InterruptAgentFlow
-    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY
 
     monkeypatch.chdir(tmp_path)
     published = []
@@ -1530,7 +1538,7 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
         step_limit=3,
     )
 
-    first_observable = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    first_observable = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert first_observable == [
         {
             "root_workflow_id": "mas-0123456789abcdef",
@@ -1567,13 +1575,13 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
         step_limit=1,
     )
 
-    first_observable = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    first_observable = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert first_observable[-1]["workflow_id"] == "mas-0123456789abcdef-c002"
     assert first_observable[-1]["lifecycle_state"] == "limits_exceeded"
 
 
 def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
-    from minisweagent.mas.workflows import execute_agent_workflow_actions
+    from minisweagent.mas.mas_agent import execute_agent_workflow_actions
 
     message = make_output("bash", [{"command": "echo hello"}])
     env = Mock()
@@ -1597,7 +1605,7 @@ def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
     ],
 )
 def test_workflow_action_execution_rejects_shell_compositions_without_executing_bash(command):
-    from minisweagent.mas.workflows import execute_agent_workflow_actions
+    from minisweagent.mas.mas_agent import execute_agent_workflow_actions
 
     message = make_output("reject", [{"command": command}])
     env = Mock()
@@ -1645,7 +1653,7 @@ def test_workflow_action_execution_rejects_shell_compositions_without_executing_
     ],
 )
 def test_mas_rejections_use_existing_model_specific_observation_formatters(model, message, expected_marker):
-    from minisweagent.mas.workflows import execute_agent_workflow_actions
+    from minisweagent.mas.mas_agent import execute_agent_workflow_actions
 
     env = Mock()
 
@@ -1658,7 +1666,7 @@ def test_mas_rejections_use_existing_model_specific_observation_formatters(model
 
 def test_root_agent_workflow_runs_model_and_bash_path_and_saves_trajectory(tmp_path, monkeypatch):
     from minisweagent.exceptions import Submitted
-    from minisweagent.mas.workflows import root_agent_workflow
+    from minisweagent.mas.mas_agent import root_agent_workflow
 
     monkeypatch.chdir(tmp_path)
     model = DeterministicModel(
@@ -1705,7 +1713,7 @@ def test_root_agent_workflow_runs_model_and_bash_path_and_saves_trajectory(tmp_p
 
 
 def test_root_agent_workflow_can_replay_successful_model_and_bash_step_results(tmp_path, monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
     model = DeterministicModel(outputs=[])
@@ -1742,7 +1750,7 @@ def test_root_agent_workflow_can_replay_successful_model_and_bash_step_results(t
 
 
 def test_root_agent_workflow_keeps_standalone_mas_commands_out_of_bash_step(tmp_path, monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
     model = DeterministicModel(outputs=[make_output("check status", [{"command": "mini-mas status"}], cost=0.1)])
@@ -1768,7 +1776,7 @@ def test_root_agent_workflow_keeps_standalone_mas_commands_out_of_bash_step(tmp_
 
 
 def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
     child_queue = _recording_child_queue()
@@ -1827,7 +1835,7 @@ def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, mo
 
 
 def test_detached_spawn_allocates_stable_sibling_child_ids_without_duplicate_enqueue(tmp_path, monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
     child_queue = _recording_child_queue()
@@ -1889,7 +1897,7 @@ def test_detached_spawn_allocates_stable_sibling_child_ids_without_duplicate_enq
 
 
 def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_path, monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
     child_queue = _recording_child_queue()
@@ -1943,7 +1951,7 @@ def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_pat
 
 
 def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(tmp_path, monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
     child_queue = _recording_child_queue()
@@ -1993,7 +2001,7 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
 
 
 def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     first_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", first_queue)
@@ -2019,7 +2027,7 @@ def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatc
 
 
 def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_single_direct_child_status(
@@ -2069,7 +2077,7 @@ def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(
 
 
 def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
@@ -2132,7 +2140,7 @@ def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
 
 
 def test_waited_spawn_all_and_partial_timeout(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
@@ -2185,7 +2193,7 @@ def test_waited_spawn_all_and_partial_timeout(monkeypatch):
 
 
 def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
@@ -2225,8 +2233,7 @@ def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
 
 
 def test_waited_spawn_publishes_waiting_for_child_status_and_restores_running_on_timeout(monkeypatch):
-    import minisweagent.mas.workflows as workflows
-    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
@@ -2239,7 +2246,7 @@ def test_waited_spawn_publishes_waiting_for_child_status_and_restores_running_on
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
         assert workflow_id in {"mas-0123456789abcdef-c001", "mas-0123456789abcdef-c002"}
-        assert key == FIRST_OBSERVABLE_EVENT_KEY
+        assert key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY
         assert timeout_seconds == 0.01
         await asyncio.sleep(10)
 
@@ -2261,14 +2268,14 @@ def test_waited_spawn_publishes_waiting_for_child_status_and_restores_running_on
 
     assert "Waited spawn timed out" in _observation_text(observations[0])
     assert [(key, value["lifecycle_state"]) for key, value in published] == [
-        (STATUS_EVENT_KEY, "waiting_for_child"),
-        (STATUS_EVENT_KEY, "running"),
+        (mas_status_events.STATUS_EVENT_KEY, "waiting_for_child"),
+        (mas_status_events.STATUS_EVENT_KEY, "running"),
     ]
-    assert all(key != FIRST_OBSERVABLE_EVENT_KEY for key, _value in published)
+    assert all(key != mas_status_events.FIRST_OBSERVABLE_EVENT_KEY for key, _value in published)
 
 
 def test_spawn_timeout_without_wait_is_invalid(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     message = make_output("invalid", [{"command": 'mini-mas spawn --timeout 1 "task"'}])
@@ -2290,7 +2297,7 @@ def test_spawn_timeout_without_wait_is_invalid(monkeypatch):
 
 
 def test_invalid_wait_and_waited_spawn_commands_do_not_publish_waiting_for_child(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef", {})
@@ -2328,7 +2335,7 @@ def test_invalid_wait_and_waited_spawn_commands_do_not_publish_waiting_for_child
 
 
 def test_workflow_wait_for_specific_child_uses_first_observable_event(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_status = {
@@ -2390,8 +2397,7 @@ def test_workflow_wait_for_specific_child_uses_first_observable_event(monkeypatc
 
 
 def test_workflow_wait_for_specific_child_publishes_waiting_for_child_status_and_restores_running(monkeypatch):
-    import minisweagent.mas.workflows as workflows
-    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_status = {
@@ -2416,7 +2422,7 @@ def test_workflow_wait_for_specific_child_publishes_waiting_for_child_status_and
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
         assert workflow_id == "mas-0123456789abcdef-c001"
-        assert key == FIRST_OBSERVABLE_EVENT_KEY
+        assert key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY
         return {
             "workflow_id": workflow_id,
             "lifecycle_state": "waiting_for_parent",
@@ -2446,15 +2452,14 @@ def test_workflow_wait_for_specific_child_publishes_waiting_for_child_status_and
     text = _observation_text(observations[0])
     assert "mini-mas wait completed" in text
     assert [(key, value["lifecycle_state"]) for key, value in published] == [
-        (STATUS_EVENT_KEY, "waiting_for_child"),
-        (STATUS_EVENT_KEY, "running"),
+        (mas_status_events.STATUS_EVENT_KEY, "waiting_for_child"),
+        (mas_status_events.STATUS_EVENT_KEY, "running"),
     ]
-    assert all(key != FIRST_OBSERVABLE_EVENT_KEY for key, _value in published)
+    assert all(key != mas_status_events.FIRST_OBSERVABLE_EVENT_KEY for key, _value in published)
 
 
 def test_workflow_wait_restores_running_when_first_observable_wait_raises(monkeypatch):
-    import minisweagent.mas.workflows as workflows
-    from minisweagent.mas.status import STATUS_EVENT_KEY
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_status = {
@@ -2498,13 +2503,13 @@ def test_workflow_wait_restores_running_when_first_observable_wait_raises(monkey
         )
 
     assert [(key, value["lifecycle_state"]) for key, value in published] == [
-        (STATUS_EVENT_KEY, "waiting_for_child"),
-        (STATUS_EVENT_KEY, "running"),
+        (mas_status_events.STATUS_EVENT_KEY, "waiting_for_child"),
+        (mas_status_events.STATUS_EVENT_KEY, "running"),
     ]
 
 
 def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     statuses = {
@@ -2585,7 +2590,7 @@ def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatc
 
 
 def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_status = {
@@ -2632,7 +2637,7 @@ def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monk
 
 
 def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_single_direct_child_status(
@@ -2689,7 +2694,7 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
                 "source_workflow_id": "mas-0123456789abcdef",
                 "target_workflow_id": "mas-0123456789abcdef-c001",
             },
-            workflows.PARENT_DIRECTION_TOPIC,
+            PARENT_DIRECTION_TOPIC,
         )
     ]
     text = _observation_text(observations[0])
@@ -2699,7 +2704,7 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
 
 
 def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_single_direct_child_status(
@@ -2752,7 +2757,7 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
                 "source_workflow_id": "mas-0123456789abcdef",
                 "target_workflow_id": "mas-0123456789abcdef-c001",
             },
-            workflows.PARENT_DIRECTION_TOPIC,
+            PARENT_DIRECTION_TOPIC,
         )
     ]
     text = _observation_text(observations[0])
@@ -2781,7 +2786,7 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
     ],
 )
 def test_workflow_continue_rejects_root_outside_tree_and_missing_children(monkeypatch, command, expected_error):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef", {})
@@ -2809,7 +2814,7 @@ def test_workflow_continue_rejects_root_outside_tree_and_missing_children(monkey
 
 
 def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef-c001")
     _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef-c001", {})
@@ -2851,7 +2856,7 @@ def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
     ],
 )
 def test_workflow_close_rejects_root_outside_tree_and_missing_children(monkeypatch, command, expected_error):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef", {})
@@ -2879,7 +2884,7 @@ def test_workflow_close_rejects_root_outside_tree_and_missing_children(monkeypat
 
 
 def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef-c001")
     _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef-c001", {})
@@ -2908,7 +2913,7 @@ def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
 
 @pytest.mark.parametrize("lifecycle_state", ["closed", "failed", "limits_exceeded", "running", "waiting_for_child"])
 def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, lifecycle_state):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_single_direct_child_status(
@@ -2949,7 +2954,7 @@ def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, l
 
 
 def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_single_direct_child_status(
@@ -3037,7 +3042,7 @@ def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch
     ],
 )
 def test_mas_continue_uses_existing_model_specific_observation_formatters(monkeypatch, model, message, expected_marker):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     _mock_single_direct_child_status(
@@ -3056,7 +3061,7 @@ def test_mas_continue_uses_existing_model_specific_observation_formatters(monkey
     )
 
     async def send_async(_destination_id, _message, topic=None):
-        assert topic == workflows.PARENT_DIRECTION_TOPIC
+        assert topic == PARENT_DIRECTION_TOPIC
 
     monkeypatch.setattr(workflows._dbos.DBOS, "send_async", Mock(side_effect=send_async))
 
@@ -3077,9 +3082,8 @@ def test_mas_continue_uses_existing_model_specific_observation_formatters(monkey
 
 
 def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(monkeypatch, tmp_path):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.exceptions import Submitted
-    from minisweagent.mas.status import STATUS_EVENT_KEY
 
     monkeypatch.chdir(tmp_path)
     published = []
@@ -3147,7 +3151,7 @@ def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(mon
     assert result["terminal_state"] == "waiting_for_parent"
     assert result["latest_submission"] == "second submission"
     assert len(received) == 2
-    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
     assert [event["lifecycle_state"] for event in status_events] == [
         "running",
         "waiting_for_parent",
@@ -3173,9 +3177,8 @@ def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(mon
 
 
 def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch, tmp_path):
-    import minisweagent.mas.workflows as workflows
+    import minisweagent.mas.mas_agent as workflows
     from minisweagent.exceptions import InterruptAgentFlow, Submitted
-    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
 
     monkeypatch.chdir(tmp_path)
     published = []
@@ -3185,8 +3188,8 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
         published.append((key, value))
 
     async def recv_async(topic=None, timeout_seconds=60):
-        assert topic == workflows.PARENT_DIRECTION_TOPIC
-        assert timeout_seconds == workflows.PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS
+        assert topic == PARENT_DIRECTION_TOPIC
+        assert timeout_seconds == PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS
         return {
             "type": "continuation",
             "signal_type": "mas_continuation",
@@ -3234,10 +3237,10 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
 
     assert result["terminal_state"] == "failed"
     assert result["status"] == "failed"
-    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
     assert status_events[-1]["lifecycle_state"] == "failed"
     assert status_events[-1]["latest_error"] == "model failed after continuation"
-    first_observable_events = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    first_observable_events = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert [event["lifecycle_state"] for event in first_observable_events] == ["waiting_for_parent", "failed"]
 
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())

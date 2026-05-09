@@ -9,7 +9,8 @@ from inspect import isawaitable
 from typing import Any
 
 from minisweagent.mas.artifacts import make_artifact_metadata, validate_workflow_id
-from minisweagent.mas.status import (
+
+from .status_events import (
     FIRST_OBSERVABLE_EVENT_KEY,
     STATUS_EVENT_KEY,
     LifecycleState,

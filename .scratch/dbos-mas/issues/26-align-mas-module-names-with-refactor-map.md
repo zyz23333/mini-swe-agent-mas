@@ -1,6 +1,6 @@
 # Align MAS module names with the refactor map
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 Type: AFK
 
@@ -32,26 +32,26 @@ This is a behavior-preserving structure cleanup. It should not change MAS comman
 
 ## Acceptance criteria
 
-- [ ] `src/minisweagent/mas/mas_agent.py` is the canonical module for `MasAgent`, `root_agent_workflow`, `child_agent_workflow`, `query_model_step`, `execute_bash_step`, and trajectory persistence step wrappers.
-- [ ] No production code imports `minisweagent.mas.workflows`.
-- [ ] No tests import `minisweagent.mas.workflows`; tests use `minisweagent.mas.mas_agent` directly.
-- [ ] `workflows.py` is not used as a compatibility re-export shim. It is either removed or contains no re-exported `mas_agent` API surface.
-- [ ] No compatibility test asserts that `minisweagent.mas.workflows` can still be imported, reloaded, or used as an API surface.
-- [ ] Runtime startup imports `root_agent_workflow` from `minisweagent.mas.mas_agent`, not from `minisweagent.mas.workflows`.
-- [ ] MAS artifact metadata no longer records `minisweagent.mas.workflows.agent_workflow`; it uses the new canonical Agent Workflow identifier.
-- [ ] `status_events.py` owns `LifecycleState`, `AgentStatusSnapshot`, `STATUS_EVENT_KEY`, `FIRST_OBSERVABLE_EVENT_KEY`, Child Status Event helpers, First Observable Event helpers, and status snapshot formatting.
-- [ ] No production code imports the renamed status-event API from `minisweagent.mas.status`.
-- [ ] No tests import the renamed status-event API from `minisweagent.mas.status`; tests use `minisweagent.mas.status_events` directly.
-- [ ] `status.py` is not kept as a compatibility re-export module.
-- [ ] `signals.py` owns `PARENT_DIRECTION_TOPIC`, Continuation Signal payload construction and recognition, Close Signal payload construction and recognition, and continuation user-message metadata shape.
-- [ ] `remote_lifecycle.py` remains focused on Remote Interactive Agent lifecycle behavior and imports parent-direction signal helpers from `signals.py`.
-- [ ] Tests import signal constants and helpers from `minisweagent.mas.signals`, not indirectly from `mas_agent` or `remote_lifecycle`.
-- [ ] No compatibility layer preserves old MAS module names or old import paths solely for backward compatibility.
-- [ ] `rg "minisweagent\\.mas\\.workflows|from minisweagent\\.mas\\.status|import minisweagent\\.mas\\.status|compatibility re-export|backward compatibility" src tests` returns no MAS structural-compatibility leftovers, except unrelated non-MAS compatibility text.
-- [ ] DBOS workflows and steps remain module-level functions; `MasAgent` remains a plain Python orchestration object and is not DBOS-registered.
-- [ ] `DBOSCoordinationAdapter` calls remain in the async Agent Workflow path and are not passed into or called from DBOS step wrappers.
-- [ ] Standalone MAS Command classification still happens once in `commands.py`; invalid shell compositions still do not enter `execute_bash_step`.
-- [ ] Existing MAS workflow, command, authority, coordination, status-event, signal, runtime, and CLI behavior tests pass without weakening assertions.
+- [x] `src/minisweagent/mas/mas_agent.py` is the canonical module for `MasAgent`, `root_agent_workflow`, `child_agent_workflow`, `query_model_step`, `execute_bash_step`, and trajectory persistence step wrappers.
+- [x] No production code imports `minisweagent.mas.workflows`.
+- [x] No tests import `minisweagent.mas.workflows`; tests use `minisweagent.mas.mas_agent` directly.
+- [x] `workflows.py` is not used as a compatibility re-export shim. It is either removed or contains no re-exported `mas_agent` API surface.
+- [x] No compatibility test asserts that `minisweagent.mas.workflows` can still be imported, reloaded, or used as an API surface.
+- [x] Runtime startup imports `root_agent_workflow` from `minisweagent.mas.mas_agent`, not from `minisweagent.mas.workflows`.
+- [x] MAS artifact metadata no longer records `minisweagent.mas.workflows.agent_workflow`; it uses the new canonical Agent Workflow identifier.
+- [x] `status_events.py` owns `LifecycleState`, `AgentStatusSnapshot`, `STATUS_EVENT_KEY`, `FIRST_OBSERVABLE_EVENT_KEY`, Child Status Event helpers, First Observable Event helpers, and status snapshot formatting.
+- [x] No production code imports the renamed status-event API from `minisweagent.mas.status`.
+- [x] No tests import the renamed status-event API from `minisweagent.mas.status`; tests use `minisweagent.mas.status_events` directly.
+- [x] `status.py` is not kept as a compatibility re-export module.
+- [x] `signals.py` owns `PARENT_DIRECTION_TOPIC`, Continuation Signal payload construction and recognition, Close Signal payload construction and recognition, and continuation user-message metadata shape.
+- [x] `remote_lifecycle.py` remains focused on Remote Interactive Agent lifecycle behavior and imports parent-direction signal helpers from `signals.py`.
+- [x] Tests import signal constants and helpers from `minisweagent.mas.signals`, not indirectly from `mas_agent` or `remote_lifecycle`.
+- [x] No compatibility layer preserves old MAS module names or old import paths solely for backward compatibility.
+- [x] `rg "minisweagent\\.mas\\.workflows|from minisweagent\\.mas\\.status|import minisweagent\\.mas\\.status|compatibility re-export|backward compatibility" src tests` returns no MAS structural-compatibility leftovers, except unrelated non-MAS compatibility text.
+- [x] DBOS workflows and steps remain module-level functions; `MasAgent` remains a plain Python orchestration object and is not DBOS-registered.
+- [x] `DBOSCoordinationAdapter` calls remain in the async Agent Workflow path and are not passed into or called from DBOS step wrappers.
+- [x] Standalone MAS Command classification still happens once in `commands.py`; invalid shell compositions still do not enter `execute_bash_step`.
+- [x] Existing MAS workflow, command, authority, coordination, status-event, signal, runtime, and CLI behavior tests pass without weakening assertions.
 
 ## Blocked by
 
@@ -138,3 +138,23 @@ This is a behavior-preserving structure cleanup. It should not change MAS comman
 > - Artifact metadata uses the new canonical Agent Workflow identifier instead of `minisweagent.mas.workflows.agent_workflow`.
 > - MAS command semantics, Direct Child Authority Policy, Child Status Events, First Observable Events, Continuation Signals, Close Signals, DBOS workflow IDs, artifact paths, and external CLI behavior remain unchanged.
 > - Existing MAS workflow, command, authority, coordination, status-event, signal, runtime, and CLI behavior tests pass without weakening assertions.
+
+> *This was generated by AI during execution.*
+>
+> ## Execution Note
+>
+> Completed the behavior-preserving MAS module-name alignment:
+>
+> - Moved the Agent Workflow implementation to `src/minisweagent/mas/mas_agent.py`.
+> - Moved status-event state, helpers, keys, and formatting to `src/minisweagent/mas/status_events.py`.
+> - Added `src/minisweagent/mas/signals.py` for parent-direction topic constants, Continuation Signal and Close Signal payload helpers, recognition helpers, and continuation user-message metadata shape.
+> - Removed the old `src/minisweagent/mas/workflows.py` and `src/minisweagent/mas/status.py` files instead of keeping compatibility re-export shims.
+> - Updated runtime startup to import `root_agent_workflow` from `minisweagent.mas.mas_agent`.
+> - Updated trajectory artifact metadata to record `minisweagent.mas.mas_agent.agent_workflow`.
+> - Updated production imports and MAS tests to use canonical `mas_agent`, `status_events`, and `signals` modules directly.
+>
+> Verification:
+>
+> - `.venv/bin/python -m ruff check src/minisweagent/mas tests/run/test_mini_mas.py` passed.
+> - `.venv/bin/python -m pytest tests/run/test_mini_mas.py -q` passed with `102 passed`.
+> - `rg "minisweagent\\.mas\\.workflows|from minisweagent\\.mas\\.status|import minisweagent\\.mas\\.status|compatibility re-export|backward compatibility" src tests` returns only unrelated non-MAS compatibility text in `tests/agents/test_interactive.py`.

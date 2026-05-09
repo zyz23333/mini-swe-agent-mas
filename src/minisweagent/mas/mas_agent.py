@@ -1,4 +1,4 @@
-"""DBOS workflows for the MAS subsystem boundary."""
+"""MAS Agent Workflow orchestration and DBOS entrypoints."""
 
 from __future__ import annotations
 
@@ -19,17 +19,20 @@ from minisweagent.mas.command_results import MasCommandResultFormatter
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
 from minisweagent.mas.coordination import ChildCoordinator, DBOSCoordinationAdapter
 from minisweagent.mas.remote_lifecycle import (
+    RemoteInteractiveAgentLifecycle,
+)
+from minisweagent.mas.runtime import load_dbos
+from minisweagent.mas.signals import (
     PARENT_DIRECTION_TOPIC,
     PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
-    RemoteInteractiveAgentLifecycle,
     continuation_user_message,
     is_close_signal,
     is_continuation_signal,
     make_close_signal,
     make_continuation_signal,
 )
-from minisweagent.mas.runtime import load_dbos
-from minisweagent.mas.status import LifecycleState
+
+from .status_events import LifecycleState
 
 _dbos = load_dbos()
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
@@ -376,11 +379,11 @@ class MasAgent:
             if self.remote_lifecycle.should_wait_for_parent(result):
                 waiting_result = await self._wait_for_parent_after_submission(result)
                 parent_direction_signal = waiting_result.get("parent_direction_signal")
-                if self.remote_lifecycle.is_continuation_signal(parent_direction_signal):
-                    self.add_messages(self.remote_lifecycle.continuation_user_message(self.model, parent_direction_signal))
+                if is_continuation_signal(parent_direction_signal):
+                    self.add_messages(continuation_user_message(self.model, parent_direction_signal))
                     self.first_observable_published = False
                     continue
-                if self.remote_lifecycle.is_close_signal(parent_direction_signal):
+                if is_close_signal(parent_direction_signal):
                     return await self._close_after_parent_signal(waiting_result, result)
                 return waiting_result
 
@@ -547,11 +550,6 @@ class MasAgent:
                 submission=submitted_result["submission"],
             ),
         )
-
-
-_is_continuation_signal = is_continuation_signal
-_is_close_signal = is_close_signal
-_continuation_user_message = continuation_user_message
 
 
 @_dbos.DBOS.step()
