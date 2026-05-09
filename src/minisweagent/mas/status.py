@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from inspect import isawaitable
 from typing import Any, Literal
 
 from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id, validate_workflow_id
@@ -16,6 +17,10 @@ LIFECYCLE_STATES: tuple[LifecycleState, ...] = (
     "failed",
     "limits_exceeded",
 )
+
+
+async def _maybe_await(value: Any) -> Any:
+    return await value if isawaitable(value) else value
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,27 @@ def query_status_tree(dbos_api: Any, root_workflow_id: str) -> list[dict[str, An
     return sorted(snapshots, key=lambda snapshot: snapshot["workflow_id"])
 
 
+async def query_status_tree_async(dbos_api: Any, root_workflow_id: str) -> list[dict[str, Any]]:
+    """Async variant for Agent Workflow code that must not block the DBOS event loop."""
+    root_workflow_id = validate_root_workflow_id(root_workflow_id)
+    workflow_statuses = await _maybe_await(
+        dbos_api.list_workflows_async(
+            workflow_id_prefix=root_workflow_id,
+            load_input=False,
+            load_output=False,
+        )
+    )
+    snapshots = []
+    for workflow_status in workflow_statuses:
+        workflow_id = getattr(workflow_status, "workflow_id", "")
+        if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=workflow_id):
+            continue
+        snapshot = _status_from_events(await _maybe_await(dbos_api.get_all_events_async(workflow_id)))
+        if snapshot is not None:
+            snapshots.append(snapshot)
+    return sorted(snapshots, key=lambda snapshot: snapshot["workflow_id"])
+
+
 def query_specific_status(dbos_api: Any, *, root_workflow_id: str, workflow_id: str) -> dict[str, Any] | None:
     """Query one descendant status snapshot without waiting for workflow completion."""
     root_workflow_id = validate_root_workflow_id(root_workflow_id)
@@ -112,6 +138,17 @@ def query_specific_status(dbos_api: Any, *, root_workflow_id: str, workflow_id: 
     if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=workflow_id):
         return None
     return _status_from_events(dbos_api.get_all_events(workflow_id))
+
+
+async def query_specific_status_async(
+    dbos_api: Any, *, root_workflow_id: str, workflow_id: str
+) -> dict[str, Any] | None:
+    """Async variant for Agent Workflow code that must not block the DBOS event loop."""
+    root_workflow_id = validate_root_workflow_id(root_workflow_id)
+    workflow_id = validate_workflow_id(workflow_id)
+    if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=workflow_id):
+        return None
+    return _status_from_events(await _maybe_await(dbos_api.get_all_events_async(workflow_id)))
 
 
 def _format_snapshot(snapshot: dict[str, Any]) -> list[str]:

@@ -1,4 +1,6 @@
+import asyncio
 import importlib
+import inspect
 import json
 import re
 from unittest.mock import MagicMock, Mock, patch
@@ -48,7 +50,7 @@ def _observation_text(message: dict) -> str:
 
 
 def _call_root_agent_workflow(workflow_func, *args, **kwargs):
-    return getattr(workflow_func, "__wrapped__", workflow_func)(*args, **kwargs)
+    return asyncio.run(getattr(workflow_func, "__wrapped__", workflow_func)(*args, **kwargs))
 
 
 def _recording_child_queue():
@@ -56,7 +58,7 @@ def _recording_child_queue():
         def __init__(self):
             self.enqueued = []
 
-        def enqueue(self, workflow_func, *args, **kwargs):
+        async def enqueue_async(self, workflow_func, *args, **kwargs):
             handle = Mock()
             handle.workflow_id = args[1]
             handle.get_workflow_id.return_value = args[1]
@@ -73,21 +75,37 @@ def _recording_child_queue():
     return RecordingChildQueue()
 
 
+class AsyncMockHandle:
+    def __init__(self, workflow_id, result=None):
+        self.workflow_id = workflow_id
+        self._result = result
+
+    def get_workflow_id(self):
+        return self.workflow_id
+
+    async def get_result(self):
+        return self._result
+
+
 def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
     """mini-mas run is the external path that activates DBOS for MAS work."""
-    handle = Mock()
-    handle.workflow_id = "mas-1111111111111111"
-    handle.get_workflow_id.return_value = "mas-1111111111111111"
-    handle.get_result.return_value = {
-        "root_workflow_id": "mas-1111111111111111",
-        "workflow_id": "mas-1111111111111111",
-        "status": "started",
-        "run_directory": ".mini-mas/runs/mas-1111111111111111",
-        "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
-    }
+    handle = AsyncMockHandle(
+        "mas-1111111111111111",
+        {
+            "root_workflow_id": "mas-1111111111111111",
+            "workflow_id": "mas-1111111111111111",
+            "status": "started",
+            "run_directory": ".mini-mas/runs/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+        },
+    )
+
+    async def start_workflow_async(*_args, **_kwargs):
+        return handle
 
     dbos_module = _mock_dbos_module()
-    dbos_module.DBOS.start_workflow.return_value = handle
+    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.start_workflow.side_effect = AssertionError("MAS runtime must use start_workflow_async")
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         result = run(workflow_id="mas-1111111111111111", wait=True)
@@ -100,11 +118,13 @@ def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
     )
     dbos_module.DBOS.launch.assert_called_once_with()
     dbos_module.SetWorkflowID.assert_called_once_with("mas-1111111111111111")
-    dbos_module.DBOS.start_workflow.assert_called_once()
+    dbos_module.DBOS.start_workflow.assert_not_called()
+    dbos_module.DBOS.start_workflow_async.assert_called_once()
 
-    workflow_func = dbos_module.DBOS.start_workflow.call_args.args[0]
+    workflow_func = dbos_module.DBOS.start_workflow_async.call_args.args[0]
+    assert inspect.iscoroutinefunction(workflow_func)
     assert workflow_func.__name__ == "root_agent_workflow"
-    assert dbos_module.DBOS.start_workflow.call_args.args[1] == "mas-1111111111111111"
+    assert dbos_module.DBOS.start_workflow_async.call_args.args[1] == "mas-1111111111111111"
     assert result == {
         "root_workflow_id": "mas-1111111111111111",
         "workflow_id": "mas-1111111111111111",
@@ -120,20 +140,53 @@ def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
     }
 
 
-def test_mini_mas_run_cli_outputs_artifact_locations():
-    handle = Mock()
-    handle.workflow_id = "mas-2222222222222222"
-    handle.get_workflow_id.return_value = "mas-2222222222222222"
-    handle.get_result.return_value = {
-        "root_workflow_id": "mas-2222222222222222",
-        "workflow_id": "mas-2222222222222222",
-        "status": "started",
-        "run_directory": ".mini-mas/runs/mas-2222222222222222",
-        "trajectory_artifact_path": ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json",
-    }
+def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
+    handle = AsyncMockHandle(
+        "mas-1111111111111111",
+        {
+            "root_workflow_id": "mas-1111111111111111",
+            "workflow_id": "mas-1111111111111111",
+            "status": "started",
+            "run_directory": ".mini-mas/runs/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+        },
+    )
+
+    async def start_workflow_async(*_args, **_kwargs):
+        return handle
 
     dbos_module = _mock_dbos_module()
-    dbos_module.DBOS.start_workflow.return_value = handle
+    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        result = run(workflow_id="mas-1111111111111111", wait=False)
+
+    dbos_module.DBOS.start_workflow_async.assert_called_once()
+    assert result == {
+        "root_workflow_id": "mas-1111111111111111",
+        "workflow_id": "mas-1111111111111111",
+        "run_directory": ".mini-mas/runs/mas-1111111111111111",
+        "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+    }
+
+
+def test_mini_mas_run_cli_outputs_artifact_locations():
+    handle = AsyncMockHandle(
+        "mas-2222222222222222",
+        {
+            "root_workflow_id": "mas-2222222222222222",
+            "workflow_id": "mas-2222222222222222",
+            "status": "started",
+            "run_directory": ".mini-mas/runs/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json",
+        },
+    )
+
+    async def start_workflow_async(*_args, **_kwargs):
+        return handle
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         cli_result = CliRunner().invoke(app, ["run", "--workflow-id", "mas-2222222222222222"])
@@ -314,6 +367,15 @@ def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
     dbos_module.DBOS.workflow.assert_called()
 
 
+def test_agent_workflows_are_async_dbos_workflows():
+    import minisweagent.mas.workflows as workflows
+
+    assert inspect.iscoroutinefunction(getattr(workflows.root_agent_workflow, "__wrapped__", workflows.root_agent_workflow))
+    assert inspect.iscoroutinefunction(
+        getattr(workflows.child_agent_workflow, "__wrapped__", workflows.child_agent_workflow)
+    )
+
+
 def test_model_bash_and_trajectory_operations_are_registered_as_dbos_steps():
     """Model calls, ordinary bash execution, and trajectory persistence are checkpointed as DBOS steps."""
     dbos_module = _mock_recording_dbos_module()
@@ -383,7 +445,7 @@ def test_workflow_action_execution_dispatches_standalone_mas_commands():
     env = Mock()
     model = DeterministicModel(outputs=[])
 
-    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+    observations = asyncio.run(execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={}))
 
     env.execute.assert_not_called()
     assert len(observations) == 1
@@ -418,26 +480,40 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
             }
         },
     }
+    async def list_workflows_async(**_kwargs):
+        return [Mock(workflow_id=workflow_id) for workflow_id in events_by_workflow]
+
+    async def get_all_events_async(workflow_id):
+        return events_by_workflow[workflow_id]
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "list_workflows_async", Mock(side_effect=list_workflows_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events_async", Mock(side_effect=get_all_events_async))
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "list_workflows",
-        Mock(return_value=[Mock(workflow_id=workflow_id) for workflow_id in events_by_workflow]),
+        Mock(side_effect=AssertionError("Agent Workflow status dispatch must use list_workflows_async")),
     )
-    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events", Mock(side_effect=events_by_workflow.__getitem__))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "get_all_events",
+        Mock(side_effect=AssertionError("Agent Workflow status dispatch must use get_all_events_async")),
+    )
 
     message = make_output("status", [{"command": "mini-mas status"}])
     model = DeterministicModel(outputs=[])
-    observations = workflows.execute_agent_workflow_actions(
-        message=message,
-        model=model,
-        env=Mock(),
-        template_vars={
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef",
-        },
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=message,
+            model=model,
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
     )
 
-    workflows._dbos.DBOS.list_workflows.assert_called_once_with(
+    workflows._dbos.DBOS.list_workflows_async.assert_called_once_with(
         workflow_id_prefix="mas-0123456789abcdef",
         load_input=False,
         load_output=False,
@@ -466,17 +542,28 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
             ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
         ),
     }
-    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events", Mock(return_value={"mini_mas_status": child_status}))
+    async def get_all_events_async(_workflow_id):
+        return {"mini_mas_status": child_status}
+
+    get_all_events_mock = Mock(side_effect=get_all_events_async)
+    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events_async", get_all_events_mock)
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "get_all_events",
+        Mock(side_effect=AssertionError("Agent Workflow status dispatch must use get_all_events_async")),
+    )
 
     model = DeterministicModel(outputs=[])
-    found = workflows.execute_agent_workflow_actions(
-        message=make_output("status child", [{"command": "mini-mas status mas-0123456789abcdef-c001"}]),
-        model=model,
-        env=Mock(),
-        template_vars={
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef",
-        },
+    found = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("status child", [{"command": "mini-mas status mas-0123456789abcdef-c001"}]),
+            model=model,
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
     )
 
     found_text = _observation_text(found[0])
@@ -485,15 +572,20 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
     assert "lifecycle_state: failed" in found_text
     assert "latest_error: model failed" in found_text
 
-    workflows._dbos.DBOS.get_all_events.return_value = {}
-    missing = workflows.execute_agent_workflow_actions(
-        message=make_output("missing child", [{"command": "mini-mas status mas-0123456789abcdef-c999"}]),
-        model=model,
-        env=Mock(),
-        template_vars={
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef",
-        },
+    async def no_events_async(_workflow_id):
+        return {}
+
+    get_all_events_mock.side_effect = no_events_async
+    missing = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("missing child", [{"command": "mini-mas status mas-0123456789abcdef-c999"}]),
+            model=model,
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
     )
 
     missing_text = _observation_text(missing[0])
@@ -508,7 +600,16 @@ def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypat
     monkeypatch.chdir(tmp_path)
     published = []
     monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
-    monkeypatch.setattr(workflows._dbos.DBOS, "set_event", Mock(side_effect=lambda key, value: published.append((key, value))))
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "set_event",
+        Mock(side_effect=AssertionError("Agent Workflow status publishing must use set_event_async")),
+    )
 
     model = DeterministicModel(outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)])
     env = Mock()
@@ -562,13 +663,22 @@ def test_agent_workflow_publishes_failed_status(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     published = []
     monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
-    monkeypatch.setattr(workflows._dbos.DBOS, "set_event", Mock(side_effect=lambda key, value: published.append(value)))
+
+    async def set_event_async(_key, value):
+        published.append(value)
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "set_event",
+        Mock(side_effect=AssertionError("Agent Workflow status publishing must use set_event_async")),
+    )
 
     model = DeterministicModel(outputs=[])
     env = Mock()
     env.get_template_vars.return_value = {}
 
-    def failing_model(_model, _messages):
+    async def failing_model(_model, _messages):
         raise InterruptAgentFlow(
             {
                 "role": "exit",
@@ -600,7 +710,7 @@ def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
     env.execute.return_value = {"output": "hello\n", "returncode": 0, "exception_info": ""}
     model = DeterministicModel(outputs=[])
 
-    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+    observations = asyncio.run(execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={}))
 
     env.execute.assert_called_once_with({"command": "echo hello"})
     assert "<returncode>0</returncode>" in _observation_text(observations[0])
@@ -623,7 +733,7 @@ def test_workflow_action_execution_rejects_shell_compositions_without_executing_
     env = Mock()
     model = DeterministicModel(outputs=[])
 
-    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+    observations = asyncio.run(execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={}))
 
     env.execute.assert_not_called()
     text = _observation_text(observations[0])
@@ -669,7 +779,7 @@ def test_mas_rejections_use_existing_model_specific_observation_formatters(model
 
     env = Mock()
 
-    observations = execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={})
+    observations = asyncio.run(execute_agent_workflow_actions(message=message, model=model, env=env, template_vars={}))
 
     env.execute.assert_not_called()
     assert expected_marker in observations[0]
@@ -807,6 +917,7 @@ def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, mo
 
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", RecordingSetWorkflowID)
+    child_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
 
     model = DeterministicModel(outputs=[make_output("delegate", [{"command": 'mini-mas spawn "inspect api"'}], cost=0.1)])
     env = Mock()
@@ -863,6 +974,7 @@ def test_detached_spawn_allocates_stable_sibling_child_ids_without_duplicate_enq
 
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
+    child_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
 
     first_message = make_output("delegate first", [{"command": 'mini-mas spawn "first task"'}], cost=0.1)
     second_message = make_output("delegate second", [{"command": 'mini-mas spawn "second task"'}], cost=0.1)
@@ -887,16 +999,18 @@ def test_detached_spawn_allocates_stable_sibling_child_ids_without_duplicate_enq
 
     replay_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", replay_queue)
-    replay_observations = workflows.execute_agent_workflow_actions(
-        message=first_message,
-        model=model,
-        env=env,
-        template_vars={
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef",
-            "spawn_index": 0,
-            "existing_child_workflow_ids": ["mas-0123456789abcdef-c001"],
-        },
+    replay_observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=first_message,
+            model=model,
+            env=env,
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+                "spawn_index": 0,
+                "existing_child_workflow_ids": ["mas-0123456789abcdef-c001"],
+            },
+        )
     )
 
     assert replay_queue.enqueued == []

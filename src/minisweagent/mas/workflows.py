@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from inspect import isawaitable
 
 from minisweagent.exceptions import InterruptAgentFlow
 from minisweagent.mas.artifacts import (
@@ -19,12 +21,16 @@ from minisweagent.mas.status import (
     format_specific_status,
     format_status_tree,
     make_status_snapshot,
-    query_specific_status,
-    query_status_tree,
+    query_specific_status_async,
+    query_status_tree_async,
 )
 
 _dbos = load_dbos()
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
+
+
+async def _maybe_await(value):
+    return await value if isawaitable(value) else value
 
 
 @dataclass
@@ -38,7 +44,7 @@ class AgentWorkflowState:
     spawned_child_workflow_ids: set[str] | None = None
 
 
-def _publish_status_snapshot(
+async def _publish_status_snapshot(
     *,
     root_workflow_id: str,
     workflow_id: str,
@@ -54,7 +60,7 @@ def _publish_status_snapshot(
         latest_error=latest_error,
     )
     try:
-        _dbos.DBOS.set_event(STATUS_EVENT_KEY, snapshot.to_event())
+        await _maybe_await(_dbos.DBOS.set_event_async(STATUS_EVENT_KEY, snapshot.to_event()))
     except Exception:
         if _dbos.DBOS.workflow_id is not None:
             raise
@@ -80,12 +86,12 @@ def _next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
     return f"{parent_workflow_id}-c{spawn_index:03d}"
 
 
-def _enqueue_child_agent_workflow(*, root_workflow_id: str, child_workflow_id: str, task: str) -> None:
+async def _enqueue_child_agent_workflow(*, root_workflow_id: str, child_workflow_id: str, task: str) -> None:
     with _dbos.SetWorkflowID(child_workflow_id):
-        child_agent_queue.enqueue(child_agent_workflow, root_workflow_id, child_workflow_id, task)
+        await child_agent_queue.enqueue_async(child_agent_workflow, root_workflow_id, child_workflow_id, task)
 
 
-def _spawn_detached_child(
+async def _spawn_detached_child(
     *,
     root_workflow_id: str,
     parent_workflow_id: str,
@@ -96,7 +102,7 @@ def _spawn_detached_child(
     child_workflow_id = _next_child_workflow_id(parent_workflow_id, spawn_index)
     metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=child_workflow_id)
     if child_workflow_id not in existing_child_workflow_ids:
-        _enqueue_child_agent_workflow(
+        await _enqueue_child_agent_workflow(
             root_workflow_id=root_workflow_id,
             child_workflow_id=child_workflow_id,
             task=task,
@@ -115,7 +121,7 @@ def _spawn_detached_child(
     }
 
 
-def _dispatch_mas_command(
+async def _dispatch_mas_command(
     classification: MasCommandClassification,
     *,
     root_workflow_id: str | None,
@@ -133,7 +139,7 @@ def _dispatch_mas_command(
                 "extra": {"mas_command_error": "missing_agent_workflow_context"},
             }
         if len(classification.arguments) == 1:
-            snapshots = query_status_tree(_dbos.DBOS, root_workflow_id)
+            snapshots = await query_status_tree_async(_dbos.DBOS, root_workflow_id)
             output = format_status_tree(snapshots, root_workflow_id=root_workflow_id)
             return {
                 "output": output,
@@ -143,7 +149,7 @@ def _dispatch_mas_command(
             }
         if len(classification.arguments) == 2:
             target_workflow_id = classification.arguments[1]
-            snapshot = query_specific_status(
+            snapshot = await query_specific_status_async(
                 _dbos.DBOS,
                 root_workflow_id=root_workflow_id,
                 workflow_id=target_workflow_id,
@@ -187,7 +193,7 @@ def _dispatch_mas_command(
                 "exception_info": "missing_spawn_task",
                 "extra": {"mas_command_error": "missing_spawn_task"},
             }
-        return _spawn_detached_child(
+        return await _spawn_detached_child(
             root_workflow_id=root_workflow_id,
             parent_workflow_id=workflow_id,
             spawn_index=spawn_index,
@@ -215,18 +221,18 @@ def _reject_mas_shell_composition(classification: MasCommandClassification) -> d
 
 
 @_dbos.DBOS.step()
-def query_model_step(model, messages: list[dict]) -> dict:
+async def query_model_step(model, messages: list[dict]) -> dict:
     """Query the model through a DBOS checkpointed step."""
-    return model.query(messages)
+    return await asyncio.to_thread(model.query, messages)
 
 
 @_dbos.DBOS.step()
-def execute_bash_step(env, action: dict) -> dict:
+async def execute_bash_step(env, action: dict) -> dict:
     """Execute ordinary bash through a DBOS checkpointed step."""
-    return env.execute(action)
+    return await asyncio.to_thread(env.execute, action)
 
 
-def _execute_agent_workflow_outputs(
+async def _execute_agent_workflow_outputs(
     *,
     message: dict,
     env,
@@ -245,7 +251,7 @@ def _execute_agent_workflow_outputs(
             if classification.arguments[:1] == ["spawn"]:
                 current_spawn_index += 1
             outputs.append(
-                _dispatch_mas_command(
+                await _dispatch_mas_command(
                     classification,
                     root_workflow_id=root_workflow_id,
                     workflow_id=workflow_id,
@@ -256,16 +262,16 @@ def _execute_agent_workflow_outputs(
         elif classification.kind == MasCommandKind.INVALID:
             outputs.append(_reject_mas_shell_composition(classification))
         else:
-            outputs.append(execute_bash_step(env, action))
+            outputs.append(await _maybe_await(execute_bash_step(env, action)))
     return outputs
 
 
-def execute_agent_workflow_actions(*, message: dict, model, env, template_vars: dict | None = None) -> list[dict]:
+async def execute_agent_workflow_actions(*, message: dict, model, env, template_vars: dict | None = None) -> list[dict]:
     """Execute one model message and return model-specific observation messages."""
     template_vars = template_vars or {}
     child_workflow_ids = template_vars.get("existing_child_workflow_ids", set())
     existing_ids = child_workflow_ids if isinstance(child_workflow_ids, set) else set(child_workflow_ids)
-    outputs = _execute_agent_workflow_outputs(
+    outputs = await _execute_agent_workflow_outputs(
         message=message,
         env=env,
         root_workflow_id=template_vars.get("root_workflow_id"),
@@ -335,7 +341,7 @@ def _initial_messages(model, task: str) -> list[dict]:
     ]
 
 
-def _run_agent_workflow_loop(
+async def _run_agent_workflow_loop(
     *,
     root_workflow_id: str,
     workflow_id: str,
@@ -355,9 +361,10 @@ def _run_agent_workflow_loop(
         state.n_calls += 1
         try:
             message = query_model_step(model, state.messages)
+            message = await _maybe_await(message)
             state.cost += message.get("extra", {}).get("cost", 0.0)
             state.messages.append(message)
-            observations = execute_agent_workflow_actions(
+            observations = await execute_agent_workflow_actions(
                 message=message,
                 model=model,
                 env=env,
@@ -384,7 +391,7 @@ def _run_agent_workflow_loop(
 
 
 @_dbos.DBOS.step()
-def save_root_trajectory_artifact_step(
+async def save_root_trajectory_artifact_step(
     root_workflow_id: str,
     *,
     status: str = "started",
@@ -393,7 +400,8 @@ def save_root_trajectory_artifact_step(
     submission: str = "",
 ) -> dict[str, str]:
     """Persist the Root Agent Workflow trajectory through a DBOS step."""
-    save_trajectory_artifact(
+    await asyncio.to_thread(
+        save_trajectory_artifact,
         root_workflow_id=root_workflow_id,
         workflow_id=root_workflow_id,
         status=status,
@@ -405,7 +413,7 @@ def save_root_trajectory_artifact_step(
 
 
 @_dbos.DBOS.step()
-def save_child_trajectory_artifact_step(
+async def save_child_trajectory_artifact_step(
     root_workflow_id: str,
     workflow_id: str,
     *,
@@ -415,7 +423,8 @@ def save_child_trajectory_artifact_step(
     submission: str = "",
 ) -> dict[str, str]:
     """Persist a Child Agent Workflow trajectory through a DBOS step."""
-    save_trajectory_artifact(
+    await asyncio.to_thread(
+        save_trajectory_artifact,
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         status=status,
@@ -426,7 +435,7 @@ def save_child_trajectory_artifact_step(
     return make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
 
 
-def _run_agent_workflow(
+async def _run_agent_workflow(
     *,
     root_workflow_id: str,
     workflow_id: str,
@@ -436,20 +445,20 @@ def _run_agent_workflow(
     step_limit: int,
     initial_messages: list[dict] | None,
 ) -> dict:
-    _publish_status_snapshot(
+    await _publish_status_snapshot(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         lifecycle_state="running",
     )
     if model is None or env is None:
         metadata = (
-            save_root_trajectory_artifact_step(root_workflow_id)
+            await _maybe_await(save_root_trajectory_artifact_step(root_workflow_id))
             if workflow_id == root_workflow_id
-            else save_child_trajectory_artifact_step(root_workflow_id, workflow_id)
+            else await _maybe_await(save_child_trajectory_artifact_step(root_workflow_id, workflow_id))
         )
         return {"status": "started", "terminal_state": "started", **metadata}
 
-    state = _run_agent_workflow_loop(
+    state = await _run_agent_workflow_loop(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         model=model,
@@ -464,7 +473,7 @@ def _run_agent_workflow(
         terminal_message=state.messages[-1],
         state=state,
     )
-    _publish_status_snapshot(
+    await _publish_status_snapshot(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         lifecycle_state=_lifecycle_state_for_terminal(result["terminal_state"]),
@@ -472,27 +481,31 @@ def _run_agent_workflow(
         latest_error="" if result["terminal_state"] != "failed" else state.messages[-1].get("content", ""),
     )
     if workflow_id == root_workflow_id:
-        save_root_trajectory_artifact_step(
-            root_workflow_id,
-            status=result["terminal_state"],
-            messages=state.messages,
-            model_stats=result["model_stats"],
-            submission=result["submission"],
+        await _maybe_await(
+            save_root_trajectory_artifact_step(
+                root_workflow_id,
+                status=result["terminal_state"],
+                messages=state.messages,
+                model_stats=result["model_stats"],
+                submission=result["submission"],
+            )
         )
     else:
-        save_child_trajectory_artifact_step(
-            root_workflow_id,
-            workflow_id,
-            status=result["terminal_state"],
-            messages=state.messages,
-            model_stats=result["model_stats"],
-            submission=result["submission"],
+        await _maybe_await(
+            save_child_trajectory_artifact_step(
+                root_workflow_id,
+                workflow_id,
+                status=result["terminal_state"],
+                messages=state.messages,
+                model_stats=result["model_stats"],
+                submission=result["submission"],
+            )
         )
     return result
 
 
 @_dbos.DBOS.workflow()
-def root_agent_workflow(
+async def root_agent_workflow(
     root_workflow_id: str,
     *,
     model=None,
@@ -503,7 +516,7 @@ def root_agent_workflow(
 ) -> dict:
     """Root Agent Workflow for the ordinary non-child-coordination MAS path."""
     root_workflow_id = validate_root_workflow_id(root_workflow_id)
-    return _run_agent_workflow(
+    return await _run_agent_workflow(
         root_workflow_id=root_workflow_id,
         workflow_id=root_workflow_id,
         model=model,
@@ -515,7 +528,7 @@ def root_agent_workflow(
 
 
 @_dbos.DBOS.workflow()
-def child_agent_workflow(
+async def child_agent_workflow(
     root_workflow_id: str,
     workflow_id: str,
     task: str,
@@ -528,7 +541,7 @@ def child_agent_workflow(
     """Child Agent Workflow started by detached spawn through the child queue."""
     root_workflow_id = validate_root_workflow_id(root_workflow_id)
     workflow_id = validate_workflow_id(workflow_id)
-    return _run_agent_workflow(
+    return await _run_agent_workflow(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         model=model,
