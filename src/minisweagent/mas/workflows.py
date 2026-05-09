@@ -17,13 +17,21 @@ from minisweagent.mas.authority import DirectChildAuthorityPolicy
 from minisweagent.mas.command_dispatch import MasCommandHandler
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
 from minisweagent.mas.coordination import ChildCoordinator, DBOSCoordinationAdapter
+from minisweagent.mas.remote_lifecycle import (
+    PARENT_DIRECTION_TOPIC,
+    PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
+    RemoteInteractiveAgentLifecycle,
+    continuation_user_message,
+    is_close_signal,
+    is_continuation_signal,
+    make_close_signal,
+    make_continuation_signal,
+)
 from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.status import LifecycleState
 
 _dbos = load_dbos()
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
-PARENT_DIRECTION_TOPIC = "mini_mas_parent_direction"
-PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS = 60 * 60 * 24 * 30
 
 
 async def _maybe_await(value):
@@ -111,27 +119,6 @@ async def _wait_for_parent_direction_signal() -> dict | str:
         )
         if signal is not None:
             return signal
-
-
-def make_continuation_signal(*, source_workflow_id: str, target_workflow_id: str, content: str) -> dict[str, str]:
-    """Build the parent-to-child message payload used for MAS continuation."""
-    return {
-        "type": "continuation",
-        "signal_type": "mas_continuation",
-        "content": content,
-        "source_workflow_id": source_workflow_id,
-        "target_workflow_id": target_workflow_id,
-    }
-
-
-def make_close_signal(*, source_workflow_id: str, target_workflow_id: str) -> dict[str, str]:
-    """Build the neutral parent-to-child message payload used to close a waiting child."""
-    return {
-        "type": "close",
-        "signal_type": "mas_close",
-        "source_workflow_id": source_workflow_id,
-        "target_workflow_id": target_workflow_id,
-    }
 
 
 def _format_continue_output(*, target_workflow_id: str, content: str, snapshot: dict[str, Any]) -> str:
@@ -387,31 +374,6 @@ def _initial_messages(model, task: str) -> list[dict]:
     ]
 
 
-def _is_continuation_signal(signal: dict | str) -> bool:
-    return isinstance(signal, dict) and (
-        signal.get("type") == "continuation" or signal.get("signal_type") == "mas_continuation"
-    )
-
-
-def _is_close_signal(signal: dict | str) -> bool:
-    return isinstance(signal, dict) and (signal.get("type") == "close" or signal.get("signal_type") == "mas_close")
-
-
-def _continuation_user_message(model, signal: dict) -> dict:
-    """Represent parent continuation as a normal model-facing user message."""
-    return model.format_message(
-        role="user",
-        content=str(signal.get("content", "")),
-        extra={
-            "mas": {
-                "signal_type": "mas_continuation",
-                "source_workflow_id": str(signal.get("source_workflow_id", "")),
-                "target_workflow_id": str(signal.get("target_workflow_id", "")),
-            }
-        },
-    )
-
-
 class MasAgent:
     """Plain per-workflow MAS agent loop; DBOS decorators stay on module-level functions."""
 
@@ -428,6 +390,11 @@ class MasAgent:
         self.spawn_count = 0
         self.first_observable_published = False
         self.spawned_child_workflow_ids: set[str] = set()
+        self.remote_lifecycle = RemoteInteractiveAgentLifecycle(
+            root_workflow_id=root_workflow_id,
+            workflow_id=workflow_id,
+            receive_parent_direction=_wait_for_parent_direction_signal,
+        )
 
     async def run(self, *, task: str = "", initial_messages: list[dict] | None = None) -> dict:
         """Run the MAS Agent Workflow until a terminal state or parent direction wait."""
@@ -448,14 +415,14 @@ class MasAgent:
             lifecycle_state = _lifecycle_state_for_terminal(result["terminal_state"])
             latest_error = _latest_error_for_terminal(result["terminal_state"], self.messages[-1])
 
-            if self._should_wait_for_parent(result):
+            if self.remote_lifecycle.should_wait_for_parent(result):
                 waiting_result = await self._wait_for_parent_after_submission(result)
                 parent_direction_signal = waiting_result.get("parent_direction_signal")
-                if _is_continuation_signal(parent_direction_signal):
-                    self.add_messages(_continuation_user_message(self.model, parent_direction_signal))
+                if self.remote_lifecycle.is_continuation_signal(parent_direction_signal):
+                    self.add_messages(self.remote_lifecycle.continuation_user_message(self.model, parent_direction_signal))
                     self.first_observable_published = False
                     continue
-                if _is_close_signal(parent_direction_signal):
+                if self.remote_lifecycle.is_close_signal(parent_direction_signal):
                     return await self._close_after_parent_signal(waiting_result, result)
                 return waiting_result
 
@@ -588,46 +555,45 @@ class MasAgent:
             )
         )
 
-    def _should_wait_for_parent(self, result: dict[str, Any]) -> bool:
-        return self.workflow_id != self.root_workflow_id and result["terminal_state"] == "Submitted"
-
     async def _wait_for_parent_after_submission(self, result: dict[str, Any]) -> dict[str, Any]:
-        waiting_result = {
-            **result,
-            "status": "waiting_for_parent",
-            "terminal_state": "waiting_for_parent",
-            "latest_submission": result["submission"],
-        }
-        await self._publish_status("waiting_for_parent", latest_submission=result["submission"])
-        await _publish_first_observable_event_once(
-            self,
-            root_workflow_id=self.root_workflow_id,
-            workflow_id=self.workflow_id,
-            lifecycle_state="waiting_for_parent",
-            latest_submission=result["submission"],
+        return await self.remote_lifecycle.wait_after_submission(
+            result,
+            publish_waiting_status=lambda lifecycle_state: self._publish_status(
+                lifecycle_state,
+                latest_submission=result["submission"],
+            ),
+            publish_first_observable=lambda lifecycle_state: _publish_first_observable_event_once(
+                self,
+                root_workflow_id=self.root_workflow_id,
+                workflow_id=self.workflow_id,
+                lifecycle_state=lifecycle_state,
+                latest_submission=result["submission"],
+            ),
+            save_trajectory=lambda status: self._save_trajectory(
+                status=status,
+                model_stats=result["model_stats"],
+                submission=result["submission"],
+            ),
         )
-        await self._save_trajectory(
-            status="waiting_for_parent",
-            model_stats=result["model_stats"],
-            submission=result["submission"],
-        )
-        # This receive is intentionally in async workflow code, not a DBOS step.
-        waiting_result["parent_direction_signal"] = await _wait_for_parent_direction_signal()
-        return waiting_result
 
     async def _close_after_parent_signal(self, waiting_result: dict[str, Any], submitted_result: dict[str, Any]) -> dict:
-        closed_result = {
-            **waiting_result,
-            "status": "closed",
-            "terminal_state": "closed",
-        }
-        await self._publish_status("closed", latest_submission=submitted_result["submission"])
-        await self._save_trajectory(
-            status="closed",
-            model_stats=submitted_result["model_stats"],
-            submission=submitted_result["submission"],
+        return await self.remote_lifecycle.close_after_parent_signal(
+            waiting_result,
+            publish_closed_status=lambda lifecycle_state: self._publish_status(
+                lifecycle_state,
+                latest_submission=submitted_result["submission"],
+            ),
+            save_trajectory=lambda status: self._save_trajectory(
+                status=status,
+                model_stats=submitted_result["model_stats"],
+                submission=submitted_result["submission"],
+            ),
         )
-        return closed_result
+
+
+_is_continuation_signal = is_continuation_signal
+_is_close_signal = is_close_signal
+_continuation_user_message = continuation_user_message
 
 
 @_dbos.DBOS.step()
