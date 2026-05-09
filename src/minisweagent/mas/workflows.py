@@ -444,6 +444,34 @@ async def _wait_for_first_observable_events(
     return sorted(ready_snapshots, key=_snapshot_workflow_id), still_running_ids, timed_out
 
 
+async def _wait_for_direct_child_first_observable_events_with_status(
+    *,
+    parent_workflow_id: str,
+    child_workflow_ids: list[str],
+    wait_all: bool,
+    timeout_seconds: float | None,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Publish the parent's transient child-wait status around First Observable Event waiting."""
+    root_workflow_id = root_id_for_workflow(parent_workflow_id)
+    await _publish_status_snapshot(
+        root_workflow_id=root_workflow_id,
+        workflow_id=parent_workflow_id,
+        lifecycle_state="waiting_for_child",
+    )
+    try:
+        return await _wait_for_first_observable_events(
+            child_workflow_ids=child_workflow_ids,
+            wait_all=wait_all,
+            timeout_seconds=timeout_seconds,
+        )
+    finally:
+        await _publish_status_snapshot(
+            root_workflow_id=root_workflow_id,
+            workflow_id=parent_workflow_id,
+            lifecycle_state="running",
+        )
+
+
 def _child_metadata_from_status(snapshot: dict[str, Any]) -> dict[str, str]:
     return {
         "task": "",
@@ -752,10 +780,13 @@ async def _dispatch_mas_command(
             existing_child_workflow_ids=existing_child_workflow_ids,
         )
         if request.wait:
-            ready_snapshots, still_running_ids, timed_out = await _wait_for_first_observable_events(
-                child_workflow_ids=[child["workflow_id"] for child in children],
-                wait_all=request.wait_all,
-                timeout_seconds=request.timeout_seconds,
+            ready_snapshots, still_running_ids, timed_out = (
+                await _wait_for_direct_child_first_observable_events_with_status(
+                    parent_workflow_id=current_workflow_id,
+                    child_workflow_ids=[child["workflow_id"] for child in children],
+                    wait_all=request.wait_all,
+                    timeout_seconds=request.timeout_seconds,
+                )
             )
             return _spawn_command_result(
                 request=request,
@@ -818,10 +849,13 @@ async def _dispatch_mas_command(
                 },
             }
         wait_all = request.wait_all or request.workflow_id is not None
-        ready_snapshots, still_running_ids, timed_out = await _wait_for_first_observable_events(
-            child_workflow_ids=[child["workflow_id"] for child in children],
-            wait_all=wait_all,
-            timeout_seconds=request.timeout_seconds,
+        ready_snapshots, still_running_ids, timed_out = (
+            await _wait_for_direct_child_first_observable_events_with_status(
+                parent_workflow_id=current_workflow_id,
+                child_workflow_ids=[child["workflow_id"] for child in children],
+                wait_all=wait_all,
+                timeout_seconds=request.timeout_seconds,
+            )
         )
         wait_mode = "one" if request.workflow_id is not None else ("all" if wait_all else "any")
         output = _format_wait_summary_output(
