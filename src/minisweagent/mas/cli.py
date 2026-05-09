@@ -14,8 +14,6 @@ from minisweagent.mas.runtime import (
     start_root_agent_workflow,
     wait_for_agent_workflow,
 )
-from minisweagent.mas.status import format_specific_status, format_status_tree
-from minisweagent.mas.workflows import _format_wait_summary_output
 
 app = typer.Typer(rich_markup_mode="rich", help="Run DBOS-backed mini-SWE-agent MAS commands.")
 console = Console(highlight=False, soft_wrap=True)
@@ -74,21 +72,8 @@ def status(
     ] = None,
 ) -> dict[str, Any]:
     result = dict(get_agent_workflow_status(workflow_id=workflow_id, system_database_url=system_database_url))
-    if result["kind"] == "tree":
-        console.print(
-            format_status_tree(
-                result["snapshots"],
-                root_workflow_id=result["root_workflow_id"],
-            ),
-            end="",
-        )
-        return result
-    if result["kind"] == "single":
-        console.print(format_specific_status(result["snapshot"]), end="")
-        return result
-
-    console.print(f"Workflow not found in current Agent Workflow Tree: {result['workflow_id']}")
-    raise typer.Exit(code=1)
+    console.print(result["output"], end="")
+    raise typer.Exit(code=result["returncode"])
 
 
 @app.command(help="Wait for one Child Agent Workflow First Observable Event.")
@@ -114,20 +99,8 @@ def wait(
             system_database_url=system_database_url,
         )
     )
-    console.print(
-        _format_wait_summary_output(
-            command_name="mini-mas wait",
-            wait_all=True,
-            timed_out=result["timed_out"],
-            children=result["children"],
-            ready_snapshots=result["ready_children"],
-            still_running_ids=result["still_running_child_workflow_ids"],
-        ).replace("wait_mode: all", "wait_mode: one", 1),
-        end="",
-    )
-    if result["timed_out"]:
-        raise typer.Exit(code=1)
-    return result
+    console.print(result["output"], end="")
+    raise typer.Exit(code=result["returncode"])
 
 
 @app.command("continue", help="Send a Continuation Signal to one waiting Child Agent Workflow.")

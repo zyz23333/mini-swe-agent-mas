@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 from typer.testing import CliRunner
 
-from minisweagent.mas.cli import app, run, status
+from minisweagent.mas.cli import app, run
 from minisweagent.mas.runtime import close_agent_workflow, make_root_workflow_id
 from minisweagent.models.test_models import (
     DeterministicModel,
@@ -75,6 +75,44 @@ def _recording_child_queue():
             return handle
 
     return RecordingChildQueue()
+
+
+def _workflow_status_record(workflow_id: str, parent_workflow_id: str | None = None) -> Mock:
+    status = Mock()
+    status.workflow_id = workflow_id
+    status.parent_workflow_id = parent_workflow_id
+    return status
+
+
+def _set_agent_workflow_context(monkeypatch, workflows, workflow_id: str | None) -> None:
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", workflow_id)
+
+
+def _mock_direct_child_status_events(monkeypatch, workflows, parent_workflow_id: str, events_by_workflow: dict) -> None:
+    async def list_workflows_async(**kwargs):
+        assert kwargs.get("parent_workflow_id") == parent_workflow_id
+        requested_ids = kwargs.get("workflow_ids")
+        workflow_ids = requested_ids if requested_ids is not None else events_by_workflow.keys()
+        return [
+            _workflow_status_record(workflow_id, parent_workflow_id)
+            for workflow_id in workflow_ids
+            if workflow_id in events_by_workflow
+        ]
+
+    async def get_all_events_async(workflow_id):
+        return events_by_workflow[workflow_id]
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "list_workflows_async", Mock(side_effect=list_workflows_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events_async", Mock(side_effect=get_all_events_async))
+
+
+def _mock_single_direct_child_status(monkeypatch, workflows, parent_workflow_id: str, snapshot: dict) -> None:
+    _mock_direct_child_status_events(
+        monkeypatch,
+        workflows,
+        parent_workflow_id,
+        {snapshot["workflow_id"]: {"mini_mas_status": snapshot}},
+    )
 
 
 class AsyncMockHandle:
@@ -172,42 +210,17 @@ def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
     }
 
 
-def test_external_close_runtime_dispatches_same_workflow_signal_path(monkeypatch):
-    import minisweagent.mas.workflows as workflows
-
+def test_external_close_runtime_is_unsupported_until_interactive_root_terminal_exists(monkeypatch):
     dbos_module = _mock_dbos_module()
-    calls = []
-
-    async def send_close_signal_async(**kwargs):
-        calls.append(kwargs)
-        return {
-            "ok": True,
-            "output": "Close signal sent\n",
-            "returncode": 0,
-            "exception_info": "",
-            "extra": {},
-        }
-
-    monkeypatch.setattr(workflows, "send_close_signal_async", send_close_signal_async)
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         result = close_agent_workflow(workflow_id="mas-1111111111111111-c001")
 
-    dbos_module.DBOS.assert_called_once_with(
-        config={
-            "name": "mini-swe-agent-mas",
-            "system_database_url": None,
-        }
-    )
-    dbos_module.DBOS.launch.assert_called_once_with()
-    assert calls == [
-        {
-            "root_workflow_id": "mas-1111111111111111",
-            "source_workflow_id": "mas-1111111111111111",
-            "target_workflow_id": "mas-1111111111111111-c001",
-        }
-    ]
-    assert result["returncode"] == 0
+    dbos_module.DBOS.assert_not_called()
+    dbos_module.DBOS.launch.assert_not_called()
+    assert result["returncode"] == 2
+    assert result["exception_info"] == "external_coordination_unsupported"
+    assert "unsupported until terminal commands are routed through an Interactive Root Agent Workflow" in result["output"]
 
 
 def test_mini_mas_run_cli_outputs_artifact_locations():
@@ -241,68 +254,45 @@ def test_mini_mas_run_cli_outputs_artifact_locations():
     )
 
 
-def test_mini_mas_status_cli_outputs_root_tree(monkeypatch):
-    tree = [
-        {
-            "workflow_id": "mas-2222222222222222",
-            "root_workflow_id": "mas-2222222222222222",
-            "lifecycle_state": "running",
-            "run_directory": ".mini-mas/runs/mas-2222222222222222",
-            "trajectory_artifact_path": ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json",
-        },
-        {
-            "workflow_id": "mas-2222222222222222-c001",
-            "root_workflow_id": "mas-2222222222222222",
-            "lifecycle_state": "closed",
-            "latest_submission": "child done",
-            "run_directory": ".mini-mas/runs/mas-2222222222222222",
-            "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222-c001.traj.json"
-            ),
-        },
-    ]
+def test_mini_mas_status_cli_reports_external_coordination_unsupported(monkeypatch):
     monkeypatch.setattr(
         "minisweagent.mas.cli.get_agent_workflow_status",
         Mock(
             return_value={
-                "kind": "tree",
-                "root_workflow_id": "mas-2222222222222222",
-                "snapshots": tree,
+                "kind": "unsupported",
+                "workflow_id": "mas-2222222222222222",
+                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
+                "returncode": 2,
+                "exception_info": "external_coordination_unsupported",
+                "extra": {"mas_command_error": "external_coordination_unsupported"},
             }
         ),
     )
 
-    result = status("mas-2222222222222222")
-
-    assert result["kind"] == "tree"
     cli_result = CliRunner().invoke(app, ["status", "mas-2222222222222222"])
-    assert cli_result.exit_code == 0
-    assert "Agent Workflow Tree: mas-2222222222222222" in cli_result.stdout
-    assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
-    assert "lifecycle_state: closed" in cli_result.stdout
-    assert "latest_submission: child done" in cli_result.stdout
-    assert "accepted" not in cli_result.stdout.lower()
-    assert "rejected" not in cli_result.stdout.lower()
-    assert "aborted" not in cli_result.stdout.lower()
-    assert "cancel" not in cli_result.stdout.lower()
+    assert cli_result.exit_code == 2
+    assert "unsupported" in cli_result.stdout
 
 
-def test_mini_mas_status_cli_reports_missing_descendant(monkeypatch):
+def test_mini_mas_status_cli_does_not_support_missing_descendant_lookup(monkeypatch):
     monkeypatch.setattr(
         "minisweagent.mas.cli.get_agent_workflow_status",
         Mock(
             return_value={
-                "kind": "missing",
-                "root_workflow_id": "mas-2222222222222222",
+                "kind": "unsupported",
                 "workflow_id": "mas-2222222222222222-c999",
+                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
+                "returncode": 2,
+                "exception_info": "external_coordination_unsupported",
+                "extra": {"mas_command_error": "external_coordination_unsupported"},
             }
         ),
     )
 
     cli_result = CliRunner().invoke(app, ["status", "mas-2222222222222222-c999"])
 
-    assert cli_result.exit_code == 1
-    assert "Workflow not found in current Agent Workflow Tree: mas-2222222222222222-c999" in cli_result.stdout
+    assert cli_result.exit_code == 2
+    assert "unsupported" in cli_result.stdout
 
 
 def test_root_workflow_ids_use_mas_16_hex_shape():
@@ -500,18 +490,8 @@ def test_workflow_action_execution_dispatches_standalone_mas_commands():
 def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     events_by_workflow = {
-        "mas-0123456789abcdef": {
-            "mini_mas_status": {
-                "workflow_id": "mas-0123456789abcdef",
-                "root_workflow_id": "mas-0123456789abcdef",
-                "lifecycle_state": "running",
-                "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
-                "trajectory_artifact_path": (
-                    ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef.traj.json"
-                ),
-            }
-        },
         "mas-0123456789abcdef-c001": {
             "mini_mas_status": {
                 "workflow_id": "mas-0123456789abcdef-c001",
@@ -525,14 +505,7 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
             }
         },
     }
-    async def list_workflows_async(**_kwargs):
-        return [Mock(workflow_id=workflow_id) for workflow_id in events_by_workflow]
-
-    async def get_all_events_async(workflow_id):
-        return events_by_workflow[workflow_id]
-
-    monkeypatch.setattr(workflows._dbos.DBOS, "list_workflows_async", Mock(side_effect=list_workflows_async))
-    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events_async", Mock(side_effect=get_all_events_async))
+    _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef", events_by_workflow)
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "list_workflows",
@@ -559,15 +532,14 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     )
 
     workflows._dbos.DBOS.list_workflows_async.assert_called_once_with(
-        workflow_id_prefix="mas-0123456789abcdef",
+        parent_workflow_id="mas-0123456789abcdef",
         load_input=False,
         load_output=False,
     )
     text = _observation_text(observations[0])
     assert "<returncode>0</returncode>" in text
-    assert "Agent Workflow Tree" in text
-    assert "workflow_id: mas-0123456789abcdef" in text
-    assert "lifecycle_state: running" in text
+    assert "Direct Child Agent Workflows for: mas-0123456789abcdef" in text
+    assert "workflow_id: mas-0123456789abcdef\n" not in text
     assert "workflow_id: mas-0123456789abcdef-c001" in text
     assert "lifecycle_state: waiting_for_parent" in text
     assert "latest_submission: ready for review" in text
@@ -577,6 +549,7 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
 def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_status = {
         "workflow_id": "mas-0123456789abcdef-c001",
         "root_workflow_id": "mas-0123456789abcdef",
@@ -587,11 +560,12 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
             ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
         ),
     }
-    async def get_all_events_async(_workflow_id):
-        return {"mini_mas_status": child_status}
-
-    get_all_events_mock = Mock(side_effect=get_all_events_async)
-    monkeypatch.setattr(workflows._dbos.DBOS, "get_all_events_async", get_all_events_mock)
+    _mock_direct_child_status_events(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {"mas-0123456789abcdef-c001": {"mini_mas_status": child_status}},
+    )
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "get_all_events",
@@ -617,10 +591,6 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
     assert "lifecycle_state: failed" in found_text
     assert "latest_error: model failed" in found_text
 
-    async def no_events_async(_workflow_id):
-        return {}
-
-    get_all_events_mock.side_effect = no_events_async
     missing = asyncio.run(
         workflows.execute_agent_workflow_actions(
             message=make_output("missing child", [{"command": "mini-mas status mas-0123456789abcdef-c999"}]),
@@ -635,7 +605,7 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
 
     missing_text = _observation_text(missing[0])
     assert "<returncode>1</returncode>" in missing_text
-    assert "Workflow not found in current Agent Workflow Tree: mas-0123456789abcdef-c999" in missing_text
+    assert "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef: mas-0123456789abcdef-c999" in missing_text
 
 
 def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypatch, tmp_path):
@@ -1168,7 +1138,7 @@ def test_root_agent_workflow_keeps_standalone_mas_commands_out_of_bash_step(tmp_
     bash_step.assert_not_called()
     assert result["terminal_state"] == "limits_exceeded"
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
-    assert "Agent Workflow Tree: mas-0123456789abcdef" in _observation_text(artifact["messages"][3])
+    assert "Direct Child Agent Workflows for: mas-0123456789abcdef" in _observation_text(artifact["messages"][3])
 
 
 def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, monkeypatch):
@@ -1273,6 +1243,7 @@ def test_detached_spawn_allocates_stable_sibling_child_ids_without_duplicate_enq
 
     replay_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", replay_queue)
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     replay_observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
             message=first_message,
@@ -1345,9 +1316,136 @@ def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_pat
     assert "trajectory_artifact_path: .mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c002.traj.json" in observation
 
 
+def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(tmp_path, monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    monkeypatch.chdir(tmp_path)
+    child_queue = _recording_child_queue()
+
+    class NoopSetWorkflowID:
+        def __init__(self, workflow_id):
+            self.workflow_id = workflow_id
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
+    model = DeterministicModel(
+        outputs=[make_output("delegate to grandchildren", [{"command": 'mini-mas spawn "task A" "task B"'}], cost=0.1)]
+    )
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "delegate recursively",
+        model=model,
+        env=env,
+        step_limit=1,
+    )
+
+    assert result["terminal_state"] == "limits_exceeded"
+    assert [call["args"][:3] for call in child_queue.enqueued] == [
+        ("mas-0123456789abcdef", "mas-0123456789abcdef-c001-c001", "task A"),
+        ("mas-0123456789abcdef", "mas-0123456789abcdef-c001-c002", "task B"),
+    ]
+    observation = _observation_text(json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())["messages"][3])
+    assert "workflow_id: mas-0123456789abcdef-c001-c001" in observation
+    assert "workflow_id: mas-0123456789abcdef-c001-c002" in observation
+    assert "run_directory: .mini-mas/runs/mas-0123456789abcdef" in observation
+    assert (
+        "trajectory_artifact_path: "
+        ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001-c001.traj.json"
+        in observation
+    )
+
+
+def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    first_queue = _recording_child_queue()
+    monkeypatch.setattr(workflows, "child_agent_queue", first_queue)
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
+
+    for parent_workflow_id, queue in [
+        ("mas-0123456789abcdef-c001", first_queue),
+        ("mas-0123456789abcdef-c002", _recording_child_queue()),
+    ]:
+        monkeypatch.setattr(workflows, "child_agent_queue", queue)
+        _set_agent_workflow_context(monkeypatch, workflows, parent_workflow_id)
+        asyncio.run(
+            workflows.execute_agent_workflow_actions(
+                message=make_output("delegate", [{"command": 'mini-mas spawn "task"'}]),
+                model=DeterministicModel(outputs=[]),
+                env=Mock(),
+                template_vars={"spawn_index": 0},
+            )
+        )
+
+    assert [call["args"][1] for call in first_queue.enqueued] == ["mas-0123456789abcdef-c001-c001"]
+    assert [call["args"][1] for call in queue.enqueued] == ["mas-0123456789abcdef-c002-c001"]
+
+
+def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    _mock_single_direct_child_status(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {
+            "workflow_id": "mas-0123456789abcdef-c001",
+            "root_workflow_id": "mas-0123456789abcdef",
+            "lifecycle_state": "running",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "get_event_async",
+        Mock(side_effect=AssertionError("Transitive wait must not wait on a grandchild event")),
+    )
+
+    status_result = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("bad status", [{"command": "mini-mas status mas-0123456789abcdef-c001-c001"}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={},
+        )
+    )
+    wait_result = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("bad wait", [{"command": "mini-mas wait mas-0123456789abcdef-c001-c001"}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={},
+        )
+    )
+
+    for observations in (status_result, wait_result):
+        text = _observation_text(observations[0])
+        assert "<returncode>1</returncode>" in text
+        assert (
+            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef: "
+            "mas-0123456789abcdef-c001-c001"
+        ) in text
+
+
 def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
@@ -1410,6 +1508,7 @@ def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
 def test_waited_spawn_all_and_partial_timeout(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
@@ -1462,6 +1561,7 @@ def test_waited_spawn_all_and_partial_timeout(monkeypatch):
 def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
@@ -1498,9 +1598,10 @@ def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
     ]
 
 
-def test_spawn_timeout_without_wait_is_invalid():
+def test_spawn_timeout_without_wait_is_invalid(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     message = make_output("invalid", [{"command": 'mini-mas spawn --timeout 1 "task"'}])
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
@@ -1522,6 +1623,22 @@ def test_spawn_timeout_without_wait_is_invalid():
 def test_workflow_wait_for_specific_child_uses_first_observable_event(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    child_status = {
+        "workflow_id": "mas-0123456789abcdef-c001",
+        "root_workflow_id": "mas-0123456789abcdef",
+        "lifecycle_state": "running",
+        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "trajectory_artifact_path": (
+            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+        ),
+    }
+    _mock_direct_child_status_events(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {"mas-0123456789abcdef-c001": {"mini_mas_status": child_status}},
+    )
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "asyncio_wait",
@@ -1568,15 +1685,9 @@ def test_workflow_wait_for_specific_child_uses_first_observable_event(monkeypatc
 def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
-    snapshots = [
-        {
-            "workflow_id": "mas-0123456789abcdef",
-            "root_workflow_id": "mas-0123456789abcdef",
-            "lifecycle_state": "running",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
-            "trajectory_artifact_path": ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef.traj.json",
-        },
-        {
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    statuses = {
+        "mas-0123456789abcdef-c001": {
             "workflow_id": "mas-0123456789abcdef-c001",
             "root_workflow_id": "mas-0123456789abcdef",
             "lifecycle_state": "running",
@@ -1585,7 +1696,7 @@ def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatc
                 ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
             ),
         },
-        {
+        "mas-0123456789abcdef-c002": {
             "workflow_id": "mas-0123456789abcdef-c002",
             "root_workflow_id": "mas-0123456789abcdef",
             "lifecycle_state": "running",
@@ -1594,10 +1705,13 @@ def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatc
                 ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c002.traj.json"
             ),
         },
-    ]
-
-    async def query_status_tree_async(_dbos_api, _root_workflow_id):
-        return snapshots
+    }
+    _mock_direct_child_status_events(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {workflow_id: {"mini_mas_status": snapshot} for workflow_id, snapshot in statuses.items()},
+    )
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
         assert key == "mini_mas_first_observable"
@@ -1615,7 +1729,6 @@ def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatc
         await asyncio.sleep(10)
         return None
 
-    monkeypatch.setattr(workflows, "query_status_tree_async", query_status_tree_async)
     monkeypatch.setattr(workflows._dbos.DBOS, "get_event_async", Mock(side_effect=get_event_async))
     monkeypatch.setattr(workflows._dbos.DBOS, "asyncio_wait", Mock(wraps=asyncio.wait))
 
@@ -1653,20 +1766,22 @@ def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatc
 def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
-    snapshots = [
-        {
-            "workflow_id": "mas-0123456789abcdef-c001",
-            "root_workflow_id": "mas-0123456789abcdef",
-            "lifecycle_state": "running",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
-            "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
-            ),
-        }
-    ]
-
-    async def query_status_tree_async(_dbos_api, _root_workflow_id):
-        return snapshots
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    child_status = {
+        "workflow_id": "mas-0123456789abcdef-c001",
+        "root_workflow_id": "mas-0123456789abcdef",
+        "lifecycle_state": "running",
+        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "trajectory_artifact_path": (
+            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+        ),
+    }
+    _mock_direct_child_status_events(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {"mas-0123456789abcdef-c001": {"mini_mas_status": child_status}},
+    )
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
         assert workflow_id == "mas-0123456789abcdef-c001"
@@ -1674,7 +1789,6 @@ def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monk
         assert timeout_seconds == 0.01
         await asyncio.sleep(10)
 
-    monkeypatch.setattr(workflows, "query_status_tree_async", query_status_tree_async)
     monkeypatch.setattr(workflows._dbos.DBOS, "get_event_async", Mock(side_effect=get_event_async))
     monkeypatch.setattr(workflows._dbos.DBOS, "asyncio_wait", Mock(wraps=asyncio.wait))
 
@@ -1699,26 +1813,28 @@ def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monk
 def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
-    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
-        assert root_workflow_id == "mas-0123456789abcdef"
-        assert workflow_id == "mas-0123456789abcdef-c001"
-        return {
-            "workflow_id": workflow_id,
-            "root_workflow_id": root_workflow_id,
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    _mock_single_direct_child_status(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {
+            "workflow_id": "mas-0123456789abcdef-c001",
+            "root_workflow_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
             "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
             "trajectory_artifact_path": (
                 ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
             ),
             "latest_submission": "first answer",
-        }
+        },
+    )
 
     sent = []
 
     async def send_async(destination_id, message, topic=None):
         sent.append((destination_id, message, topic))
 
-    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
     monkeypatch.setattr(workflows._dbos.DBOS, "send_async", Mock(side_effect=send_async))
     monkeypatch.setattr(
         workflows._dbos.DBOS,
@@ -1764,26 +1880,28 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
 def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
-    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
-        assert root_workflow_id == "mas-0123456789abcdef"
-        assert workflow_id == "mas-0123456789abcdef-c001"
-        return {
-            "workflow_id": workflow_id,
-            "root_workflow_id": root_workflow_id,
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    _mock_single_direct_child_status(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {
+            "workflow_id": "mas-0123456789abcdef-c001",
+            "root_workflow_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
             "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
             "trajectory_artifact_path": (
                 ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
             ),
             "latest_submission": "first answer",
-        }
+        },
+    )
 
     sent = []
 
     async def send_async(destination_id, message, topic=None):
         sent.append((destination_id, message, topic))
 
-    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
     monkeypatch.setattr(workflows._dbos.DBOS, "send_async", Mock(side_effect=send_async))
     monkeypatch.setattr(
         workflows._dbos.DBOS,
@@ -1830,19 +1948,22 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
 @pytest.mark.parametrize(
     ("command", "expected_error"),
     [
-        ("mini-mas continue mas-0123456789abcdef root", "Cannot continue the Root Agent Workflow"),
-        ("mini-mas continue mas-fedcba9876543210-c001 no", "Workflow not found in current Agent Workflow Tree"),
-        ("mini-mas continue mas-0123456789abcdef-c002 no", "Workflow not found in current Agent Workflow Tree"),
+        ("mini-mas continue mas-0123456789abcdef root", "Cannot continue the current Agent Workflow"),
+        (
+            "mini-mas continue mas-fedcba9876543210-c001 no",
+            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+        ),
+        (
+            "mini-mas continue mas-0123456789abcdef-c002 no",
+            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+        ),
     ],
 )
 def test_workflow_continue_rejects_root_outside_tree_and_missing_children(monkeypatch, command, expected_error):
     import minisweagent.mas.workflows as workflows
 
-    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
-        assert root_workflow_id == "mas-0123456789abcdef"
-        assert workflow_id == "mas-0123456789abcdef-c002"
-
-    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef", {})
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "send_async",
@@ -1869,6 +1990,8 @@ def test_workflow_continue_rejects_root_outside_tree_and_missing_children(monkey
 def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef-c001")
+    _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef-c001", {})
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "send_async",
@@ -1889,25 +2012,28 @@ def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Workflow not found in current Agent Workflow Tree: mas-0123456789abcdef-c002" in text
+    assert "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
 
 
 @pytest.mark.parametrize(
     ("command", "expected_error"),
     [
-        ("mini-mas close mas-0123456789abcdef", "Cannot close the Root Agent Workflow"),
-        ("mini-mas close mas-fedcba9876543210-c001", "Workflow not found in current Agent Workflow Tree"),
-        ("mini-mas close mas-0123456789abcdef-c002", "Workflow not found in current Agent Workflow Tree"),
+        ("mini-mas close mas-0123456789abcdef", "Cannot close the current Agent Workflow"),
+        (
+            "mini-mas close mas-fedcba9876543210-c001",
+            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+        ),
+        (
+            "mini-mas close mas-0123456789abcdef-c002",
+            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+        ),
     ],
 )
 def test_workflow_close_rejects_root_outside_tree_and_missing_children(monkeypatch, command, expected_error):
     import minisweagent.mas.workflows as workflows
 
-    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
-        assert root_workflow_id == "mas-0123456789abcdef"
-        assert workflow_id == "mas-0123456789abcdef-c002"
-
-    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef", {})
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "send_async",
@@ -1934,6 +2060,8 @@ def test_workflow_close_rejects_root_outside_tree_and_missing_children(monkeypat
 def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef-c001")
+    _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef-c001", {})
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "send_async",
@@ -1954,25 +2082,28 @@ def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Workflow not found in current Agent Workflow Tree: mas-0123456789abcdef-c002" in text
+    assert "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
 
 
 @pytest.mark.parametrize("lifecycle_state", ["closed", "failed", "limits_exceeded", "running"])
 def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, lifecycle_state):
     import minisweagent.mas.workflows as workflows
 
-    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
-        return {
-            "workflow_id": workflow_id,
-            "root_workflow_id": root_workflow_id,
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    _mock_single_direct_child_status(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {
+            "workflow_id": "mas-0123456789abcdef-c001",
+            "root_workflow_id": "mas-0123456789abcdef",
             "lifecycle_state": lifecycle_state,
             "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
             "trajectory_artifact_path": (
                 ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
             ),
-        }
-
-    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+        },
+    )
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "send_async",
@@ -2035,21 +2166,25 @@ def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, l
 def test_mas_continue_uses_existing_model_specific_observation_formatters(monkeypatch, model, message, expected_marker):
     import minisweagent.mas.workflows as workflows
 
-    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
-        return {
-            "workflow_id": workflow_id,
-            "root_workflow_id": root_workflow_id,
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
+    _mock_single_direct_child_status(
+        monkeypatch,
+        workflows,
+        "mas-0123456789abcdef",
+        {
+            "workflow_id": "mas-0123456789abcdef-c001",
+            "root_workflow_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
             "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
             "trajectory_artifact_path": (
                 ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
             ),
-        }
+        },
+    )
 
     async def send_async(_destination_id, _message, topic=None):
         assert topic == workflows.PARENT_DIRECTION_TOPIC
 
-    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
     monkeypatch.setattr(workflows._dbos.DBOS, "send_async", Mock(side_effect=send_async))
 
     observations = asyncio.run(
@@ -2238,91 +2373,43 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
 
 
 def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
-    ready = {
-        "workflow_id": "mas-2222222222222222-c001",
-        "lifecycle_state": "waiting_for_parent",
-        "latest_submission": "ready",
-        "run_directory": ".mini-mas/runs/mas-2222222222222222",
-        "trajectory_artifact_path": (
-            ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222-c001.traj.json"
-        ),
-    }
     monkeypatch.setattr(
         "minisweagent.mas.cli.wait_for_agent_workflow",
         Mock(
             return_value={
                 "workflow_id": "mas-2222222222222222-c001",
-                "root_workflow_id": "mas-2222222222222222",
-                "wait_mode": "one",
-                "timed_out": False,
-                "ready_children": [ready],
-                "still_running_child_workflow_ids": [],
-                "children": [
-                    {
-                        "task": "",
-                        "workflow_id": "mas-2222222222222222-c001",
-                        "root_workflow_id": "mas-2222222222222222",
-                        "run_directory": ".mini-mas/runs/mas-2222222222222222",
-                        "trajectory_artifact_path": (
-                            ".mini-mas/runs/mas-2222222222222222/trajectories/"
-                            "mas-2222222222222222-c001.traj.json"
-                        ),
-                    }
-                ],
+                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
+                "returncode": 2,
+                "exception_info": "external_coordination_unsupported",
+                "extra": {"mas_command_error": "external_coordination_unsupported"},
             }
         ),
     )
 
     cli_result = CliRunner().invoke(app, ["wait", "mas-2222222222222222-c001", "--timeout", "0.01"])
 
-    assert cli_result.exit_code == 0
-    assert "mini-mas wait completed" in cli_result.stdout
-    assert "wait_mode: one" in cli_result.stdout
-    assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
-    assert "latest_submission: ready" in cli_result.stdout
+    assert cli_result.exit_code == 2
+    assert "unsupported" in cli_result.stdout
 
 
 def test_mini_mas_wait_cli_outputs_closed_event_neutrally(monkeypatch):
-    ready = {
-        "workflow_id": "mas-2222222222222222-c001",
-        "lifecycle_state": "closed",
-        "latest_submission": "ready",
-        "run_directory": ".mini-mas/runs/mas-2222222222222222",
-        "trajectory_artifact_path": (
-            ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222-c001.traj.json"
-        ),
-    }
     monkeypatch.setattr(
         "minisweagent.mas.cli.wait_for_agent_workflow",
         Mock(
             return_value={
                 "workflow_id": "mas-2222222222222222-c001",
-                "root_workflow_id": "mas-2222222222222222",
-                "wait_mode": "one",
-                "timed_out": False,
-                "ready_children": [ready],
-                "still_running_child_workflow_ids": [],
-                "children": [
-                    {
-                        "task": "",
-                        "workflow_id": "mas-2222222222222222-c001",
-                        "root_workflow_id": "mas-2222222222222222",
-                        "run_directory": ".mini-mas/runs/mas-2222222222222222",
-                        "trajectory_artifact_path": (
-                            ".mini-mas/runs/mas-2222222222222222/trajectories/"
-                            "mas-2222222222222222-c001.traj.json"
-                        ),
-                    }
-                ],
+                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
+                "returncode": 2,
+                "exception_info": "external_coordination_unsupported",
+                "extra": {"mas_command_error": "external_coordination_unsupported"},
             }
         ),
     )
 
     cli_result = CliRunner().invoke(app, ["wait", "mas-2222222222222222-c001"])
 
-    assert cli_result.exit_code == 0
-    assert "lifecycle_state: closed" in cli_result.stdout
-    assert "latest_submission: ready" in cli_result.stdout
+    assert cli_result.exit_code == 2
+    assert "unsupported" in cli_result.stdout
     assert "accepted" not in cli_result.stdout.lower()
     assert "rejected" not in cli_result.stdout.lower()
     assert "aborted" not in cli_result.stdout.lower()

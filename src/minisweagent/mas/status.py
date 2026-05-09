@@ -81,75 +81,56 @@ def root_id_for_workflow(workflow_id: str) -> str:
     return validate_root_workflow_id(workflow_id[:20])
 
 
-def is_descendant_or_self(*, root_workflow_id: str, workflow_id: str) -> bool:
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
-    workflow_id = validate_workflow_id(workflow_id)
-    return workflow_id == root_workflow_id or workflow_id.startswith(f"{root_workflow_id}-c")
-
-
 def _status_from_events(events: dict[str, Any]) -> dict[str, Any] | None:
     status = events.get(STATUS_EVENT_KEY)
     return status if isinstance(status, dict) else None
 
 
-def query_status_tree(dbos_api: Any, root_workflow_id: str) -> list[dict[str, Any]]:
-    """Query current status snapshots for one Agent Workflow Tree without waiting for descendants."""
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
-    workflow_statuses = dbos_api.list_workflows(
-        workflow_id_prefix=root_workflow_id,
-        load_input=False,
-        load_output=False,
-    )
-    snapshots = []
-    for workflow_status in workflow_statuses:
-        workflow_id = getattr(workflow_status, "workflow_id", "")
-        if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=workflow_id):
-            continue
-        snapshot = _status_from_events(dbos_api.get_all_events(workflow_id))
-        if snapshot is not None:
-            snapshots.append(snapshot)
-    return sorted(snapshots, key=lambda snapshot: snapshot["workflow_id"])
-
-
-async def query_status_tree_async(dbos_api: Any, root_workflow_id: str) -> list[dict[str, Any]]:
-    """Async variant for Agent Workflow code that must not block the DBOS event loop."""
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
+async def list_direct_child_workflow_ids_async(dbos_api: Any, parent_workflow_id: str) -> list[str]:
+    """Return workflow IDs whose DBOS metadata names this workflow as their direct parent."""
+    parent_workflow_id = validate_workflow_id(parent_workflow_id)
     workflow_statuses = await _maybe_await(
         dbos_api.list_workflows_async(
-            workflow_id_prefix=root_workflow_id,
+            parent_workflow_id=parent_workflow_id,
             load_input=False,
             load_output=False,
         )
     )
-    snapshots = []
+    workflow_ids = []
     for workflow_status in workflow_statuses:
         workflow_id = getattr(workflow_status, "workflow_id", "")
-        if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=workflow_id):
-            continue
+        if getattr(workflow_status, "parent_workflow_id", None) == parent_workflow_id:
+            workflow_ids.append(validate_workflow_id(workflow_id))
+    return sorted(workflow_ids)
+
+
+async def query_direct_child_statuses_async(dbos_api: Any, parent_workflow_id: str) -> list[dict[str, Any]]:
+    """Query status snapshots for direct children using DBOS parent workflow metadata."""
+    snapshots = []
+    for workflow_id in await list_direct_child_workflow_ids_async(dbos_api, parent_workflow_id):
         snapshot = _status_from_events(await _maybe_await(dbos_api.get_all_events_async(workflow_id)))
         if snapshot is not None:
             snapshots.append(snapshot)
     return sorted(snapshots, key=lambda snapshot: snapshot["workflow_id"])
 
 
-def query_specific_status(dbos_api: Any, *, root_workflow_id: str, workflow_id: str) -> dict[str, Any] | None:
-    """Query one descendant status snapshot without waiting for workflow completion."""
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
-    workflow_id = validate_workflow_id(workflow_id)
-    if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=workflow_id):
-        return None
-    return _status_from_events(dbos_api.get_all_events(workflow_id))
-
-
-async def query_specific_status_async(
-    dbos_api: Any, *, root_workflow_id: str, workflow_id: str
+async def query_direct_child_status_async(
+    dbos_api: Any, *, parent_workflow_id: str, child_workflow_id: str
 ) -> dict[str, Any] | None:
-    """Async variant for Agent Workflow code that must not block the DBOS event loop."""
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
-    workflow_id = validate_workflow_id(workflow_id)
-    if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=workflow_id):
+    """Query one status snapshot after DBOS metadata proves it is a direct child."""
+    parent_workflow_id = validate_workflow_id(parent_workflow_id)
+    child_workflow_id = validate_workflow_id(child_workflow_id)
+    workflow_statuses = await _maybe_await(
+        dbos_api.list_workflows_async(
+            workflow_ids=[child_workflow_id],
+            parent_workflow_id=parent_workflow_id,
+            load_input=False,
+            load_output=False,
+        )
+    )
+    if not any(getattr(status, "parent_workflow_id", None) == parent_workflow_id for status in workflow_statuses):
         return None
-    return _status_from_events(await _maybe_await(dbos_api.get_all_events_async(workflow_id)))
+    return _status_from_events(await _maybe_await(dbos_api.get_all_events_async(child_workflow_id)))
 
 
 def _format_snapshot(snapshot: dict[str, Any]) -> list[str]:
@@ -170,11 +151,11 @@ def _format_snapshot(snapshot: dict[str, Any]) -> list[str]:
     return lines
 
 
-def format_status_tree(snapshots: list[dict[str, Any]], *, root_workflow_id: str) -> str:
-    """Format a status tree as a bash observation."""
-    lines = [f"Agent Workflow Tree: {root_workflow_id}"]
+def format_direct_child_statuses(snapshots: list[dict[str, Any]], *, parent_workflow_id: str) -> str:
+    """Format direct-child status snapshots as a bash observation."""
+    lines = [f"Direct Child Agent Workflows for: {parent_workflow_id}"]
     if not snapshots:
-        lines.append("No status snapshots found.")
+        lines.append("No direct Child Agent Workflow status snapshots found.")
         return "\n".join(lines) + "\n"
     for index, snapshot in enumerate(snapshots):
         if index:

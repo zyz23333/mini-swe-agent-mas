@@ -20,12 +20,12 @@ from minisweagent.mas.status import (
     FIRST_OBSERVABLE_EVENT_KEY,
     STATUS_EVENT_KEY,
     LifecycleState,
+    format_direct_child_statuses,
     format_specific_status,
-    format_status_tree,
-    is_descendant_or_self,
     make_status_snapshot,
-    query_specific_status_async,
-    query_status_tree_async,
+    query_direct_child_status_async,
+    query_direct_child_statuses_async,
+    root_id_for_workflow,
 )
 
 _dbos = load_dbos()
@@ -36,6 +36,12 @@ PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS = 60 * 60 * 24 * 30
 
 async def _maybe_await(value):
     return await value if isawaitable(value) else value
+
+
+def _current_agent_workflow_id() -> str | None:
+    """Return the current DBOS workflow ID only when DBOS exposes a real workflow context."""
+    workflow_id = _dbos.DBOS.workflow_id
+    return workflow_id if isinstance(workflow_id, str) else None
 
 
 @dataclass
@@ -448,25 +454,17 @@ def _child_metadata_from_status(snapshot: dict[str, Any]) -> dict[str, str]:
     }
 
 
-async def _current_child_metadata(*, root_workflow_id: str, workflow_id: str | None = None) -> list[dict[str, str]]:
-    if workflow_id is not None:
-        if workflow_id == root_workflow_id or not is_descendant_or_self(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
-        ):
-            return []
-        return [{"task": "", **make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)}]
+async def _direct_child_metadata(*, parent_workflow_id: str, child_workflow_id: str | None = None) -> list[dict[str, str]]:
+    if child_workflow_id is not None:
+        snapshot = await query_direct_child_status_async(
+            _dbos.DBOS,
+            parent_workflow_id=parent_workflow_id,
+            child_workflow_id=child_workflow_id,
+        )
+        return [] if snapshot is None else [_child_metadata_from_status(snapshot)]
 
-    snapshots = await query_status_tree_async(_dbos.DBOS, root_workflow_id)
-    children = []
-    for snapshot in snapshots:
-        snapshot_workflow_id = str(snapshot.get("workflow_id", ""))
-        if snapshot_workflow_id == root_workflow_id:
-            continue
-        if workflow_id is not None and snapshot_workflow_id != workflow_id:
-            continue
-        children.append(_child_metadata_from_status(snapshot))
-    return sorted(children, key=lambda child: child["workflow_id"])
+    snapshots = await query_direct_child_statuses_async(_dbos.DBOS, parent_workflow_id)
+    return sorted((_child_metadata_from_status(snapshot) for snapshot in snapshots), key=lambda child: child["workflow_id"])
 
 
 def make_continuation_signal(*, source_workflow_id: str, target_workflow_id: str, content: str) -> dict[str, str]:
@@ -519,24 +517,24 @@ def _format_close_output(*, target_workflow_id: str, snapshot: dict[str, Any]) -
     return "\n".join(lines) + "\n"
 
 
-def _is_descendant_child(*, parent_workflow_id: str, child_workflow_id: str) -> bool:
-    parent_workflow_id = validate_workflow_id(parent_workflow_id)
-    child_workflow_id = validate_workflow_id(child_workflow_id)
-    return child_workflow_id.startswith(f"{parent_workflow_id}-c")
-
-
 async def _validate_parent_direction_target(
     *,
-    root_workflow_id: str,
     source_workflow_id: str,
     target_workflow_id: str,
     command_name: str,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Validate a parent-direction target and return either a status snapshot or an error result."""
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
     source_workflow_id = validate_workflow_id(source_workflow_id)
     target_workflow_id = validate_workflow_id(target_workflow_id)
-    if target_workflow_id == root_workflow_id:
+    if target_workflow_id == source_workflow_id:
+        return None, {
+            "ok": False,
+            "output": f"Cannot {command_name} the current Agent Workflow.\n",
+            "returncode": 1,
+            "exception_info": f"cannot_{command_name}_current_workflow",
+            "extra": {"mas_command_error": f"cannot_{command_name}_current_workflow"},
+        }
+    if target_workflow_id == root_id_for_workflow(source_workflow_id):
         return None, {
             "ok": False,
             "output": f"Cannot {command_name} the Root Agent Workflow.\n",
@@ -544,30 +542,19 @@ async def _validate_parent_direction_target(
             "exception_info": f"cannot_{command_name}_root_workflow",
             "extra": {"mas_command_error": f"cannot_{command_name}_root_workflow"},
         }
-    if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=target_workflow_id) or not _is_descendant_child(
+
+    snapshot = await query_direct_child_status_async(
+        _dbos.DBOS,
         parent_workflow_id=source_workflow_id,
         child_workflow_id=target_workflow_id,
-    ):
-        return None, {
-            "ok": False,
-            "output": f"Workflow not found in current Agent Workflow Tree: {target_workflow_id}\n",
-            "returncode": 1,
-            "exception_info": "workflow_not_found",
-            "extra": {"mas_command_error": "workflow_not_found"},
-        }
-
-    snapshot = await query_specific_status_async(
-        _dbos.DBOS,
-        root_workflow_id=root_workflow_id,
-        workflow_id=target_workflow_id,
     )
     if snapshot is None:
         return None, {
             "ok": False,
-            "output": f"Workflow not found in current Agent Workflow Tree: {target_workflow_id}\n",
+            "output": f"Workflow is not a direct Child Agent Workflow of {source_workflow_id}: {target_workflow_id}\n",
             "returncode": 1,
-            "exception_info": "workflow_not_found",
-            "extra": {"mas_command_error": "workflow_not_found"},
+            "exception_info": "workflow_not_direct_child",
+            "extra": {"mas_command_error": "workflow_not_direct_child"},
         }
     if snapshot.get("lifecycle_state") != "waiting_for_parent":
         return None, {
@@ -582,14 +569,12 @@ async def _validate_parent_direction_target(
 
 async def send_continuation_signal_async(
     *,
-    root_workflow_id: str,
     source_workflow_id: str,
     target_workflow_id: str,
     content: str,
 ) -> dict[str, Any]:
     """Validate a child workflow and send a continuation signal through DBOS messages."""
     snapshot, error = await _validate_parent_direction_target(
-        root_workflow_id=root_workflow_id,
         source_workflow_id=source_workflow_id,
         target_workflow_id=target_workflow_id,
         command_name="continue",
@@ -623,13 +608,11 @@ async def send_continuation_signal_async(
 
 async def send_close_signal_async(
     *,
-    root_workflow_id: str,
     source_workflow_id: str,
     target_workflow_id: str,
 ) -> dict[str, Any]:
     """Validate a child workflow and send a neutral close signal through DBOS messages."""
     snapshot, error = await _validate_parent_direction_target(
-        root_workflow_id=root_workflow_id,
         source_workflow_id=source_workflow_id,
         target_workflow_id=target_workflow_id,
         command_name="close",
@@ -689,23 +672,23 @@ def _spawn_command_result(
 async def _dispatch_mas_command(
     classification: MasCommandClassification,
     *,
-    root_workflow_id: str | None,
-    workflow_id: str | None,
     spawn_index: int,
     existing_child_workflow_ids: set[str],
 ) -> dict:
     """Dispatch a validated standalone MAS command at workflow-control level."""
+    current_workflow_id = _current_agent_workflow_id()
     if classification.arguments[:1] == ["status"]:
-        if root_workflow_id is None:
+        if current_workflow_id is None:
             return {
                 "output": "mini-mas status requires Agent Workflow context.\n",
                 "returncode": 2,
                 "exception_info": "missing_agent_workflow_context",
                 "extra": {"mas_command_error": "missing_agent_workflow_context"},
             }
+        current_workflow_id = validate_workflow_id(current_workflow_id)
         if len(classification.arguments) == 1:
-            snapshots = await query_status_tree_async(_dbos.DBOS, root_workflow_id)
-            output = format_status_tree(snapshots, root_workflow_id=root_workflow_id)
+            snapshots = await query_direct_child_statuses_async(_dbos.DBOS, current_workflow_id)
+            output = format_direct_child_statuses(snapshots, parent_workflow_id=current_workflow_id)
             return {
                 "output": output,
                 "returncode": 0,
@@ -714,19 +697,19 @@ async def _dispatch_mas_command(
             }
         if len(classification.arguments) == 2:
             target_workflow_id = classification.arguments[1]
-            snapshot = await query_specific_status_async(
+            snapshot = await query_direct_child_status_async(
                 _dbos.DBOS,
-                root_workflow_id=root_workflow_id,
-                workflow_id=target_workflow_id,
+                parent_workflow_id=current_workflow_id,
+                child_workflow_id=target_workflow_id,
             )
             if snapshot is None:
                 return {
-                    "output": f"Workflow not found in current Agent Workflow Tree: {target_workflow_id}\n",
+                    "output": f"Workflow is not a direct Child Agent Workflow of {current_workflow_id}: {target_workflow_id}\n",
                     "returncode": 1,
-                    "exception_info": "workflow_not_found",
+                    "exception_info": "workflow_not_direct_child",
                     "extra": {
                         "mas_command": classification.arguments,
-                        "mas_command_error": "workflow_not_found",
+                        "mas_command_error": "workflow_not_direct_child",
                     },
                 }
             return {
@@ -743,13 +726,15 @@ async def _dispatch_mas_command(
         }
 
     if classification.arguments[:1] == ["spawn"]:
-        if root_workflow_id is None or workflow_id is None:
+        if current_workflow_id is None:
             return {
                 "output": "mini-mas spawn requires Agent Workflow context.\n",
                 "returncode": 2,
                 "exception_info": "missing_agent_workflow_context",
                 "extra": {"mas_command_error": "missing_agent_workflow_context"},
             }
+        current_workflow_id = validate_workflow_id(current_workflow_id)
+        root_workflow_id = root_id_for_workflow(current_workflow_id)
         try:
             request = _parse_spawn_arguments(classification.arguments)
         except ValueError as exc:
@@ -761,7 +746,7 @@ async def _dispatch_mas_command(
             }
         children = await _spawn_detached_children(
             root_workflow_id=root_workflow_id,
-            parent_workflow_id=workflow_id,
+            parent_workflow_id=current_workflow_id,
             first_spawn_index=spawn_index,
             tasks=request.tasks,
             existing_child_workflow_ids=existing_child_workflow_ids,
@@ -799,13 +784,14 @@ async def _dispatch_mas_command(
         )
 
     if classification.arguments[:1] == ["wait"]:
-        if root_workflow_id is None:
+        if current_workflow_id is None:
             return {
                 "output": "mini-mas wait requires Agent Workflow context.\n",
                 "returncode": 2,
                 "exception_info": "missing_agent_workflow_context",
                 "extra": {"mas_command_error": "missing_agent_workflow_context"},
             }
+        current_workflow_id = validate_workflow_id(current_workflow_id)
         try:
             request = _parse_wait_arguments(classification.arguments)
         except ValueError as exc:
@@ -815,18 +801,21 @@ async def _dispatch_mas_command(
                 "exception_info": str(exc),
                 "extra": {"mas_command_error": "invalid_wait_arguments"},
             }
-        children = await _current_child_metadata(root_workflow_id=root_workflow_id, workflow_id=request.workflow_id)
+        children = await _direct_child_metadata(parent_workflow_id=current_workflow_id, child_workflow_id=request.workflow_id)
         if not children:
             output = (
-                f"Workflow not found in current Agent Workflow Tree: {request.workflow_id}\n"
+                f"Workflow is not a direct Child Agent Workflow of {current_workflow_id}: {request.workflow_id}\n"
                 if request.workflow_id
                 else "No current child workflows found for mini-mas wait.\n"
             )
             return {
                 "output": output,
                 "returncode": 1,
-                "exception_info": "workflow_not_found" if request.workflow_id else "no_child_workflows",
-                "extra": {"mas_command": classification.arguments, "mas_command_error": "workflow_not_found"},
+                "exception_info": "workflow_not_direct_child" if request.workflow_id else "no_child_workflows",
+                "extra": {
+                    "mas_command": classification.arguments,
+                    "mas_command_error": "workflow_not_direct_child" if request.workflow_id else "no_child_workflows",
+                },
             }
         wait_all = request.wait_all or request.workflow_id is not None
         ready_snapshots, still_running_ids, timed_out = await _wait_for_first_observable_events(
@@ -858,13 +847,14 @@ async def _dispatch_mas_command(
         }
 
     if classification.arguments[:1] == ["continue"]:
-        if root_workflow_id is None or workflow_id is None:
+        if current_workflow_id is None:
             return {
                 "output": "mini-mas continue requires Agent Workflow context.\n",
                 "returncode": 2,
                 "exception_info": "missing_agent_workflow_context",
                 "extra": {"mas_command_error": "missing_agent_workflow_context"},
             }
+        current_workflow_id = validate_workflow_id(current_workflow_id)
         try:
             request = _parse_continue_arguments(classification.arguments)
         except ValueError as exc:
@@ -875,8 +865,7 @@ async def _dispatch_mas_command(
                 "extra": {"mas_command_error": "invalid_continue_arguments"},
             }
         result = await send_continuation_signal_async(
-            root_workflow_id=root_workflow_id,
-            source_workflow_id=workflow_id,
+            source_workflow_id=current_workflow_id,
             target_workflow_id=request.workflow_id,
             content=request.content,
         )
@@ -885,13 +874,14 @@ async def _dispatch_mas_command(
         return result
 
     if classification.arguments[:1] == ["close"]:
-        if root_workflow_id is None or workflow_id is None:
+        if current_workflow_id is None:
             return {
                 "output": "mini-mas close requires Agent Workflow context.\n",
                 "returncode": 2,
                 "exception_info": "missing_agent_workflow_context",
                 "extra": {"mas_command_error": "missing_agent_workflow_context"},
             }
+        current_workflow_id = validate_workflow_id(current_workflow_id)
         try:
             request = _parse_close_arguments(classification.arguments)
         except ValueError as exc:
@@ -902,8 +892,7 @@ async def _dispatch_mas_command(
                 "extra": {"mas_command_error": "invalid_close_arguments"},
             }
         result = await send_close_signal_async(
-            root_workflow_id=root_workflow_id,
-            source_workflow_id=workflow_id,
+            source_workflow_id=current_workflow_id,
             target_workflow_id=request.workflow_id,
         )
         result["extra"] = {"mas_command": classification.arguments, **result.get("extra", {})}
@@ -945,8 +934,6 @@ async def _execute_agent_workflow_outputs(
     *,
     message: dict,
     env,
-    root_workflow_id: str | None = None,
-    workflow_id: str | None = None,
     spawn_index: int = 0,
     existing_child_workflow_ids: set[str] | None = None,
 ) -> list[dict]:
@@ -960,8 +947,6 @@ async def _execute_agent_workflow_outputs(
             outputs.append(
                 await _dispatch_mas_command(
                     classification,
-                    root_workflow_id=root_workflow_id,
-                    workflow_id=workflow_id,
                     spawn_index=current_spawn_index + 1,
                     existing_child_workflow_ids=existing_child_workflow_ids,
                 )
@@ -983,8 +968,6 @@ async def execute_agent_workflow_actions(*, message: dict, model, env, template_
     outputs = await _execute_agent_workflow_outputs(
         message=message,
         env=env,
-        root_workflow_id=template_vars.get("root_workflow_id"),
-        workflow_id=template_vars.get("workflow_id"),
         spawn_index=template_vars.get("spawn_index", 0),
         existing_child_workflow_ids=existing_ids,
     )
@@ -1181,6 +1164,34 @@ async def save_child_trajectory_artifact_step(
 
 
 async def _run_agent_workflow(
+    *,
+    root_workflow_id: str,
+    workflow_id: str,
+    model,
+    env,
+    task: str,
+    step_limit: int,
+    initial_messages: list[dict] | None,
+) -> dict:
+    original_workflow_id = _current_agent_workflow_id()
+    if original_workflow_id is None:
+        _dbos.DBOS.workflow_id = workflow_id
+    try:
+        return await _run_agent_workflow_with_context(
+            root_workflow_id=root_workflow_id,
+            workflow_id=workflow_id,
+            model=model,
+            env=env,
+            task=task,
+            step_limit=step_limit,
+            initial_messages=initial_messages,
+        )
+    finally:
+        if original_workflow_id is None:
+            _dbos.DBOS.workflow_id = original_workflow_id
+
+
+async def _run_agent_workflow_with_context(
     *,
     root_workflow_id: str,
     workflow_id: str,

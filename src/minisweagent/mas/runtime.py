@@ -9,14 +9,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id, validate_workflow_id
-from minisweagent.mas.status import (
-    FIRST_OBSERVABLE_EVENT_KEY,
-    query_specific_status_async,
-    query_status_tree_async,
-    root_id_for_workflow,
-)
 
 MAS_APP_NAME = "mini-swe-agent-mas"
+UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE = (
+    "External mini-mas status, wait, continue, and close are unsupported until terminal commands are routed through "
+    "an Interactive Root Agent Workflow.\n"
+)
 
 
 def load_dbos():
@@ -103,38 +101,13 @@ async def _get_agent_workflow_status_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for non-blocking MAS status snapshot or tree lookup."""
-    dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
-
-    from minisweagent.mas import workflows  # noqa: F401
-
-    dbos_module.DBOS.launch()
-
-    workflow_id = validate_workflow_id(workflow_id)
-    root_workflow_id = root_id_for_workflow(workflow_id)
-    if workflow_id == root_workflow_id:
-        return {
-            "kind": "tree",
-            "root_workflow_id": root_workflow_id,
-            "snapshots": await query_status_tree_async(dbos_module.DBOS, root_workflow_id),
-        }
-
-    snapshot = await query_specific_status_async(
-        dbos_module.DBOS,
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
-    )
-    if snapshot is None:
-        return {
-            "kind": "missing",
-            "root_workflow_id": root_workflow_id,
-            "workflow_id": workflow_id,
-        }
     return {
-        "kind": "single",
-        "root_workflow_id": root_workflow_id,
+        "kind": "unsupported",
         "workflow_id": workflow_id,
-        "snapshot": snapshot,
+        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
+        "returncode": 2,
+        "exception_info": "external_coordination_unsupported",
+        "extra": {"mas_command_error": "external_coordination_unsupported"},
     }
 
 
@@ -159,30 +132,12 @@ async def _wait_for_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external waiting on one Child First Observable Event."""
-    dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
-
-    from minisweagent.mas import workflows  # noqa: F401
-
-    dbos_module.DBOS.launch()
-
-    workflow_id = validate_workflow_id(workflow_id)
-    root_workflow_id = root_id_for_workflow(workflow_id)
-    event = await dbos_module.DBOS.get_event_async(
-        workflow_id,
-        FIRST_OBSERVABLE_EVENT_KEY,
-        60 if timeout_seconds is None else timeout_seconds,
-    )
-    metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
-    ready_children = [event] if isinstance(event, dict) else []
     return {
         "workflow_id": workflow_id,
-        "root_workflow_id": root_workflow_id,
-        "wait_mode": "one",
-        "timed_out": not ready_children,
-        "ready_children": ready_children,
-        "still_running_child_workflow_ids": [] if ready_children else [workflow_id],
-        "children": [{"task": "", **metadata}],
+        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
+        "returncode": 2,
+        "exception_info": "external_coordination_unsupported",
+        "extra": {"mas_command_error": "external_coordination_unsupported"},
     }
 
 
@@ -207,7 +162,7 @@ def parent_id_for_workflow(workflow_id: str) -> str:
     workflow_id = validate_workflow_id(workflow_id)
     parent_id, separator, _child_suffix = workflow_id.rpartition("-c")
     if not separator:
-        return root_id_for_workflow(workflow_id)
+        return workflow_id
     return validate_workflow_id(parent_id)
 
 
@@ -218,22 +173,13 @@ async def _continue_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external parent-to-child continuation signaling."""
-    dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
-
-    from minisweagent.mas import workflows
-
-    dbos_module.DBOS.launch()
-
-    workflow_id = validate_workflow_id(workflow_id)
-    root_workflow_id = root_id_for_workflow(workflow_id)
-    source_workflow_id = parent_id_for_workflow(workflow_id)
-    return await workflows.send_continuation_signal_async(
-        root_workflow_id=root_workflow_id,
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=workflow_id,
-        content=message,
-    )
+    return {
+        "workflow_id": workflow_id,
+        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
+        "returncode": 2,
+        "exception_info": "external_coordination_unsupported",
+        "extra": {"mas_command_error": "external_coordination_unsupported"},
+    }
 
 
 def continue_agent_workflow(
@@ -258,21 +204,13 @@ async def _close_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external parent-to-child neutral close signaling."""
-    dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
-
-    from minisweagent.mas import workflows
-
-    dbos_module.DBOS.launch()
-
-    workflow_id = validate_workflow_id(workflow_id)
-    root_workflow_id = root_id_for_workflow(workflow_id)
-    source_workflow_id = parent_id_for_workflow(workflow_id)
-    return await workflows.send_close_signal_async(
-        root_workflow_id=root_workflow_id,
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=workflow_id,
-    )
+    return {
+        "workflow_id": workflow_id,
+        "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
+        "returncode": 2,
+        "exception_info": "external_coordination_unsupported",
+        "extra": {"mas_command_error": "external_coordination_unsupported"},
+    }
 
 
 def close_agent_workflow(
