@@ -77,6 +77,13 @@ class ContinueCommandRequest:
     content: str
 
 
+@dataclass(frozen=True)
+class CloseCommandRequest:
+    """Parsed workflow-layer close command options."""
+
+    workflow_id: str
+
+
 async def _publish_status_snapshot(
     *,
     root_workflow_id: str,
@@ -329,6 +336,12 @@ def _parse_continue_arguments(arguments: list[str]) -> ContinueCommandRequest:
     return ContinueCommandRequest(workflow_id=workflow_id, content=content)
 
 
+def _parse_close_arguments(arguments: list[str]) -> CloseCommandRequest:
+    if len(arguments) != 2:
+        raise ValueError("Usage: mini-mas close <workflow-id>")
+    return CloseCommandRequest(workflow_id=validate_workflow_id(arguments[1]))
+
+
 def _next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
     validate_workflow_id(parent_workflow_id)
     if spawn_index < 1:
@@ -467,6 +480,16 @@ def make_continuation_signal(*, source_workflow_id: str, target_workflow_id: str
     }
 
 
+def make_close_signal(*, source_workflow_id: str, target_workflow_id: str) -> dict[str, str]:
+    """Build the neutral parent-to-child message payload used to close a waiting child."""
+    return {
+        "type": "close",
+        "signal_type": "mas_close",
+        "source_workflow_id": source_workflow_id,
+        "target_workflow_id": target_workflow_id,
+    }
+
+
 def _format_continue_output(*, target_workflow_id: str, content: str, snapshot: dict[str, Any]) -> str:
     lines = [
         "Continuation signal sent",
@@ -479,36 +502,53 @@ def _format_continue_output(*, target_workflow_id: str, content: str, snapshot: 
     return "\n".join(lines) + "\n"
 
 
+def _format_close_output(*, target_workflow_id: str, snapshot: dict[str, Any]) -> str:
+    lines = [
+        "Close signal sent",
+        f"workflow_id: {target_workflow_id}",
+        f"lifecycle_state: {snapshot['lifecycle_state']}",
+    ]
+    if snapshot.get("latest_submission"):
+        lines.append(f"latest_submission: {snapshot['latest_submission']}")
+    lines.extend(
+        [
+            f"run_directory: {snapshot['run_directory']}",
+            f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _is_descendant_child(*, parent_workflow_id: str, child_workflow_id: str) -> bool:
     parent_workflow_id = validate_workflow_id(parent_workflow_id)
     child_workflow_id = validate_workflow_id(child_workflow_id)
     return child_workflow_id.startswith(f"{parent_workflow_id}-c")
 
 
-async def send_continuation_signal_async(
+async def _validate_parent_direction_target(
     *,
     root_workflow_id: str,
     source_workflow_id: str,
     target_workflow_id: str,
-    content: str,
-) -> dict[str, Any]:
-    """Validate a child workflow and send a continuation signal through DBOS messages."""
+    command_name: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Validate a parent-direction target and return either a status snapshot or an error result."""
     root_workflow_id = validate_root_workflow_id(root_workflow_id)
     source_workflow_id = validate_workflow_id(source_workflow_id)
     target_workflow_id = validate_workflow_id(target_workflow_id)
     if target_workflow_id == root_workflow_id:
-        return {
+        return None, {
             "ok": False,
-            "output": "Cannot continue the Root Agent Workflow.\n",
+            "output": f"Cannot {command_name} the Root Agent Workflow.\n",
             "returncode": 1,
-            "exception_info": "cannot_continue_root_workflow",
-            "extra": {"mas_command_error": "cannot_continue_root_workflow"},
+            "exception_info": f"cannot_{command_name}_root_workflow",
+            "extra": {"mas_command_error": f"cannot_{command_name}_root_workflow"},
         }
     if not is_descendant_or_self(root_workflow_id=root_workflow_id, workflow_id=target_workflow_id) or not _is_descendant_child(
         parent_workflow_id=source_workflow_id,
         child_workflow_id=target_workflow_id,
     ):
-        return {
+        return None, {
             "ok": False,
             "output": f"Workflow not found in current Agent Workflow Tree: {target_workflow_id}\n",
             "returncode": 1,
@@ -522,7 +562,7 @@ async def send_continuation_signal_async(
         workflow_id=target_workflow_id,
     )
     if snapshot is None:
-        return {
+        return None, {
             "ok": False,
             "output": f"Workflow not found in current Agent Workflow Tree: {target_workflow_id}\n",
             "returncode": 1,
@@ -530,13 +570,32 @@ async def send_continuation_signal_async(
             "extra": {"mas_command_error": "workflow_not_found"},
         }
     if snapshot.get("lifecycle_state") != "waiting_for_parent":
-        return {
+        return None, {
             "ok": False,
             "output": f"Workflow is not waiting for parent direction: {target_workflow_id}\n",
             "returncode": 1,
             "exception_info": "workflow_not_waiting_for_parent",
             "extra": {"mas_command_error": "workflow_not_waiting_for_parent"},
         }
+    return snapshot, None
+
+
+async def send_continuation_signal_async(
+    *,
+    root_workflow_id: str,
+    source_workflow_id: str,
+    target_workflow_id: str,
+    content: str,
+) -> dict[str, Any]:
+    """Validate a child workflow and send a continuation signal through DBOS messages."""
+    snapshot, error = await _validate_parent_direction_target(
+        root_workflow_id=root_workflow_id,
+        source_workflow_id=source_workflow_id,
+        target_workflow_id=target_workflow_id,
+        command_name="continue",
+    )
+    if error is not None:
+        return error
 
     signal = make_continuation_signal(
         source_workflow_id=source_workflow_id,
@@ -557,6 +616,44 @@ async def send_continuation_signal_async(
             "mas_command": ["continue", target_workflow_id, content],
             "continued_workflow_id": target_workflow_id,
             "continuation_signal": signal,
+            "target_status": snapshot,
+        },
+    }
+
+
+async def send_close_signal_async(
+    *,
+    root_workflow_id: str,
+    source_workflow_id: str,
+    target_workflow_id: str,
+) -> dict[str, Any]:
+    """Validate a child workflow and send a neutral close signal through DBOS messages."""
+    snapshot, error = await _validate_parent_direction_target(
+        root_workflow_id=root_workflow_id,
+        source_workflow_id=source_workflow_id,
+        target_workflow_id=target_workflow_id,
+        command_name="close",
+    )
+    if error is not None:
+        return error
+
+    signal = make_close_signal(
+        source_workflow_id=source_workflow_id,
+        target_workflow_id=target_workflow_id,
+    )
+    await _maybe_await(_dbos.DBOS.send_async(target_workflow_id, signal, PARENT_DIRECTION_TOPIC))
+    return {
+        "ok": True,
+        "output": _format_close_output(
+            target_workflow_id=target_workflow_id,
+            snapshot=snapshot,
+        ),
+        "returncode": 0,
+        "exception_info": "",
+        "extra": {
+            "mas_command": ["close", target_workflow_id],
+            "closed_workflow_id": target_workflow_id,
+            "close_signal": signal,
             "target_status": snapshot,
         },
     }
@@ -787,6 +884,32 @@ async def _dispatch_mas_command(
         result.pop("ok", None)
         return result
 
+    if classification.arguments[:1] == ["close"]:
+        if root_workflow_id is None or workflow_id is None:
+            return {
+                "output": "mini-mas close requires Agent Workflow context.\n",
+                "returncode": 2,
+                "exception_info": "missing_agent_workflow_context",
+                "extra": {"mas_command_error": "missing_agent_workflow_context"},
+            }
+        try:
+            request = _parse_close_arguments(classification.arguments)
+        except ValueError as exc:
+            return {
+                "output": f"{exc}\n",
+                "returncode": 2,
+                "exception_info": str(exc),
+                "extra": {"mas_command_error": "invalid_close_arguments"},
+            }
+        result = await send_close_signal_async(
+            root_workflow_id=root_workflow_id,
+            source_workflow_id=workflow_id,
+            target_workflow_id=request.workflow_id,
+        )
+        result["extra"] = {"mas_command": classification.arguments, **result.get("extra", {})}
+        result.pop("ok", None)
+        return result
+
     command_text = " ".join(classification.arguments)
     output = f"MAS command accepted: {command_text}\n"
     return {
@@ -937,6 +1060,10 @@ def _is_continuation_signal(signal: dict | str) -> bool:
     return isinstance(signal, dict) and (
         signal.get("type") == "continuation" or signal.get("signal_type") == "mas_continuation"
     )
+
+
+def _is_close_signal(signal: dict | str) -> bool:
+    return isinstance(signal, dict) and (signal.get("type") == "close" or signal.get("signal_type") == "mas_close")
 
 
 def _continuation_user_message(model, signal: dict) -> dict:
@@ -1140,6 +1267,29 @@ async def _run_agent_workflow(
                 state.messages.append(_continuation_user_message(model, parent_direction_signal))
                 state.first_observable_published = False
                 continue
+            if _is_close_signal(parent_direction_signal):
+                closed_result = {
+                    **waiting_result,
+                    "status": "closed",
+                    "terminal_state": "closed",
+                }
+                await _publish_status_snapshot(
+                    root_workflow_id=root_workflow_id,
+                    workflow_id=workflow_id,
+                    lifecycle_state="closed",
+                    latest_submission=result["submission"],
+                )
+                await _maybe_await(
+                    save_child_trajectory_artifact_step(
+                        root_workflow_id,
+                        workflow_id,
+                        status="closed",
+                        messages=state.messages,
+                        model_stats=result["model_stats"],
+                        submission=result["submission"],
+                    )
+                )
+                return closed_result
             return waiting_result
 
         await _publish_status_snapshot(

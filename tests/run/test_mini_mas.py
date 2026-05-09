@@ -9,7 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from minisweagent.mas.cli import app, run, status
-from minisweagent.mas.runtime import make_root_workflow_id
+from minisweagent.mas.runtime import close_agent_workflow, make_root_workflow_id
 from minisweagent.models.test_models import (
     DeterministicModel,
     DeterministicResponseAPIToolcallModel,
@@ -172,6 +172,44 @@ def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
     }
 
 
+def test_external_close_runtime_dispatches_same_workflow_signal_path(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    dbos_module = _mock_dbos_module()
+    calls = []
+
+    async def send_close_signal_async(**kwargs):
+        calls.append(kwargs)
+        return {
+            "ok": True,
+            "output": "Close signal sent\n",
+            "returncode": 0,
+            "exception_info": "",
+            "extra": {},
+        }
+
+    monkeypatch.setattr(workflows, "send_close_signal_async", send_close_signal_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        result = close_agent_workflow(workflow_id="mas-1111111111111111-c001")
+
+    dbos_module.DBOS.assert_called_once_with(
+        config={
+            "name": "mini-swe-agent-mas",
+            "system_database_url": None,
+        }
+    )
+    dbos_module.DBOS.launch.assert_called_once_with()
+    assert calls == [
+        {
+            "root_workflow_id": "mas-1111111111111111",
+            "source_workflow_id": "mas-1111111111111111",
+            "target_workflow_id": "mas-1111111111111111-c001",
+        }
+    ]
+    assert result["returncode"] == 0
+
+
 def test_mini_mas_run_cli_outputs_artifact_locations():
     handle = AsyncMockHandle(
         "mas-2222222222222222",
@@ -241,7 +279,12 @@ def test_mini_mas_status_cli_outputs_root_tree(monkeypatch):
     assert cli_result.exit_code == 0
     assert "Agent Workflow Tree: mas-2222222222222222" in cli_result.stdout
     assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "lifecycle_state: closed" in cli_result.stdout
     assert "latest_submission: child done" in cli_result.stdout
+    assert "accepted" not in cli_result.stdout.lower()
+    assert "rejected" not in cli_result.stdout.lower()
+    assert "aborted" not in cli_result.stdout.lower()
+    assert "cancel" not in cli_result.stdout.lower()
 
 
 def test_mini_mas_status_cli_reports_missing_descendant(monkeypatch):
@@ -719,7 +762,7 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
 
     async def recv_async(topic=None, timeout_seconds=60):
         received.append((topic, timeout_seconds))
-        return {"type": "close"}
+        return {"type": "test_stop_waiting"}
 
     monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
     monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
@@ -772,6 +815,77 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
 
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
     assert artifact["info"]["exit_status"] == "waiting_for_parent"
+    assert artifact["info"]["submission"] == "child done"
+    assert artifact["messages"][-1]["extra"] == {"exit_status": "Submitted", "submission": "child done"}
+
+
+def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, tmp_path):
+    import minisweagent.mas.workflows as workflows
+    from minisweagent.exceptions import Submitted
+    from minisweagent.mas.status import FIRST_OBSERVABLE_EVENT_KEY, STATUS_EVENT_KEY
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        assert topic == workflows.PARENT_DIRECTION_TOPIC
+        assert timeout_seconds == workflows.PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS
+        return {
+            "type": "close",
+            "signal_type": "mas_close",
+            "source_workflow_id": "mas-0123456789abcdef",
+            "target_workflow_id": "mas-0123456789abcdef-c001",
+        }
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "recv",
+        Mock(side_effect=AssertionError("Child close waiting must use recv_async")),
+    )
+
+    model = DeterministicModel(outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.side_effect = Submitted(
+        {
+            "role": "exit",
+            "content": "child done",
+            "extra": {"exit_status": "Submitted", "submission": "child done"},
+        }
+    )
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-0123456789abcdef",
+        "mas-0123456789abcdef-c001",
+        "submit once",
+        model=model,
+        env=env,
+        step_limit=3,
+    )
+
+    assert result["status"] == "closed"
+    assert result["terminal_state"] == "closed"
+    assert result["latest_submission"] == "child done"
+    assert result["parent_direction_signal"]["signal_type"] == "mas_close"
+
+    status_events = [value for key, value in published if key == STATUS_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in status_events] == ["running", "waiting_for_parent", "closed"]
+    closed_event = status_events[-1]
+    assert closed_event["latest_submission"] == "child done"
+    assert closed_event["trajectory_artifact_path"] == result["trajectory_artifact_path"]
+
+    first_observable_events = [value for key, value in published if key == FIRST_OBSERVABLE_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in first_observable_events] == ["waiting_for_parent"]
+
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    assert artifact["info"]["exit_status"] == "closed"
     assert artifact["info"]["submission"] == "child done"
     assert artifact["messages"][-1]["extra"] == {"exit_status": "Submitted", "submission": "child done"}
 
@@ -1647,6 +1761,72 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
     assert "workflow_id: mas-0123456789abcdef-c001" in text
 
 
+def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
+        assert root_workflow_id == "mas-0123456789abcdef"
+        assert workflow_id == "mas-0123456789abcdef-c001"
+        return {
+            "workflow_id": workflow_id,
+            "root_workflow_id": root_workflow_id,
+            "lifecycle_state": "waiting_for_parent",
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+            "latest_submission": "first answer",
+        }
+
+    sent = []
+
+    async def send_async(destination_id, message, topic=None):
+        sent.append((destination_id, message, topic))
+
+    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    monkeypatch.setattr(workflows._dbos.DBOS, "send_async", Mock(side_effect=send_async))
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send",
+        Mock(side_effect=AssertionError("Close must use send_async outside DBOS steps")),
+        raising=False,
+    )
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("close child", [{"command": "mini-mas close mas-0123456789abcdef-c001"}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
+    )
+
+    assert sent == [
+        (
+            "mas-0123456789abcdef-c001",
+            {
+                "type": "close",
+                "signal_type": "mas_close",
+                "source_workflow_id": "mas-0123456789abcdef",
+                "target_workflow_id": "mas-0123456789abcdef-c001",
+            },
+            workflows.PARENT_DIRECTION_TOPIC,
+        )
+    ]
+    text = _observation_text(observations[0])
+    assert "<returncode>0</returncode>" in text
+    assert "Close signal sent" in text
+    assert "workflow_id: mas-0123456789abcdef-c001" in text
+    assert "lifecycle_state: waiting_for_parent" in text
+    assert "accepted" not in text.lower()
+    assert "rejected" not in text.lower()
+    assert "aborted" not in text.lower()
+    assert "cancel" not in text.lower()
+
+
 @pytest.mark.parametrize(
     ("command", "expected_error"),
     [
@@ -1710,6 +1890,110 @@ def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
     assert "Workflow not found in current Agent Workflow Tree: mas-0123456789abcdef-c002" in text
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_error"),
+    [
+        ("mini-mas close mas-0123456789abcdef", "Cannot close the Root Agent Workflow"),
+        ("mini-mas close mas-fedcba9876543210-c001", "Workflow not found in current Agent Workflow Tree"),
+        ("mini-mas close mas-0123456789abcdef-c002", "Workflow not found in current Agent Workflow Tree"),
+    ],
+)
+def test_workflow_close_rejects_root_outside_tree_and_missing_children(monkeypatch, command, expected_error):
+    import minisweagent.mas.workflows as workflows
+
+    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
+        assert root_workflow_id == "mas-0123456789abcdef"
+        assert workflow_id == "mas-0123456789abcdef-c002"
+
+    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send_async",
+        Mock(side_effect=AssertionError("Invalid close must not send a DBOS message")),
+    )
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("bad close", [{"command": command}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
+    )
+
+    text = _observation_text(observations[0])
+    assert "<returncode>1</returncode>" in text
+    assert expected_error in text
+
+
+def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
+    import minisweagent.mas.workflows as workflows
+
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send_async",
+        Mock(side_effect=AssertionError("Sibling close must not send a DBOS message")),
+    )
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("bad close", [{"command": "mini-mas close mas-0123456789abcdef-c002"}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef-c001",
+            },
+        )
+    )
+
+    text = _observation_text(observations[0])
+    assert "<returncode>1</returncode>" in text
+    assert "Workflow not found in current Agent Workflow Tree: mas-0123456789abcdef-c002" in text
+
+
+@pytest.mark.parametrize("lifecycle_state", ["closed", "failed", "limits_exceeded", "running"])
+def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, lifecycle_state):
+    import minisweagent.mas.workflows as workflows
+
+    async def query_specific_status_async(_dbos_api, *, root_workflow_id, workflow_id):
+        return {
+            "workflow_id": workflow_id,
+            "root_workflow_id": root_workflow_id,
+            "lifecycle_state": lifecycle_state,
+            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ),
+        }
+
+    monkeypatch.setattr(workflows, "query_specific_status_async", query_specific_status_async)
+    monkeypatch.setattr(
+        workflows._dbos.DBOS,
+        "send_async",
+        Mock(side_effect=AssertionError("Not-waiting close must not send a DBOS message")),
+    )
+
+    observations = asyncio.run(
+        workflows.execute_agent_workflow_actions(
+            message=make_output("close", [{"command": "mini-mas close mas-0123456789abcdef-c001"}]),
+            model=DeterministicModel(outputs=[]),
+            env=Mock(),
+            template_vars={
+                "root_workflow_id": "mas-0123456789abcdef",
+                "workflow_id": "mas-0123456789abcdef",
+            },
+        )
+    )
+
+    text = _observation_text(observations[0])
+    assert "<returncode>1</returncode>" in text
+    assert "Workflow is not waiting for parent direction: mas-0123456789abcdef-c001" in text
 
 
 @pytest.mark.parametrize(
@@ -1807,7 +2091,7 @@ def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(mon
                 "source_workflow_id": "mas-0123456789abcdef",
                 "target_workflow_id": "mas-0123456789abcdef-c001",
             }
-        return {"type": "close"}
+        return {"type": "test_stop_waiting"}
 
     monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
     monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
@@ -1998,6 +2282,53 @@ def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
     assert "latest_submission: ready" in cli_result.stdout
 
 
+def test_mini_mas_wait_cli_outputs_closed_event_neutrally(monkeypatch):
+    ready = {
+        "workflow_id": "mas-2222222222222222-c001",
+        "lifecycle_state": "closed",
+        "latest_submission": "ready",
+        "run_directory": ".mini-mas/runs/mas-2222222222222222",
+        "trajectory_artifact_path": (
+            ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222-c001.traj.json"
+        ),
+    }
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.wait_for_agent_workflow",
+        Mock(
+            return_value={
+                "workflow_id": "mas-2222222222222222-c001",
+                "root_workflow_id": "mas-2222222222222222",
+                "wait_mode": "one",
+                "timed_out": False,
+                "ready_children": [ready],
+                "still_running_child_workflow_ids": [],
+                "children": [
+                    {
+                        "task": "",
+                        "workflow_id": "mas-2222222222222222-c001",
+                        "root_workflow_id": "mas-2222222222222222",
+                        "run_directory": ".mini-mas/runs/mas-2222222222222222",
+                        "trajectory_artifact_path": (
+                            ".mini-mas/runs/mas-2222222222222222/trajectories/"
+                            "mas-2222222222222222-c001.traj.json"
+                        ),
+                    }
+                ],
+            }
+        ),
+    )
+
+    cli_result = CliRunner().invoke(app, ["wait", "mas-2222222222222222-c001"])
+
+    assert cli_result.exit_code == 0
+    assert "lifecycle_state: closed" in cli_result.stdout
+    assert "latest_submission: ready" in cli_result.stdout
+    assert "accepted" not in cli_result.stdout.lower()
+    assert "rejected" not in cli_result.stdout.lower()
+    assert "aborted" not in cli_result.stdout.lower()
+    assert "cancel" not in cli_result.stdout.lower()
+
+
 def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
     monkeypatch.setattr(
         "minisweagent.mas.cli.continue_agent_workflow",
@@ -2026,6 +2357,40 @@ def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
     assert "Continuation signal sent" in cli_result.stdout
     assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
     assert "message: go on" in cli_result.stdout
+
+
+def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.close_agent_workflow",
+        Mock(
+            return_value={
+                "ok": True,
+                "output": (
+                    "Close signal sent\n"
+                    "workflow_id: mas-2222222222222222-c001\n"
+                    "lifecycle_state: waiting_for_parent\n"
+                    "latest_submission: ready\n"
+                    "run_directory: .mini-mas/runs/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/runs/mas-2222222222222222/trajectories/"
+                    "mas-2222222222222222-c001.traj.json\n"
+                ),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {},
+            }
+        ),
+    )
+
+    cli_result = CliRunner().invoke(app, ["close", "mas-2222222222222222-c001"])
+
+    assert cli_result.exit_code == 0
+    assert "Close signal sent" in cli_result.stdout
+    assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "latest_submission: ready" in cli_result.stdout
+    assert "accepted" not in cli_result.stdout.lower()
+    assert "rejected" not in cli_result.stdout.lower()
+    assert "aborted" not in cli_result.stdout.lower()
+    assert "cancel" not in cli_result.stdout.lower()
 
 
 @pytest.mark.parametrize("command", ["history", "logs", "grep"])

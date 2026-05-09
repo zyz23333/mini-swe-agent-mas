@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 
 from minisweagent.mas.runtime import (
+    close_agent_workflow,
     continue_agent_workflow,
     get_agent_workflow_status,
     start_root_agent_workflow,
@@ -146,6 +147,30 @@ def continue_(
         continue_agent_workflow(
             workflow_id=workflow_id,
             message=message,
+            system_database_url=system_database_url,
+        )
+    )
+    console.print(result["output"], end="")
+    if result["returncode"] != 0:
+        raise typer.Exit(code=result["returncode"])
+    return result
+
+
+@app.command(help="Send a neutral Close Signal to one waiting Child Agent Workflow.")
+def close(
+    workflow_id: Annotated[str, typer.Argument(help="Waiting Child Workflow Tree ID to close.")],
+    system_database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--system-database-url",
+            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
+            show_default=False,
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    result = dict(
+        close_agent_workflow(
+            workflow_id=workflow_id,
             system_database_url=system_database_url,
         )
     )
