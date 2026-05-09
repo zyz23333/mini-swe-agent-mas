@@ -1,6 +1,6 @@
 # Implement Waited Spawn and `mini-mas wait` synchronization
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 
 ## Parent
@@ -15,23 +15,23 @@ The commands should return lightweight status and exact artifact paths, not full
 
 ## Acceptance criteria
 
-- [ ] `mini-mas spawn "task A" "task B"` starts one Child Agent Workflow per repeated task argument.
-- [ ] `mini-mas spawn --wait "task A" "task B"` defaults to wait-any behavior and returns when any started child sets a First Observable Event.
-- [ ] `mini-mas spawn --wait --all "task A" "task B"` waits until all started children set First Observable Events.
-- [ ] `mini-mas spawn --wait --timeout <seconds> "task A" "task B"` returns timeout information when no started child sets a First Observable Event before the deadline.
-- [ ] `mini-mas spawn --wait --all --timeout <seconds> "task A" "task B"` returns partial ready snapshots and still-running child IDs when not all children become observable before the deadline.
-- [ ] Waited Spawn timeout does not cancel, close, fail, retry, or otherwise stop started Child Agent Workflows.
-- [ ] `mini-mas spawn --timeout <seconds> "task"` without `--wait` is rejected as invalid because Detached Spawn has no wait phase.
-- [ ] Detached multi-spawn returns all started child workflow IDs, Run Directory, and exact Trajectory Artifact paths without waiting.
-- [ ] Waited multi-spawn returns all started child metadata plus ready child snapshots and still-running child IDs.
-- [ ] `mini-mas wait <workflow-id>` waits for a specific descendant First Observable Event.
-- [ ] `mini-mas wait --all` gathers all currently relevant child First Observable Events.
-- [ ] `mini-mas wait --any` returns when any currently relevant child sets a First Observable Event.
-- [ ] `mini-mas wait --timeout <seconds>` returns bounded timeout information when children are still running.
-- [ ] Waited Spawn and `mini-mas wait` wait on child DBOS events keyed by child workflow identifiers, not on `WorkflowHandle.get_result()` or final DBOS workflow completion.
-- [ ] Child-to-parent observable state uses DBOS events; parent-to-child Continuation Signals and Close Signals remain DBOS messages.
-- [ ] Wait results include workflow IDs, lifecycle states, latest submission or error when present, Run Directory, and exact Trajectory Artifact paths.
-- [ ] Tests cover single-child and multi-child spawn, detached multi-spawn, waited spawn default wait-any, waited spawn `--all`, waited spawn wait-any timeout, waited spawn wait-all partial timeout, invalid detached spawn timeout, wait for one, `--all`, `--any`, timeout behavior, and no dedicated history/log output.
+- [x] `mini-mas spawn "task A" "task B"` starts one Child Agent Workflow per repeated task argument.
+- [x] `mini-mas spawn --wait "task A" "task B"` defaults to wait-any behavior and returns when any started child sets a First Observable Event.
+- [x] `mini-mas spawn --wait --all "task A" "task B"` waits until all started children set First Observable Events.
+- [x] `mini-mas spawn --wait --timeout <seconds> "task A" "task B"` returns timeout information when no started child sets a First Observable Event before the deadline.
+- [x] `mini-mas spawn --wait --all --timeout <seconds> "task A" "task B"` returns partial ready snapshots and still-running child IDs when not all children become observable before the deadline.
+- [x] Waited Spawn timeout does not cancel, close, fail, retry, or otherwise stop started Child Agent Workflows.
+- [x] `mini-mas spawn --timeout <seconds> "task"` without `--wait` is rejected as invalid because Detached Spawn has no wait phase.
+- [x] Detached multi-spawn returns all started child workflow IDs, Run Directory, and exact Trajectory Artifact paths without waiting.
+- [x] Waited multi-spawn returns all started child metadata plus ready child snapshots and still-running child IDs.
+- [x] `mini-mas wait <workflow-id>` waits for a specific descendant First Observable Event.
+- [x] `mini-mas wait --all` gathers all currently relevant child First Observable Events.
+- [x] `mini-mas wait --any` returns when any currently relevant child sets a First Observable Event.
+- [x] `mini-mas wait --timeout <seconds>` returns bounded timeout information when children are still running.
+- [x] Waited Spawn and `mini-mas wait` wait on child DBOS events keyed by child workflow identifiers, not on `WorkflowHandle.get_result()` or final DBOS workflow completion.
+- [x] Child-to-parent observable state uses DBOS events; parent-to-child Continuation Signals and Close Signals remain DBOS messages.
+- [x] Wait results include workflow IDs, lifecycle states, latest submission or error when present, Run Directory, and exact Trajectory Artifact paths.
+- [x] Tests cover single-child and multi-child spawn, detached multi-spawn, waited spawn default wait-any, waited spawn `--all`, waited spawn wait-any timeout, waited spawn wait-all partial timeout, invalid detached spawn timeout, wait for one, `--all`, `--any`, timeout behavior, and no dedicated history/log output.
 
 ## Blocked by
 
@@ -40,6 +40,22 @@ The commands should return lightweight status and exact artifact paths, not full
 ## Comments
 
 > *This was generated by AI during triage.*
+
+> *This was generated by AI during execution.*
+> Implemented Waited Spawn and `mini-mas wait` synchronization on Child First Observable Events:
+> - Extended workflow-layer `mini-mas spawn` parsing for repeated task arguments, `--wait`, `--all`, and `--timeout`.
+> - Detached multi-spawn now starts one Child Agent Workflow per task and returns every child Workflow Tree ID, Run Directory, and Trajectory Artifact path without waiting.
+> - Waited Spawn starts all requested children, then waits on child-keyed `mini_mas_first_observable` DBOS events. The default is wait-any; `--all` waits for all currently started children; timeout returns ready snapshots plus still-running child IDs without stopping child workflows.
+> - Added workflow-layer `mini-mas wait` for a specific descendant, `--any`, `--all`, and bounded timeout behavior against currently relevant child workflows.
+> - Added an external `mini-mas wait <workflow-id>` command for waiting on one child First Observable Event at the current MAS CLI boundary.
+> - Kept wait results lightweight: workflow IDs, lifecycle state, latest submission/error when present, Run Directory, Trajectory Artifact paths, ready snapshots, and still-running IDs. No full trajectory history is returned and no dedicated history/log/grep command was added.
+>
+> Verification:
+> - `uv run --python 3.11 pytest tests/run/test_mini_mas.py -q` -> 57 passed.
+> - `uv run --python 3.11 --extra dev ruff check src/minisweagent/mas tests/run/test_mini_mas.py` -> passed.
+> - `uv run --python 3.11 pytest tests/run -q` -> 180 passed.
+> - `uv run --python 3.11 pytest tests -q` -> 576 passed, 33 skipped, 1 warning.
+> - `git diff --check` -> passed.
 
 ## Agent Brief
 
@@ -75,24 +91,24 @@ Command results should be lightweight coordination summaries. They should includ
 - Observation formatting path - should keep using existing model adapter observation formatting for MAS command outputs.
 
 **Acceptance criteria:**
-- [ ] `mini-mas spawn "task A" "task B"` starts one Child Agent Workflow per repeated task argument.
-- [ ] Detached multi-spawn returns all started child workflow IDs, Run Directory, and exact Trajectory Artifact paths without waiting.
-- [ ] `mini-mas spawn --wait "task A" "task B"` defaults to wait-any behavior and returns when any started child sets a First Observable Event.
-- [ ] `mini-mas spawn --wait --all "task A" "task B"` waits until all started children set First Observable Events.
-- [ ] `mini-mas spawn --wait --timeout <seconds> "task A" "task B"` returns timeout information when no started child sets a First Observable Event before the deadline.
-- [ ] `mini-mas spawn --wait --all --timeout <seconds> "task A" "task B"` returns partial ready snapshots and still-running child IDs when not all children become observable before the deadline.
-- [ ] Waited Spawn timeout does not cancel, close, fail, retry, or otherwise stop started Child Agent Workflows.
-- [ ] `mini-mas spawn --timeout <seconds> "task"` without `--wait` is rejected as invalid because Detached Spawn has no wait phase.
-- [ ] Waited multi-spawn returns all started child metadata plus ready child snapshots and still-running child IDs.
-- [ ] `mini-mas wait <workflow-id>` waits for a specific descendant First Observable Event.
-- [ ] `mini-mas wait --all` gathers all currently relevant child First Observable Events.
-- [ ] `mini-mas wait --any` returns when any currently relevant child sets a First Observable Event.
-- [ ] `mini-mas wait --timeout <seconds>` returns bounded timeout information when children are still running.
-- [ ] Waited Spawn and `mini-mas wait` wait on child DBOS events keyed by child workflow identifiers, not on `WorkflowHandle.get_result()` or final DBOS workflow completion.
-- [ ] Child-to-parent observable state uses DBOS events; parent-to-child Continuation Signals and Close Signals remain DBOS messages.
-- [ ] Wait results include workflow IDs, lifecycle states, latest submission or error when present, Run Directory, and exact Trajectory Artifact paths.
-- [ ] Results do not include full trajectory history and no dedicated `mini-mas history`, `mini-mas logs`, or `mini-mas grep` command is added.
-- [ ] Tests cover single-child and multi-child spawn, detached multi-spawn, waited spawn default wait-any, waited spawn `--all`, waited spawn wait-any timeout, waited spawn wait-all partial timeout, invalid detached spawn timeout, wait for one, `--all`, `--any`, timeout behavior, synchronization through First Observable Events, and no dedicated history/log output.
+- [x] `mini-mas spawn "task A" "task B"` starts one Child Agent Workflow per repeated task argument.
+- [x] Detached multi-spawn returns all started child workflow IDs, Run Directory, and exact Trajectory Artifact paths without waiting.
+- [x] `mini-mas spawn --wait "task A" "task B"` defaults to wait-any behavior and returns when any started child sets a First Observable Event.
+- [x] `mini-mas spawn --wait --all "task A" "task B"` waits until all started children set First Observable Events.
+- [x] `mini-mas spawn --wait --timeout <seconds> "task A" "task B"` returns timeout information when no started child sets a First Observable Event before the deadline.
+- [x] `mini-mas spawn --wait --all --timeout <seconds> "task A" "task B"` returns partial ready snapshots and still-running child IDs when not all children become observable before the deadline.
+- [x] Waited Spawn timeout does not cancel, close, fail, retry, or otherwise stop started Child Agent Workflows.
+- [x] `mini-mas spawn --timeout <seconds> "task"` without `--wait` is rejected as invalid because Detached Spawn has no wait phase.
+- [x] Waited multi-spawn returns all started child metadata plus ready child snapshots and still-running child IDs.
+- [x] `mini-mas wait <workflow-id>` waits for a specific descendant First Observable Event.
+- [x] `mini-mas wait --all` gathers all currently relevant child First Observable Events.
+- [x] `mini-mas wait --any` returns when any currently relevant child sets a First Observable Event.
+- [x] `mini-mas wait --timeout <seconds>` returns bounded timeout information when children are still running.
+- [x] Waited Spawn and `mini-mas wait` wait on child DBOS events keyed by child workflow identifiers, not on `WorkflowHandle.get_result()` or final DBOS workflow completion.
+- [x] Child-to-parent observable state uses DBOS events; parent-to-child Continuation Signals and Close Signals remain DBOS messages.
+- [x] Wait results include workflow IDs, lifecycle states, latest submission or error when present, Run Directory, and exact Trajectory Artifact paths.
+- [x] Results do not include full trajectory history and no dedicated `mini-mas history`, `mini-mas logs`, or `mini-mas grep` command is added.
+- [x] Tests cover single-child and multi-child spawn, detached multi-spawn, waited spawn default wait-any, waited spawn `--all`, waited spawn wait-any timeout, waited spawn wait-all partial timeout, invalid detached spawn timeout, wait for one, `--all`, `--any`, timeout behavior, synchronization through First Observable Events, and no dedicated history/log output.
 
 **Out of scope:**
 - Implementing the full user-facing `mini-mas continue` command.

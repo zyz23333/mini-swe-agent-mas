@@ -9,7 +9,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id, validate_workflow_id
-from minisweagent.mas.status import query_specific_status_async, query_status_tree_async, root_id_for_workflow
+from minisweagent.mas.status import (
+    FIRST_OBSERVABLE_EVENT_KEY,
+    query_specific_status_async,
+    query_status_tree_async,
+    root_id_for_workflow,
+)
 
 MAS_APP_NAME = "mini-swe-agent-mas"
 
@@ -142,6 +147,56 @@ def get_agent_workflow_status(
     return asyncio.run(
         _get_agent_workflow_status_async(
             workflow_id=workflow_id,
+            system_database_url=system_database_url,
+        )
+    )
+
+
+async def _wait_for_agent_workflow_async(
+    *,
+    workflow_id: str,
+    timeout_seconds: float | None = None,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Async implementation for external waiting on one Child First Observable Event."""
+    dbos_module = load_dbos()
+    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+
+    from minisweagent.mas import workflows  # noqa: F401
+
+    dbos_module.DBOS.launch()
+
+    workflow_id = validate_workflow_id(workflow_id)
+    root_workflow_id = root_id_for_workflow(workflow_id)
+    event = await dbos_module.DBOS.get_event_async(
+        workflow_id,
+        FIRST_OBSERVABLE_EVENT_KEY,
+        60 if timeout_seconds is None else timeout_seconds,
+    )
+    metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
+    ready_children = [event] if isinstance(event, dict) else []
+    return {
+        "workflow_id": workflow_id,
+        "root_workflow_id": root_workflow_id,
+        "wait_mode": "one",
+        "timed_out": not ready_children,
+        "ready_children": ready_children,
+        "still_running_child_workflow_ids": [] if ready_children else [workflow_id],
+        "children": [{"task": "", **metadata}],
+    }
+
+
+def wait_for_agent_workflow(
+    *,
+    workflow_id: str,
+    timeout_seconds: float | None = None,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Initialize DBOS and wait for one Child First Observable Event."""
+    return asyncio.run(
+        _wait_for_agent_workflow_async(
+            workflow_id=workflow_id,
+            timeout_seconds=timeout_seconds,
             system_database_url=system_database_url,
         )
     )
