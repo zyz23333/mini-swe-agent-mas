@@ -14,14 +14,13 @@ from minisweagent.mas.artifacts import (
     validate_root_workflow_id,
     validate_workflow_id,
 )
+from minisweagent.mas.command_dispatch import MasCommandHandler
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
 from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.status import (
     FIRST_OBSERVABLE_EVENT_KEY,
     STATUS_EVENT_KEY,
     LifecycleState,
-    format_direct_child_statuses,
-    format_specific_status,
     make_status_snapshot,
     query_direct_child_status_async,
     query_direct_child_statuses_async,
@@ -54,40 +53,6 @@ class AgentWorkflowState:
     spawn_count: int = 0
     first_observable_published: bool = False
     spawned_child_workflow_ids: set[str] | None = None
-
-
-@dataclass(frozen=True)
-class SpawnCommandRequest:
-    """Parsed workflow-layer spawn command options."""
-
-    tasks: list[str]
-    wait: bool = False
-    wait_all: bool = False
-    timeout_seconds: float | None = None
-
-
-@dataclass(frozen=True)
-class WaitCommandRequest:
-    """Parsed workflow-layer wait command options."""
-
-    workflow_id: str | None = None
-    wait_all: bool = False
-    timeout_seconds: float | None = None
-
-
-@dataclass(frozen=True)
-class ContinueCommandRequest:
-    """Parsed workflow-layer continuation command options."""
-
-    workflow_id: str
-    content: str
-
-
-@dataclass(frozen=True)
-class CloseCommandRequest:
-    """Parsed workflow-layer close command options."""
-
-    workflow_id: str
 
 
 async def _publish_status_snapshot(
@@ -168,184 +133,8 @@ async def _wait_for_parent_direction_signal() -> dict | str:
             return signal
 
 
-def _format_child_metadata_lines(child: dict[str, str]) -> list[str]:
-    return [
-        f"task: {child['task']}",
-        f"workflow_id: {child['workflow_id']}",
-        f"run_directory: {child['run_directory']}",
-        f"trajectory_artifact_path: {child['trajectory_artifact_path']}",
-    ]
-
-
-def _format_detached_spawn_output(children: list[dict[str, str]]) -> str:
-    lines = ["Detached spawn started", f"child_count: {len(children)}"]
-    for index, child in enumerate(children):
-        if index:
-            lines.append("")
-        lines.extend(_format_child_metadata_lines(child))
-    return "\n".join(lines) + "\n"
-
-
 def _snapshot_workflow_id(snapshot: dict[str, Any]) -> str:
     return str(snapshot.get("workflow_id", ""))
-
-
-def _format_still_running_ids(still_running_ids: list[str]) -> str:
-    return ", ".join(still_running_ids) if still_running_ids else "none"
-
-
-def _format_ready_snapshot(snapshot: dict[str, Any]) -> list[str]:
-    lines = [
-        f"ready_workflow_id: {snapshot['workflow_id']}",
-        f"lifecycle_state: {snapshot['lifecycle_state']}",
-    ]
-    if snapshot.get("latest_submission"):
-        lines.append(f"latest_submission: {snapshot['latest_submission']}")
-    if snapshot.get("latest_error"):
-        lines.append(f"latest_error: {snapshot['latest_error']}")
-    lines.extend(
-        [
-            f"run_directory: {snapshot['run_directory']}",
-            f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
-        ]
-    )
-    return lines
-
-
-def _format_wait_summary_output(
-    *,
-    command_name: str,
-    wait_all: bool,
-    timed_out: bool,
-    children: list[dict[str, str]],
-    ready_snapshots: list[dict[str, Any]],
-    still_running_ids: list[str],
-) -> str:
-    lines = [
-        f"{command_name} {'timed out' if timed_out else 'completed'}",
-        f"wait_mode: {'all' if wait_all else 'any'}",
-        f"child_count: {len(children)}",
-        f"ready_child_count: {len(ready_snapshots)}",
-        f"still_running_child_workflow_ids: {_format_still_running_ids(still_running_ids)}",
-        "",
-        "started_children:",
-    ]
-    for index, child in enumerate(children):
-        if index:
-            lines.append("")
-        lines.extend(_format_child_metadata_lines(child))
-    if ready_snapshots:
-        lines.extend(["", "ready_children:"])
-        for index, snapshot in enumerate(ready_snapshots):
-            if index:
-                lines.append("")
-            lines.extend(_format_ready_snapshot(snapshot))
-    return "\n".join(lines) + "\n"
-
-
-def _parse_timeout_seconds(raw_timeout: str) -> float:
-    try:
-        timeout_seconds = float(raw_timeout)
-    except ValueError as exc:
-        raise ValueError("Spawn timeout must be a number of seconds") from exc
-    if timeout_seconds < 0:
-        raise ValueError("Spawn timeout must be non-negative")
-    return timeout_seconds
-
-
-def _parse_spawn_arguments(arguments: list[str]) -> SpawnCommandRequest:
-    wait = False
-    wait_all = False
-    timeout_seconds: float | None = None
-    tasks = []
-    index = 1
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument == "--wait":
-            wait = True
-            index += 1
-            continue
-        if argument == "--all":
-            wait_all = True
-            index += 1
-            continue
-        if argument == "--timeout":
-            if index + 1 >= len(arguments):
-                raise ValueError("Spawn timeout requires a number of seconds")
-            timeout_seconds = _parse_timeout_seconds(arguments[index + 1])
-            index += 2
-            continue
-        if argument.startswith("--"):
-            raise ValueError(f"Unsupported spawn option: {argument}")
-        tasks.append(argument)
-        index += 1
-
-    if timeout_seconds is not None and not wait:
-        raise ValueError("mini-mas spawn --timeout requires --wait because Detached Spawn has no wait phase")
-    if wait_all and not wait:
-        raise ValueError("mini-mas spawn --all requires --wait")
-    if not tasks:
-        raise ValueError('Usage: mini-mas spawn [--wait] [--all] [--timeout seconds] "task" [...]')
-    return SpawnCommandRequest(tasks=tasks, wait=wait, wait_all=wait_all, timeout_seconds=timeout_seconds)
-
-
-def _spawn_task_count(arguments: list[str]) -> int:
-    try:
-        return len(_parse_spawn_arguments(arguments).tasks)
-    except ValueError:
-        return 1
-
-
-def _parse_wait_arguments(arguments: list[str]) -> WaitCommandRequest:
-    wait_any = False
-    wait_all = False
-    timeout_seconds: float | None = None
-    workflow_id: str | None = None
-    index = 1
-    while index < len(arguments):
-        argument = arguments[index]
-        if argument == "--any":
-            wait_any = True
-            index += 1
-            continue
-        if argument == "--all":
-            wait_all = True
-            index += 1
-            continue
-        if argument == "--timeout":
-            if index + 1 >= len(arguments):
-                raise ValueError("Wait timeout requires a number of seconds")
-            timeout_seconds = _parse_timeout_seconds(arguments[index + 1])
-            index += 2
-            continue
-        if argument.startswith("--"):
-            raise ValueError(f"Unsupported wait option: {argument}")
-        if workflow_id is not None:
-            raise ValueError("mini-mas wait accepts at most one workflow ID")
-        workflow_id = validate_workflow_id(argument)
-        index += 1
-
-    if workflow_id is not None and (wait_any or wait_all):
-        raise ValueError("mini-mas wait for one workflow cannot also use --any or --all")
-    if wait_any and wait_all:
-        raise ValueError("mini-mas wait cannot use both --any and --all")
-    return WaitCommandRequest(workflow_id=workflow_id, wait_all=wait_all, timeout_seconds=timeout_seconds)
-
-
-def _parse_continue_arguments(arguments: list[str]) -> ContinueCommandRequest:
-    if len(arguments) != 3:
-        raise ValueError('Usage: mini-mas continue <workflow-id> "message"')
-    workflow_id = validate_workflow_id(arguments[1])
-    content = arguments[2]
-    if not content:
-        raise ValueError('Usage: mini-mas continue <workflow-id> "message"')
-    return ContinueCommandRequest(workflow_id=workflow_id, content=content)
-
-
-def _parse_close_arguments(arguments: list[str]) -> CloseCommandRequest:
-    if len(arguments) != 2:
-        raise ValueError("Usage: mini-mas close <workflow-id>")
-    return CloseCommandRequest(workflow_id=validate_workflow_id(arguments[1]))
 
 
 def _next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
@@ -670,277 +459,82 @@ async def send_close_signal_async(
     }
 
 
-def _spawn_command_result(
-    *,
-    request: SpawnCommandRequest,
-    children: list[dict[str, str]],
-    output: str,
-    extra: dict[str, Any] | None = None,
-) -> dict:
-    child_workflow_ids = [child["workflow_id"] for child in children]
-    result_extra: dict[str, Any] = {
-        "mas_command": ["spawn", *request.tasks],
-        "spawned_child_count": len(children),
-        "child_workflow_ids": child_workflow_ids,
-        "children": children,
-    }
-    if len(children) == 1:
-        result_extra["child_workflow_id"] = children[0]["workflow_id"]
-        result_extra.update({key: value for key, value in children[0].items() if key != "task"})
-    if extra:
-        result_extra.update(extra)
-    return {
-        "output": output,
-        "returncode": 0,
-        "exception_info": "",
-        "extra": result_extra,
-    }
+async def _query_direct_child_statuses(parent_workflow_id: str) -> list[dict[str, Any]]:
+    return await query_direct_child_statuses_async(_dbos.DBOS, parent_workflow_id)
 
 
-async def _dispatch_mas_command(
-    classification: MasCommandClassification,
-    *,
-    spawn_index: int,
+async def _query_direct_child_status(parent_workflow_id: str, child_workflow_id: str) -> dict[str, Any] | None:
+    return await query_direct_child_status_async(
+        _dbos.DBOS,
+        parent_workflow_id=parent_workflow_id,
+        child_workflow_id=child_workflow_id,
+    )
+
+
+async def _spawn_detached_children_for_handler(
+    root_workflow_id: str,
+    parent_workflow_id: str,
+    first_spawn_index: int,
+    tasks: list[str],
     existing_child_workflow_ids: set[str],
-) -> dict:
-    """Dispatch a validated standalone MAS command at workflow-control level."""
-    current_workflow_id = _current_agent_workflow_id()
-    if classification.arguments[:1] == ["status"]:
-        if current_workflow_id is None:
-            return {
-                "output": "mini-mas status requires Agent Workflow context.\n",
-                "returncode": 2,
-                "exception_info": "missing_agent_workflow_context",
-                "extra": {"mas_command_error": "missing_agent_workflow_context"},
-            }
-        current_workflow_id = validate_workflow_id(current_workflow_id)
-        if len(classification.arguments) == 1:
-            snapshots = await query_direct_child_statuses_async(_dbos.DBOS, current_workflow_id)
-            output = format_direct_child_statuses(snapshots, parent_workflow_id=current_workflow_id)
-            return {
-                "output": output,
-                "returncode": 0,
-                "exception_info": "",
-                "extra": {"mas_command": classification.arguments},
-            }
-        if len(classification.arguments) == 2:
-            target_workflow_id = classification.arguments[1]
-            snapshot = await query_direct_child_status_async(
-                _dbos.DBOS,
-                parent_workflow_id=current_workflow_id,
-                child_workflow_id=target_workflow_id,
-            )
-            if snapshot is None:
-                return {
-                    "output": f"Workflow is not a direct Child Agent Workflow of {current_workflow_id}: {target_workflow_id}\n",
-                    "returncode": 1,
-                    "exception_info": "workflow_not_direct_child",
-                    "extra": {
-                        "mas_command": classification.arguments,
-                        "mas_command_error": "workflow_not_direct_child",
-                    },
-                }
-            return {
-                "output": format_specific_status(snapshot),
-                "returncode": 0,
-                "exception_info": "",
-                "extra": {"mas_command": classification.arguments},
-            }
-        return {
-            "output": "Usage: mini-mas status [workflow-id]\n",
-            "returncode": 2,
-            "exception_info": "invalid_status_arguments",
-            "extra": {"mas_command_error": "invalid_status_arguments"},
-        }
+) -> list[dict[str, str]]:
+    return await _spawn_detached_children(
+        root_workflow_id=root_workflow_id,
+        parent_workflow_id=parent_workflow_id,
+        first_spawn_index=first_spawn_index,
+        tasks=tasks,
+        existing_child_workflow_ids=existing_child_workflow_ids,
+    )
 
-    if classification.arguments[:1] == ["spawn"]:
-        if current_workflow_id is None:
-            return {
-                "output": "mini-mas spawn requires Agent Workflow context.\n",
-                "returncode": 2,
-                "exception_info": "missing_agent_workflow_context",
-                "extra": {"mas_command_error": "missing_agent_workflow_context"},
-            }
-        current_workflow_id = validate_workflow_id(current_workflow_id)
-        root_workflow_id = root_id_for_workflow(current_workflow_id)
-        try:
-            request = _parse_spawn_arguments(classification.arguments)
-        except ValueError as exc:
-            return {
-                "output": f"{exc}\n",
-                "returncode": 2,
-                "exception_info": str(exc),
-                "extra": {"mas_command_error": "invalid_spawn_arguments"},
-            }
-        children = await _spawn_detached_children(
-            root_workflow_id=root_workflow_id,
-            parent_workflow_id=current_workflow_id,
-            first_spawn_index=spawn_index,
-            tasks=request.tasks,
-            existing_child_workflow_ids=existing_child_workflow_ids,
-        )
-        if request.wait:
-            ready_snapshots, still_running_ids, timed_out = (
-                await _wait_for_direct_child_first_observable_events_with_status(
-                    parent_workflow_id=current_workflow_id,
-                    child_workflow_ids=[child["workflow_id"] for child in children],
-                    wait_all=request.wait_all,
-                    timeout_seconds=request.timeout_seconds,
-                )
-            )
-            return _spawn_command_result(
-                request=request,
-                children=children,
-                output=_format_wait_summary_output(
-                    command_name="Waited spawn",
-                    wait_all=request.wait_all,
-                    timed_out=timed_out,
-                    children=children,
-                    ready_snapshots=ready_snapshots,
-                    still_running_ids=still_running_ids,
-                ),
-                extra={
-                    "waited": True,
-                    "wait_mode": "all" if request.wait_all else "any",
-                    "timed_out": timed_out,
-                    "ready_children": ready_snapshots,
-                    "still_running_child_workflow_ids": still_running_ids,
-                },
-            )
-        return _spawn_command_result(
-            request=request,
-            children=children,
-            output=_format_detached_spawn_output(children),
-            extra={"waited": False, "ready_children": [], "still_running_child_workflow_ids": []},
-        )
 
-    if classification.arguments[:1] == ["wait"]:
-        if current_workflow_id is None:
-            return {
-                "output": "mini-mas wait requires Agent Workflow context.\n",
-                "returncode": 2,
-                "exception_info": "missing_agent_workflow_context",
-                "extra": {"mas_command_error": "missing_agent_workflow_context"},
-            }
-        current_workflow_id = validate_workflow_id(current_workflow_id)
-        try:
-            request = _parse_wait_arguments(classification.arguments)
-        except ValueError as exc:
-            return {
-                "output": f"{exc}\n",
-                "returncode": 2,
-                "exception_info": str(exc),
-                "extra": {"mas_command_error": "invalid_wait_arguments"},
-            }
-        children = await _direct_child_metadata(parent_workflow_id=current_workflow_id, child_workflow_id=request.workflow_id)
-        if not children:
-            output = (
-                f"Workflow is not a direct Child Agent Workflow of {current_workflow_id}: {request.workflow_id}\n"
-                if request.workflow_id
-                else "No current child workflows found for mini-mas wait.\n"
-            )
-            return {
-                "output": output,
-                "returncode": 1,
-                "exception_info": "workflow_not_direct_child" if request.workflow_id else "no_child_workflows",
-                "extra": {
-                    "mas_command": classification.arguments,
-                    "mas_command_error": "workflow_not_direct_child" if request.workflow_id else "no_child_workflows",
-                },
-            }
-        wait_all = request.wait_all or request.workflow_id is not None
-        ready_snapshots, still_running_ids, timed_out = (
-            await _wait_for_direct_child_first_observable_events_with_status(
-                parent_workflow_id=current_workflow_id,
-                child_workflow_ids=[child["workflow_id"] for child in children],
-                wait_all=wait_all,
-                timeout_seconds=request.timeout_seconds,
-            )
-        )
-        wait_mode = "one" if request.workflow_id is not None else ("all" if wait_all else "any")
-        output = _format_wait_summary_output(
-            command_name="mini-mas wait",
-            wait_all=wait_all,
-            timed_out=timed_out,
-            children=children,
-            ready_snapshots=ready_snapshots,
-            still_running_ids=still_running_ids,
-        ).replace(f"wait_mode: {'all' if wait_all else 'any'}", f"wait_mode: {wait_mode}", 1)
-        return {
-            "output": output,
-            "returncode": 0,
-            "exception_info": "",
-            "extra": {
-                "mas_command": classification.arguments,
-                "wait_mode": wait_mode,
-                "timed_out": timed_out,
-                "ready_children": ready_snapshots,
-                "still_running_child_workflow_ids": still_running_ids,
-                "children": children,
-            },
-        }
+async def _wait_for_direct_child_first_observable_events_for_handler(
+    parent_workflow_id: str,
+    child_workflow_ids: list[str],
+    wait_all: bool,
+    timeout_seconds: float | None,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    return await _wait_for_direct_child_first_observable_events_with_status(
+        parent_workflow_id=parent_workflow_id,
+        child_workflow_ids=child_workflow_ids,
+        wait_all=wait_all,
+        timeout_seconds=timeout_seconds,
+    )
 
-    if classification.arguments[:1] == ["continue"]:
-        if current_workflow_id is None:
-            return {
-                "output": "mini-mas continue requires Agent Workflow context.\n",
-                "returncode": 2,
-                "exception_info": "missing_agent_workflow_context",
-                "extra": {"mas_command_error": "missing_agent_workflow_context"},
-            }
-        current_workflow_id = validate_workflow_id(current_workflow_id)
-        try:
-            request = _parse_continue_arguments(classification.arguments)
-        except ValueError as exc:
-            return {
-                "output": f"{exc}\n",
-                "returncode": 2,
-                "exception_info": str(exc),
-                "extra": {"mas_command_error": "invalid_continue_arguments"},
-            }
-        result = await send_continuation_signal_async(
-            source_workflow_id=current_workflow_id,
-            target_workflow_id=request.workflow_id,
-            content=request.content,
-        )
-        result["extra"] = {"mas_command": classification.arguments, **result.get("extra", {})}
-        result.pop("ok", None)
-        return result
 
-    if classification.arguments[:1] == ["close"]:
-        if current_workflow_id is None:
-            return {
-                "output": "mini-mas close requires Agent Workflow context.\n",
-                "returncode": 2,
-                "exception_info": "missing_agent_workflow_context",
-                "extra": {"mas_command_error": "missing_agent_workflow_context"},
-            }
-        current_workflow_id = validate_workflow_id(current_workflow_id)
-        try:
-            request = _parse_close_arguments(classification.arguments)
-        except ValueError as exc:
-            return {
-                "output": f"{exc}\n",
-                "returncode": 2,
-                "exception_info": str(exc),
-                "extra": {"mas_command_error": "invalid_close_arguments"},
-            }
-        result = await send_close_signal_async(
-            source_workflow_id=current_workflow_id,
-            target_workflow_id=request.workflow_id,
-        )
-        result["extra"] = {"mas_command": classification.arguments, **result.get("extra", {})}
-        result.pop("ok", None)
-        return result
+async def _direct_child_metadata_for_handler(
+    parent_workflow_id: str, child_workflow_id: str | None
+) -> list[dict[str, str]]:
+    return await _direct_child_metadata(parent_workflow_id=parent_workflow_id, child_workflow_id=child_workflow_id)
 
-    command_text = " ".join(classification.arguments)
-    output = f"MAS command accepted: {command_text}\n"
-    return {
-        "output": output,
-        "returncode": 0,
-        "exception_info": "",
-        "extra": {"mas_command": classification.arguments},
-    }
+
+async def _send_continuation_signal_for_handler(
+    source_workflow_id: str, target_workflow_id: str, content: str
+) -> dict[str, Any]:
+    return await send_continuation_signal_async(
+        source_workflow_id=source_workflow_id,
+        target_workflow_id=target_workflow_id,
+        content=content,
+    )
+
+
+async def _send_close_signal_for_handler(source_workflow_id: str, target_workflow_id: str) -> dict[str, Any]:
+    return await send_close_signal_async(
+        source_workflow_id=source_workflow_id,
+        target_workflow_id=target_workflow_id,
+    )
+
+
+def _make_mas_command_handler() -> MasCommandHandler:
+    return MasCommandHandler(
+        current_workflow_id=_current_agent_workflow_id,
+        query_direct_child_statuses=_query_direct_child_statuses,
+        query_direct_child_status=_query_direct_child_status,
+        spawn_detached_children=_spawn_detached_children_for_handler,
+        wait_for_direct_child_first_observable_events=_wait_for_direct_child_first_observable_events_for_handler,
+        direct_child_metadata=_direct_child_metadata_for_handler,
+        send_continuation_signal=_send_continuation_signal_for_handler,
+        send_close_signal=_send_close_signal_for_handler,
+    )
 
 
 def _reject_mas_shell_composition(classification: MasCommandClassification) -> dict:
@@ -974,19 +568,18 @@ async def _execute_agent_workflow_outputs(
     """Execute bash-shaped Agent Workflow actions with workflow-layer MAS interception."""
     outputs = []
     existing_child_workflow_ids = existing_child_workflow_ids if existing_child_workflow_ids is not None else set()
+    command_handler = _make_mas_command_handler()
     current_spawn_index = spawn_index
     for action in message.get("extra", {}).get("actions", []):
         classification = classify_mas_command(action.get("command", ""))
         if classification.kind == MasCommandKind.STANDALONE:
-            outputs.append(
-                await _dispatch_mas_command(
-                    classification,
-                    spawn_index=current_spawn_index + 1,
-                    existing_child_workflow_ids=existing_child_workflow_ids,
-                )
+            output = await command_handler.execute(
+                classification,
+                spawn_index=current_spawn_index + 1,
+                existing_child_workflow_ids=existing_child_workflow_ids,
             )
-            if classification.arguments[:1] == ["spawn"]:
-                current_spawn_index += _spawn_task_count(classification.arguments)
+            outputs.append(output)
+            current_spawn_index += output.get("extra", {}).get("spawned_child_count", 0)
         elif classification.kind == MasCommandKind.INVALID:
             outputs.append(_reject_mas_shell_composition(classification))
         else:
@@ -1138,13 +731,10 @@ async def _run_agent_workflow_loop(
                     workflow_id=workflow_id,
                 ),
             )
-            state.spawn_count += sum(
-                _spawn_task_count(classification.arguments)
-                for action in message.get("extra", {}).get("actions", [])
-                for classification in [classify_mas_command(action.get("command", ""))]
-                if classification.arguments[:1] == ["spawn"]
-            )
             state.messages.extend(observations)
+            state.spawn_count += sum(
+                observation.get("extra", {}).get("spawned_child_count", 0) for observation in observations
+            )
         except InterruptAgentFlow as flow:
             state.messages.extend(flow.messages)
 

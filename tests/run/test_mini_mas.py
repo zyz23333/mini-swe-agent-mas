@@ -487,6 +487,28 @@ def test_workflow_action_execution_dispatches_standalone_mas_commands():
     assert "mini-mas wait requires Agent Workflow context" in _observation_text(observations[0])
 
 
+def test_mas_command_handler_accepts_classified_standalone_command():
+    from minisweagent.mas.command_dispatch import MasCommandHandler
+    from minisweagent.mas.commands import classify_mas_command
+
+    handler = MasCommandHandler(current_workflow_id=lambda: None)
+
+    result = asyncio.run(
+        handler.execute(
+            classify_mas_command("mini-mas wait --any"),
+            spawn_index=1,
+            existing_child_workflow_ids=set(),
+        )
+    )
+
+    assert result == {
+        "output": "mini-mas wait requires Agent Workflow context.\n",
+        "returncode": 2,
+        "exception_info": "missing_agent_workflow_context",
+        "extra": {"mas_command_error": "missing_agent_workflow_context"},
+    }
+
+
 def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     import minisweagent.mas.workflows as workflows
 
