@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from inspect import isawaitable
 from typing import Any
 
+from minisweagent.mas.artifacts import make_artifact_metadata, validate_workflow_id
 from minisweagent.mas.status import (
     FIRST_OBSERVABLE_EVENT_KEY,
     STATUS_EVENT_KEY,
@@ -26,14 +28,36 @@ def _snapshot_workflow_id(snapshot: dict[str, Any]) -> str:
     return str(snapshot.get("workflow_id", ""))
 
 
-def _child_metadata_from_status(snapshot: dict[str, Any]) -> dict[str, str]:
+def _child_metadata_from_status(snapshot: dict[str, Any], *, task: str = "") -> dict[str, str]:
     return {
-        "task": "",
+        "task": task,
         "root_workflow_id": str(snapshot["root_workflow_id"]),
         "workflow_id": str(snapshot["workflow_id"]),
         "run_directory": str(snapshot["run_directory"]),
         "trajectory_artifact_path": str(snapshot["trajectory_artifact_path"]),
     }
+
+
+@dataclass(frozen=True)
+class SpawnChildrenResult:
+    """Structured Child Coordination result for detached child startup."""
+
+    children: list[dict[str, str]]
+
+    @property
+    def child_workflow_ids(self) -> list[str]:
+        return [child["workflow_id"] for child in self.children]
+
+
+@dataclass(frozen=True)
+class ChildWaitResult:
+    """Structured Child Coordination result for First Observable Event waits."""
+
+    children: list[dict[str, str]]
+    ready_snapshots: list[dict[str, Any]]
+    still_running_ids: list[str]
+    timed_out: bool
+    wait_mode: str
 
 
 class DBOSCoordinationAdapter:
@@ -217,3 +241,87 @@ class DBOSCoordinationAdapter:
     async def receive_parent_direction(self, *, topic: str, timeout_seconds: float) -> dict | str | None:
         """Receive one parent-direction workflow message."""
         return await _maybe_await(self.dbos_api.recv_async(topic, timeout_seconds=timeout_seconds))
+
+
+class ChildCoordinator:
+    """Own child workflow spawn and First Observable Event wait domain behavior."""
+
+    def __init__(self, *, adapter: DBOSCoordinationAdapter) -> None:
+        self.adapter = adapter
+
+    async def spawn_children(
+        self,
+        *,
+        root_workflow_id: str,
+        parent_workflow_id: str,
+        first_spawn_index: int,
+        tasks: list[str],
+        existing_child_workflow_ids: set[str],
+    ) -> SpawnChildrenResult:
+        """Allocate deterministic child IDs and enqueue missing Child Agent Workflows."""
+        children = []
+        for offset, task in enumerate(tasks):
+            child_workflow_id = next_child_workflow_id(parent_workflow_id, first_spawn_index + offset)
+            metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=child_workflow_id)
+            if child_workflow_id not in existing_child_workflow_ids:
+                await self.adapter.enqueue_child_agent_workflow(
+                    root_workflow_id=root_workflow_id,
+                    child_workflow_id=child_workflow_id,
+                    task=task,
+                )
+                existing_child_workflow_ids.add(child_workflow_id)
+            children.append({"task": task, **metadata})
+        return SpawnChildrenResult(children=children)
+
+    async def direct_child_metadata(self, *, parent_workflow_id: str) -> list[dict[str, str]]:
+        """Return current direct children as command-presentation metadata."""
+        return await self.adapter.direct_child_metadata(parent_workflow_id=parent_workflow_id)
+
+    async def wait_for_spawned_children(
+        self,
+        *,
+        parent_workflow_id: str,
+        children: list[dict[str, str]],
+        wait_all: bool,
+        timeout_seconds: float | None,
+    ) -> ChildWaitResult:
+        """Wait over freshly spawned children without mutating running children on timeout."""
+        return await self.wait_for_children(
+            parent_workflow_id=parent_workflow_id,
+            children=children,
+            wait_all=wait_all,
+            timeout_seconds=timeout_seconds,
+            wait_mode="all" if wait_all else "any",
+        )
+
+    async def wait_for_children(
+        self,
+        *,
+        parent_workflow_id: str,
+        children: list[dict[str, str]],
+        wait_all: bool,
+        timeout_seconds: float | None,
+        wait_mode: str,
+    ) -> ChildWaitResult:
+        """Synchronize direct children on First Observable Events."""
+        ready_snapshots, still_running_ids, timed_out = await self.adapter.wait_for_direct_child_first_observable_events(
+            parent_workflow_id=parent_workflow_id,
+            child_workflow_ids=[child["workflow_id"] for child in children],
+            wait_all=wait_all,
+            timeout_seconds=timeout_seconds,
+        )
+        return ChildWaitResult(
+            children=children,
+            ready_snapshots=ready_snapshots,
+            still_running_ids=still_running_ids,
+            timed_out=timed_out,
+            wait_mode=wait_mode,
+        )
+
+
+def next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
+    """Return the deterministic Workflow Tree ID for a child sibling index."""
+    validate_workflow_id(parent_workflow_id)
+    if spawn_index < 1:
+        raise ValueError("Child spawn index must start at 1")
+    return f"{parent_workflow_id}-c{spawn_index:03d}"

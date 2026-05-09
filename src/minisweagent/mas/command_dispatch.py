@@ -9,6 +9,7 @@ from typing import Any
 from minisweagent.mas.artifacts import validate_workflow_id
 from minisweagent.mas.authority import AuthorityCommandError, AuthorizedChild
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind
+from minisweagent.mas.coordination import ChildCoordinator
 from minisweagent.mas.status import format_direct_child_statuses, format_specific_status, root_id_for_workflow
 
 
@@ -47,9 +48,6 @@ class CloseCommandRequest:
 
 
 StatusList = Callable[[str], Awaitable[list[dict[str, Any]]]]
-SpawnChildren = Callable[[str, str, int, list[str], set[str]], Awaitable[list[dict[str, str]]]]
-WaitFirstObservable = Callable[[str, list[str], bool, float | None], Awaitable[tuple[list[dict[str, Any]], list[str], bool]]]
-DirectChildMetadata = Callable[[str, str | None], Awaitable[list[dict[str, str]]]]
 ContinuationSender = Callable[[str, str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 CloseSender = Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -296,18 +294,14 @@ class MasCommandHandler:
         current_workflow_id: Callable[[], str | None],
         query_direct_child_statuses: StatusList | None = None,
         authority_policy: Any | None = None,
-        spawn_detached_children: SpawnChildren | None = None,
-        wait_for_direct_child_first_observable_events: WaitFirstObservable | None = None,
-        direct_child_metadata: DirectChildMetadata | None = None,
+        child_coordinator: ChildCoordinator | None = None,
         send_continuation_signal: ContinuationSender | None = None,
         send_close_signal: CloseSender | None = None,
     ) -> None:
         self.current_workflow_id = current_workflow_id
         self.query_direct_child_statuses = query_direct_child_statuses
         self.authority_policy = authority_policy
-        self.spawn_detached_children = spawn_detached_children
-        self.wait_for_direct_child_first_observable_events = wait_for_direct_child_first_observable_events
-        self.direct_child_metadata = direct_child_metadata
+        self.child_coordinator = child_coordinator
         self.send_continuation_signal = send_continuation_signal
         self.send_close_signal = send_close_signal
 
@@ -398,19 +392,20 @@ class MasCommandHandler:
                 "exception_info": str(exc),
                 "extra": {"mas_command_error": "invalid_spawn_arguments"},
             }
-        children = await self.spawn_detached_children(
-            root_workflow_id,
-            current_workflow_id,
-            spawn_index,
-            request.tasks,
-            existing_child_workflow_ids,
+        spawn_result = await self.child_coordinator.spawn_children(
+            root_workflow_id=root_workflow_id,
+            parent_workflow_id=current_workflow_id,
+            first_spawn_index=spawn_index,
+            tasks=request.tasks,
+            existing_child_workflow_ids=existing_child_workflow_ids,
         )
+        children = spawn_result.children
         if request.wait:
-            ready_snapshots, still_running_ids, timed_out = await self.wait_for_direct_child_first_observable_events(
-                current_workflow_id,
-                [child["workflow_id"] for child in children],
-                request.wait_all,
-                request.timeout_seconds,
+            wait_result = await self.child_coordinator.wait_for_spawned_children(
+                parent_workflow_id=current_workflow_id,
+                children=children,
+                wait_all=request.wait_all,
+                timeout_seconds=request.timeout_seconds,
             )
             return _spawn_command_result(
                 request=request,
@@ -418,17 +413,17 @@ class MasCommandHandler:
                 output=_format_wait_summary_output(
                     command_name="Waited spawn",
                     wait_all=request.wait_all,
-                    timed_out=timed_out,
+                    timed_out=wait_result.timed_out,
                     children=children,
-                    ready_snapshots=ready_snapshots,
-                    still_running_ids=still_running_ids,
+                    ready_snapshots=wait_result.ready_snapshots,
+                    still_running_ids=wait_result.still_running_ids,
                 ),
                 extra={
                     "waited": True,
-                    "wait_mode": "all" if request.wait_all else "any",
-                    "timed_out": timed_out,
-                    "ready_children": ready_snapshots,
-                    "still_running_child_workflow_ids": still_running_ids,
+                    "wait_mode": wait_result.wait_mode,
+                    "timed_out": wait_result.timed_out,
+                    "ready_children": wait_result.ready_snapshots,
+                    "still_running_child_workflow_ids": wait_result.still_running_ids,
                 },
             )
         return _spawn_command_result(
@@ -459,7 +454,7 @@ class MasCommandHandler:
                 return error
             children = [_child_metadata_from_snapshot(_authority_result_snapshot(authority_result))]
         else:
-            children = await self.direct_child_metadata(current_workflow_id, None)
+            children = await self.child_coordinator.direct_child_metadata(parent_workflow_id=current_workflow_id)
         if not children:
             return {
                 "output": "No current child workflows found for mini-mas wait.\n",
@@ -471,20 +466,21 @@ class MasCommandHandler:
                 },
             }
         wait_all = request.wait_all or request.workflow_id is not None
-        ready_snapshots, still_running_ids, timed_out = await self.wait_for_direct_child_first_observable_events(
-            current_workflow_id,
-            [child["workflow_id"] for child in children],
-            wait_all,
-            request.timeout_seconds,
-        )
         wait_mode = "one" if request.workflow_id is not None else ("all" if wait_all else "any")
+        wait_result = await self.child_coordinator.wait_for_children(
+            parent_workflow_id=current_workflow_id,
+            children=children,
+            wait_all=wait_all,
+            timeout_seconds=request.timeout_seconds,
+            wait_mode=wait_mode,
+        )
         output = _format_wait_summary_output(
             command_name="mini-mas wait",
             wait_all=wait_all,
-            timed_out=timed_out,
+            timed_out=wait_result.timed_out,
             children=children,
-            ready_snapshots=ready_snapshots,
-            still_running_ids=still_running_ids,
+            ready_snapshots=wait_result.ready_snapshots,
+            still_running_ids=wait_result.still_running_ids,
         ).replace(f"wait_mode: {'all' if wait_all else 'any'}", f"wait_mode: {wait_mode}", 1)
         return {
             "output": output,
@@ -493,9 +489,9 @@ class MasCommandHandler:
             "extra": {
                 "mas_command": classification.arguments,
                 "wait_mode": wait_mode,
-                "timed_out": timed_out,
-                "ready_children": ready_snapshots,
-                "still_running_child_workflow_ids": still_running_ids,
+                "timed_out": wait_result.timed_out,
+                "ready_children": wait_result.ready_snapshots,
+                "still_running_child_workflow_ids": wait_result.still_running_ids,
                 "children": children,
             },
         }

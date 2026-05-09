@@ -17,7 +17,7 @@ from minisweagent.mas.artifacts import (
 from minisweagent.mas.authority import DirectChildAuthorityPolicy
 from minisweagent.mas.command_dispatch import MasCommandHandler
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
-from minisweagent.mas.coordination import DBOSCoordinationAdapter
+from minisweagent.mas.coordination import ChildCoordinator, DBOSCoordinationAdapter
 from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.status import LifecycleState
 
@@ -42,6 +42,10 @@ def _coordination_adapter() -> DBOSCoordinationAdapter:
         set_workflow_id=_dbos.SetWorkflowID,
         child_agent_workflow=child_agent_workflow,
     )
+
+
+def _child_coordinator() -> ChildCoordinator:
+    return ChildCoordinator(adapter=_coordination_adapter())
 
 
 @dataclass
@@ -120,103 +124,6 @@ async def _wait_for_parent_direction_signal() -> dict | str:
         )
         if signal is not None:
             return signal
-
-
-def _next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
-    validate_workflow_id(parent_workflow_id)
-    if spawn_index < 1:
-        raise ValueError("Child spawn index must start at 1")
-    return f"{parent_workflow_id}-c{spawn_index:03d}"
-
-
-async def _enqueue_child_agent_workflow(*, root_workflow_id: str, child_workflow_id: str, task: str) -> None:
-    await _coordination_adapter().enqueue_child_agent_workflow(
-        root_workflow_id=root_workflow_id,
-        child_workflow_id=child_workflow_id,
-        task=task,
-    )
-
-
-async def _spawn_detached_child(
-    *,
-    root_workflow_id: str,
-    parent_workflow_id: str,
-    spawn_index: int,
-    task: str,
-    existing_child_workflow_ids: set[str],
-) -> dict:
-    child_workflow_id = _next_child_workflow_id(parent_workflow_id, spawn_index)
-    metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=child_workflow_id)
-    if child_workflow_id not in existing_child_workflow_ids:
-        await _enqueue_child_agent_workflow(
-            root_workflow_id=root_workflow_id,
-            child_workflow_id=child_workflow_id,
-            task=task,
-        )
-        existing_child_workflow_ids.add(child_workflow_id)
-
-    return {
-        "task": task,
-        **metadata,
-    }
-
-
-async def _spawn_detached_children(
-    *,
-    root_workflow_id: str,
-    parent_workflow_id: str,
-    first_spawn_index: int,
-    tasks: list[str],
-    existing_child_workflow_ids: set[str],
-) -> list[dict[str, str]]:
-    children = []
-    for offset, task in enumerate(tasks):
-        children.append(
-            await _spawn_detached_child(
-                root_workflow_id=root_workflow_id,
-                parent_workflow_id=parent_workflow_id,
-                spawn_index=first_spawn_index + offset,
-                task=task,
-                existing_child_workflow_ids=existing_child_workflow_ids,
-            )
-        )
-    return children
-
-
-async def _wait_for_first_observable_event(workflow_id: str, timeout_seconds: float) -> dict[str, Any] | None:
-    return await _coordination_adapter().wait_for_first_observable_event(workflow_id, timeout_seconds)
-
-
-async def _wait_for_first_observable_events(
-    *,
-    child_workflow_ids: list[str],
-    wait_all: bool,
-    timeout_seconds: float | None,
-) -> tuple[list[dict[str, Any]], list[str], bool]:
-    return await _coordination_adapter().wait_for_first_observable_events(
-        child_workflow_ids=child_workflow_ids,
-        wait_all=wait_all,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-async def _wait_for_direct_child_first_observable_events_with_status(
-    *,
-    parent_workflow_id: str,
-    child_workflow_ids: list[str],
-    wait_all: bool,
-    timeout_seconds: float | None,
-) -> tuple[list[dict[str, Any]], list[str], bool]:
-    return await _coordination_adapter().wait_for_direct_child_first_observable_events(
-        parent_workflow_id=parent_workflow_id,
-        child_workflow_ids=child_workflow_ids,
-        wait_all=wait_all,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-async def _direct_child_metadata(*, parent_workflow_id: str) -> list[dict[str, str]]:
-    return await _coordination_adapter().direct_child_metadata(parent_workflow_id=parent_workflow_id)
 
 
 def make_continuation_signal(*, source_workflow_id: str, target_workflow_id: str, content: str) -> dict[str, str]:
@@ -349,42 +256,6 @@ async def _query_direct_child_status(parent_workflow_id: str, child_workflow_id:
     )
 
 
-async def _spawn_detached_children_for_handler(
-    root_workflow_id: str,
-    parent_workflow_id: str,
-    first_spawn_index: int,
-    tasks: list[str],
-    existing_child_workflow_ids: set[str],
-) -> list[dict[str, str]]:
-    return await _spawn_detached_children(
-        root_workflow_id=root_workflow_id,
-        parent_workflow_id=parent_workflow_id,
-        first_spawn_index=first_spawn_index,
-        tasks=tasks,
-        existing_child_workflow_ids=existing_child_workflow_ids,
-    )
-
-
-async def _wait_for_direct_child_first_observable_events_for_handler(
-    parent_workflow_id: str,
-    child_workflow_ids: list[str],
-    wait_all: bool,
-    timeout_seconds: float | None,
-) -> tuple[list[dict[str, Any]], list[str], bool]:
-    return await _wait_for_direct_child_first_observable_events_with_status(
-        parent_workflow_id=parent_workflow_id,
-        child_workflow_ids=child_workflow_ids,
-        wait_all=wait_all,
-        timeout_seconds=timeout_seconds,
-    )
-
-
-async def _direct_child_metadata_for_handler(parent_workflow_id: str, child_workflow_id: str | None) -> list[dict[str, str]]:
-    if child_workflow_id is not None:
-        raise ValueError("Explicit child metadata requests must use Direct Child Authority Policy")
-    return await _direct_child_metadata(parent_workflow_id=parent_workflow_id)
-
-
 async def _send_continuation_signal_for_handler(
     source_workflow_id: str, target_workflow_id: str, content: str, target_status: dict[str, Any]
 ) -> dict[str, Any]:
@@ -412,9 +283,7 @@ def _make_mas_command_handler() -> MasCommandHandler:
         current_workflow_id=_current_agent_workflow_id,
         query_direct_child_statuses=_query_direct_child_statuses,
         authority_policy=authority_policy,
-        spawn_detached_children=_spawn_detached_children_for_handler,
-        wait_for_direct_child_first_observable_events=_wait_for_direct_child_first_observable_events_for_handler,
-        direct_child_metadata=_direct_child_metadata_for_handler,
+        child_coordinator=_child_coordinator(),
         send_continuation_signal=_send_continuation_signal_for_handler,
         send_close_signal=_send_close_signal_for_handler,
     )

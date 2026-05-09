@@ -602,9 +602,126 @@ def test_dbos_coordination_adapter_owns_status_first_observable_wait_and_message
     assert sent == [("mas-0123456789abcdef-c001", {"type": "close"}, workflows.PARENT_DIRECTION_TOPIC)]
 
 
+def test_child_coordinator_owns_spawn_and_wait_domain_behavior():
+    from minisweagent.mas.command_dispatch import MasCommandHandler
+    from minisweagent.mas.commands import classify_mas_command
+    from minisweagent.mas.coordination import ChildCoordinator, ChildWaitResult, SpawnChildrenResult
+
+    class RecordingCoordinator(ChildCoordinator):
+        def __init__(self):
+            super().__init__(adapter=Mock())
+            self.calls = []
+
+        async def spawn_children(
+            self,
+            *,
+            root_workflow_id,
+            parent_workflow_id,
+            first_spawn_index,
+            tasks,
+            existing_child_workflow_ids,
+        ):
+            self.calls.append(
+                (
+                    "spawn",
+                    root_workflow_id,
+                    parent_workflow_id,
+                    first_spawn_index,
+                    tuple(tasks),
+                    existing_child_workflow_ids,
+                )
+            )
+            return SpawnChildrenResult(
+                children=[
+                    {
+                        "task": "task A",
+                        "root_workflow_id": root_workflow_id,
+                        "workflow_id": f"{parent_workflow_id}-c001",
+                        "run_directory": f".mini-mas/runs/{root_workflow_id}",
+                        "trajectory_artifact_path": (
+                            f".mini-mas/runs/{root_workflow_id}/trajectories/{parent_workflow_id}-c001.traj.json"
+                        ),
+                    },
+                    {
+                        "task": "task B",
+                        "root_workflow_id": root_workflow_id,
+                        "workflow_id": f"{parent_workflow_id}-c002",
+                        "run_directory": f".mini-mas/runs/{root_workflow_id}",
+                        "trajectory_artifact_path": (
+                            f".mini-mas/runs/{root_workflow_id}/trajectories/{parent_workflow_id}-c002.traj.json"
+                        ),
+                    },
+                ]
+            )
+
+        async def wait_for_spawned_children(self, *, parent_workflow_id, children, wait_all, timeout_seconds):
+            self.calls.append(
+                (
+                    "wait_spawned",
+                    parent_workflow_id,
+                    tuple(child["workflow_id"] for child in children),
+                    wait_all,
+                    timeout_seconds,
+                )
+            )
+            return ChildWaitResult(
+                children=list(children),
+                ready_snapshots=[
+                    {
+                        "workflow_id": children[0]["workflow_id"],
+                        "lifecycle_state": "waiting_for_parent",
+                        "latest_submission": "ready",
+                        "run_directory": children[0]["run_directory"],
+                        "trajectory_artifact_path": children[0]["trajectory_artifact_path"],
+                    }
+                ],
+                still_running_ids=[children[1]["workflow_id"]],
+                timed_out=True,
+                wait_mode="all",
+            )
+
+    coordinator = RecordingCoordinator()
+    handler = MasCommandHandler(
+        current_workflow_id=lambda: "mas-0123456789abcdef",
+        child_coordinator=coordinator,
+    )
+
+    result = asyncio.run(
+        handler.execute(
+            classify_mas_command('mini-mas spawn --wait --all --timeout 0.5 "task A" "task B"'),
+            spawn_index=1,
+            existing_child_workflow_ids=set(),
+        )
+    )
+
+    assert coordinator.calls == [
+        (
+            "spawn",
+            "mas-0123456789abcdef",
+            "mas-0123456789abcdef",
+            1,
+            ("task A", "task B"),
+            set(),
+        ),
+        (
+            "wait_spawned",
+            "mas-0123456789abcdef",
+            ("mas-0123456789abcdef-c001", "mas-0123456789abcdef-c002"),
+            True,
+            0.5,
+        ),
+    ]
+    assert result["extra"]["waited"] is True
+    assert result["extra"]["wait_mode"] == "all"
+    assert result["extra"]["timed_out"] is True
+    assert result["extra"]["still_running_child_workflow_ids"] == ["mas-0123456789abcdef-c002"]
+    assert "Waited spawn timed out" in result["output"]
+
+
 def test_explicit_parent_direction_commands_share_authority_policy_path():
     from minisweagent.mas.command_dispatch import MasCommandHandler
     from minisweagent.mas.commands import classify_mas_command
+    from minisweagent.mas.coordination import ChildCoordinator, ChildWaitResult
 
     calls = []
     child_snapshot = {
@@ -626,9 +743,23 @@ def test_explicit_parent_direction_commands_share_authority_policy_path():
             calls.append(("waiting", parent_workflow_id, target_workflow_id, command_name))
             return child_snapshot
 
-    async def wait_for_direct_child_first_observable_events(_parent_workflow_id, child_workflow_ids, _wait_all, _timeout):
-        assert child_workflow_ids == ["mas-0123456789abcdef-c001"]
-        return [], ["mas-0123456789abcdef-c001"], True
+    class RecordingCoordinator(ChildCoordinator):
+        def __init__(self):
+            super().__init__(adapter=Mock())
+
+        async def wait_for_children(self, *, parent_workflow_id, children, wait_all, timeout_seconds, wait_mode):
+            assert parent_workflow_id == "mas-0123456789abcdef"
+            assert [child["workflow_id"] for child in children] == ["mas-0123456789abcdef-c001"]
+            assert wait_all is True
+            assert timeout_seconds is None
+            assert wait_mode == "one"
+            return ChildWaitResult(
+                children=list(children),
+                ready_snapshots=[],
+                still_running_ids=["mas-0123456789abcdef-c001"],
+                timed_out=True,
+                wait_mode=wait_mode,
+            )
 
     async def send_continuation_signal(_source_workflow_id, target_workflow_id, content, snapshot):
         return {
@@ -649,7 +780,7 @@ def test_explicit_parent_direction_commands_share_authority_policy_path():
     handler = MasCommandHandler(
         current_workflow_id=lambda: "mas-0123456789abcdef",
         authority_policy=RecordingPolicy(),
-        wait_for_direct_child_first_observable_events=wait_for_direct_child_first_observable_events,
+        child_coordinator=RecordingCoordinator(),
         send_continuation_signal=send_continuation_signal,
         send_close_signal=send_close_signal,
     )
