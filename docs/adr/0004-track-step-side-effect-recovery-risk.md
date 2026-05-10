@@ -12,4 +12,4 @@ An Operation Ledger is a candidate mitigation for model and bash operations. It 
 
 **Spawn Recovery Remains Undecided**
 
-Parent-local Spawn Index metadata should be stable enough for display and audit, but replay after a crash could duplicate child creation or assign later indexes unless spawn operations become ledgered. The current design records Spawn Index as metadata and intentionally defers exactly-once spawn recovery semantics to the broader recovery design.
+Replay after a crash could duplicate child creation unless spawn operations become ledgered. The current design does not assign durable sibling-order metadata and intentionally defers exactly-once spawn recovery semantics to the broader recovery design.

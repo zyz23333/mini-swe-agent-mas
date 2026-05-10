@@ -13,8 +13,8 @@ MAS Agent IDs use the `mas-<random-hex>` shape as opaque durable identifiers and
 - Make artifacts directly Agent-scoped and keep parent-child structure in MAS governance metadata instead of Agent ID strings or artifact paths.
 - Route all External MAS CLI commands through an Interactive Root Agent, with one-shot commands such as `mini-mas spawn` submitting their initial command automatically.
 - Use parentless Interactive Root Agent workflows as the discovery source for external status and resume.
-- Preserve parent-local sibling order as Spawn Index metadata instead of encoding it in Agent IDs.
+- Preserve multi-spawn display order in the command result only instead of encoding it in Agent IDs or durable Agent metadata.
 
 **Consequences**
 
-Changing Agent ID shape no longer changes artifact grouping semantics. Child Agents do not need root identity or ancestor paths to write artifacts, while Direct Child Authority remains based on Parent Agent relationships rather than on ID prefixes. One-shot CLI commands still leave an Interactive Root Agent available as the parent authority context for later status, wait, continue, or close commands. Agent metadata stays limited to identity, optional Spawn Index, and artifact description instead of carrying query flags.
+Changing Agent ID shape no longer changes artifact grouping semantics. Child Agents do not need root identity or ancestor paths to write artifacts, while Direct Child Authority remains based on Parent Agent relationships rather than on ID prefixes. One-shot CLI commands still leave an Interactive Root Agent available as the parent authority context for later status, wait, continue, or close commands. Agent metadata stays limited to identity and artifact description instead of carrying query flags or durable sibling-order fields.

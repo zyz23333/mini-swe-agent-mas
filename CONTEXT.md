@@ -48,10 +48,6 @@ _Avoid_: Workflow Tree ID, path, tree position
 Self-describing identity and artifact information for one **Agent**.
 _Avoid_: Root index, role flags, mode flags
 
-**Spawn Index**:
-A Parent-Agent-local ordinal describing the order in which a **Child Agent** was spawned.
-_Avoid_: Agent ID segment, authority scope, global sequence
-
 **MAS Command**:
 A bash command beginning with `mini-mas` that an agent emits to request a MAS-governed **Agent Interaction**.
 _Avoid_: Tool call, DBOS command
@@ -166,8 +162,8 @@ _Avoid_: Special case, bypass
 - A **Root Agent** is identified by having no **Parent Agent**, not by an `is_root` flag, a global root, or an index entry.
 - **Agent Artifacts** are scoped to individual **Agents**, not to **Root Agents** or runs.
 - **Agent IDs** use the `mas-<random-hex>` shape and do not encode root identity, parent identity, sibling order, or tree position.
-- **Agent Metadata** records stable Agent identity and artifact fields such as Agent ID, optional Parent Agent ID, optional Spawn Index, Agent Artifact Directory, and Trajectory Artifact path.
-- A **Spawn Index** may help display or audit sibling creation order, but it is not part of the **Agent ID** and does not grant **Authority**.
+- **Agent Metadata** records stable Agent identity and artifact fields such as Agent ID, optional Parent Agent ID, Agent Artifact Directory, and Trajectory Artifact path.
+- Multi-spawn command result ordering may be used for immediate display, but sibling order is not durable Agent metadata.
 - A **Standalone MAS Command** issued inside an **Agent** is handled through **MAS Command Interception**.
 - An **External MAS CLI** command is used outside an **Agent** and enters MAS governance through a **Root Agent**.
 - Every **External MAS CLI** entrypoint creates or addresses an **Interactive Root Agent**; there is no separate non-interactive Root Agent mode for CLI-submitted work.
@@ -338,8 +334,8 @@ _Avoid_: Special case, bypass
 > **Dev:** "Does one-shot spawn print the Root Agent artifact path?"
 > **Domain expert:** "No. It prints the spawned Child Agent artifact path and the Root Agent ID needed for resume."
 
-> **Dev:** "How do we tell which sibling was spawned first if Agent IDs are random?"
-> **Domain expert:** "Use Spawn Index metadata for display or audit; do not encode sibling order in the Agent ID."
+> **Dev:** "How do we tell which sibling was returned first if Agent IDs are random?"
+> **Domain expert:** "Use the current multi-spawn command result order for display; sibling order is not durable Agent metadata."
 
 > **Dev:** "Does the Root Agent ID determine where child artifacts are stored?"
 > **Domain expert:** "No. Root identifies the CLI entry Agent; each Agent owns its own artifact directory."

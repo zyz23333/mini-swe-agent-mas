@@ -16,7 +16,7 @@ Redesign the External MAS CLI around Interactive Root Agents.
 
 All CLI-submitted governance commands enter MAS Governance through an Interactive Root Agent. The CLI process itself is not an Agent, is not a Parent Agent, and does not directly execute Root Agent actions. The CLI sends Root Command Signals to the Interactive Root Agent, and the Root Agent executes the same bash-shaped action flow used by existing human interactive behavior: standalone `mini-mas ...` commands are intercepted as MAS Commands, while ordinary bash commands execute as bash actions. The Root Agent publishes a command-id-scoped Root Command Result event for the CLI to wait on.
 
-Agent IDs remain `mas-<random-hex>` but become opaque durable Agent IDs. They do not encode root identity, parent identity, sibling order, or tree position. Root identity is structural: a Root Agent has no Parent Agent. External root discovery uses parentless Interactive Root Agent workflows, not an `is_root` flag, interaction-mode flag, separate root index, or single global root. Child sibling order, when useful, is represented as parent-local Spawn Index metadata, not as part of the Agent ID.
+Agent IDs remain `mas-<random-hex>` but become opaque durable Agent IDs. They do not encode root identity, parent identity, sibling order, or tree position. Root identity is structural: a Root Agent has no Parent Agent. External root discovery uses parentless Interactive Root Agent workflows, not an `is_root` flag, interaction-mode flag, separate root index, or single global root. Multi-spawn command result ordering may be used for immediate display, but sibling order is not durable Agent metadata.
 
 Artifacts are scoped per Agent. Each Agent owns an Agent Artifact Directory and a Trajectory Artifact. Artifacts are not grouped under Root Agents, runs, or encoded Agent Tree paths. The Root Agent's Trajectory Artifact is the durable command history for Root terminal input, including ordinary bash actions and MAS command observations. The Interactive Root terminal does not create or reuse a separate prompt-history file.
 
@@ -33,7 +33,7 @@ The first version supports detach and resume, not Root Agent closure or cleanup.
 7. As a CLI user, I do not want one-shot spawn to print Root Agent artifact paths by default, so that the output stays focused on the spawned Child Agent.
 8. As a CLI user, I want `mini-mas spawn "task A" "task B"` to create one Interactive Root Agent and multiple direct Child Agents, so that related one-shot work shares a parent authority context.
 9. As a CLI user, I want multi-spawn output to include one Root Agent ID and one entry per Child Agent, so that the relationship is explicit.
-10. As a CLI user, I want each spawned Child Agent entry to include parent Agent ID, Spawn Index, Agent Artifact Directory, and Trajectory Artifact path, so that I can understand and inspect each child.
+10. As a CLI user, I want each spawned Child Agent entry to include parent Agent ID, Agent Artifact Directory, and Trajectory Artifact path, so that I can understand and inspect each child.
 11. As a CLI user, I want one-shot `mini-mas spawn --wait` to use the same Waited Spawn behavior as workflow-layer `mini-mas spawn --wait`, so that external and internal semantics match.
 12. As a CLI user, I want one-shot `mini-mas spawn --wait --all` to wait for all started children to become observable, so that I can synchronize related work.
 13. As a CLI user, I want one-shot `mini-mas spawn --wait --timeout <seconds>` to bound only the wait phase, so that children keep running after timeout.
@@ -66,8 +66,8 @@ The first version supports detach and resume, not Root Agent closure or cleanup.
 40. As a Parent Agent, I want Direct Child Authority to remain unchanged, so that a Root Agent controls only its direct children.
 41. As a Child Agent, I want my Agent ID to be opaque, so that identity does not reveal Root Agent, parent Agent, sibling order, or tree position.
 42. As a Child Agent, I want my artifact path to be scoped to my Agent ID, so that artifact layout does not depend on encoded tree position.
-43. As a Parent Agent, I want child Spawn Index metadata, so that sibling creation order can be displayed or audited.
-44. As a Parent Agent, I do not want Spawn Index to be part of Agent ID, so that order does not become identity or authority.
+43. As a Parent Agent, I want multi-spawn output order to be preserved in the current command result, so that immediate display can match the submitted task order.
+44. As a Parent Agent, I do not want sibling order to become durable Agent metadata, so that order does not become identity or authority.
 45. As a developer, I want Root Agent discovery to use parentless Interactive Root Agent workflows, so that no global root Agent or root index is needed.
 46. As a developer, I want Agent Metadata to avoid `is_root` and interaction-mode flags, so that query flags do not pollute per-Agent metadata.
 47. As a developer, I want Interactive Root Agent workflow type/name to distinguish root terminal workflows, so that external status can filter root workflows without extra metadata flags.
@@ -79,7 +79,7 @@ The first version supports detach and resume, not Root Agent closure or cleanup.
 53. As a developer, I want naked external `wait`, `continue`, and `close` to remain out of the first version, so that governance commands do not bypass Root Agent context.
 54. As a developer, I want external `status` to be discovery rather than Agent Interaction, so that it can safely run outside Agent context.
 55. As a developer, I want Root Agent cleanup to be deferred, so that close semantics do not expand the first version.
-56. As a developer, I want Spawn Index recovery semantics deferred to recovery design, so that the first version does not imply exactly-once spawn behavior.
+56. As a developer, I want spawn recovery semantics deferred to recovery design, so that the first version does not imply exactly-once spawn behavior.
 57. As a maintainer, I want the PRD to align with the domain glossary and ADRs, so that future implementation issues can be split without re-opening terminology.
 
 ## Implementation Decisions
@@ -113,9 +113,9 @@ The first version supports detach and resume, not Root Agent closure or cleanup.
 - Root Agent identity is structural: a Root Agent has no Parent Agent.
 - Root discovery uses parentless Interactive Root Agent workflow records, not a root index, global root, `is_root` flag, or interaction-mode flag.
 - The implementation may distinguish Interactive Root Agents from other parentless workflows by workflow type/name.
-- Agent Metadata records stable identity and artifact description only: Agent ID, optional Parent Agent ID, optional Spawn Index, Agent Artifact Directory, and Trajectory Artifact path.
-- Spawn Index is parent-local metadata for display and audit.
-- Spawn Index is not identity, authority, tree position, or part of the Agent ID.
+- Agent Metadata records stable identity and artifact description only: Agent ID, optional Parent Agent ID, Agent Artifact Directory, and Trajectory Artifact path.
+- Multi-spawn command result ordering may be used for immediate display.
+- Sibling order is not durable Agent metadata and is not identity, authority, tree position, or part of the Agent ID.
 - Agent Artifacts are scoped per Agent.
 - Trajectory Artifacts live under Agent Artifact Directories keyed by Agent ID.
 - Root Agent artifacts and Child Agent artifacts use the same per-Agent artifact model.
@@ -156,9 +156,9 @@ The first version supports detach and resume, not Root Agent closure or cleanup.
 - Workflow tests should cover standalone `mini-mas ...` commands being intercepted as MAS Commands inside an Interactive Root Agent.
 - Workflow tests should cover composed `mini-mas ... && ...` commands remaining invalid for MAS interception.
 - Artifact tests should cover per-Agent artifact directories for Root Agents and Child Agents.
-- Artifact tests should cover Agent Metadata shape with Agent ID, optional Parent Agent ID, optional Spawn Index, Agent Artifact Directory, and Trajectory Artifact path.
+- Artifact tests should cover Agent Metadata shape with Agent ID, optional Parent Agent ID, Agent Artifact Directory, and Trajectory Artifact path.
 - Identity tests should cover opaque `mas-<random-hex>` Agent IDs for Root Agents and Child Agents.
-- Identity tests should prove Child Agent IDs do not encode Parent Agent ID or Spawn Index.
+- Identity tests should prove Child Agent IDs do not encode Parent Agent ID or sibling order.
 - Authority tests should continue to prove direct-child-only status, wait, continue, and close.
 - Authority tests should prove Root Agent status inside the terminal lists direct children only and does not grant grandchild control.
 - Discovery tests should cover parentless Interactive Root Agent workflow filtering.
@@ -197,8 +197,8 @@ The first version supports detach and resume, not Root Agent closure or cleanup.
 
 The design deliberately separates discovery from governance. External `mini-mas status` can discover parentless Interactive Root Agents outside Agent context, but control commands still enter through an Interactive Root Agent and obey Direct Child Authority.
 
-The design also separates identity from structure. Agent ID is opaque; parent-child structure comes from workflow parent metadata; sibling display order comes from Spawn Index metadata; artifact ownership comes from per-Agent artifact paths.
+The design also separates identity from structure. Agent ID is opaque; parent-child structure comes from workflow parent metadata; sibling display order is limited to the current multi-spawn command result; artifact ownership comes from per-Agent artifact paths.
 
 The first version intentionally avoids a global root because it would be an implementation convenience rather than a meaningful MAS Governance concept. If future requirements introduce a real system-level coordinator with scheduling, policy, leases, or cleanup responsibilities, that should be designed as its own concept rather than smuggled into the Agent Tree.
 
-Spawn recovery remains a known unresolved area. Parent-local Spawn Index metadata is useful for display and audit, but replay after a crash could duplicate child creation or assign later indexes unless spawn operations become ledgered. This is tracked in the recovery ADR and should be handled with the broader Operation Ledger design.
+Spawn recovery remains a known unresolved area. Replay after a crash could duplicate child creation unless spawn operations become ledgered. This is tracked in the recovery ADR and should be handled with the broader Operation Ledger design.
