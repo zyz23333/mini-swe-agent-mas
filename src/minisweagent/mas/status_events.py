@@ -1,4 +1,4 @@
-"""Lightweight MAS Agent Workflow status snapshots."""
+"""Lightweight MAS Agent status snapshots."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from inspect import isawaitable
 from typing import Any, Literal
 
-from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id, validate_workflow_id
+from minisweagent.mas.artifacts import make_artifact_metadata, validate_agent_id, validate_root_agent_id
 
 STATUS_EVENT_KEY = "mini_mas_status"
 FIRST_OBSERVABLE_EVENT_KEY = "mini_mas_first_observable"
@@ -41,7 +41,6 @@ class AgentStatusSnapshot:
         data = {
             "root_workflow_id": self.root_workflow_id,
             "workflow_id": self.workflow_id,
-            "workflow_tree_id": self.workflow_id,
             "lifecycle_state": self.lifecycle_state,
             "run_directory": self.run_directory,
             "trajectory_artifact_path": self.trajectory_artifact_path,
@@ -77,9 +76,9 @@ def make_status_snapshot(
 
 
 def root_id_for_workflow(workflow_id: str) -> str:
-    """Return the Root Agent Workflow ID encoded in a Workflow Tree ID."""
-    workflow_id = validate_workflow_id(workflow_id)
-    return validate_root_workflow_id(workflow_id[:20])
+    """Return the Root Agent ID encoded in an Agent ID."""
+    workflow_id = validate_agent_id(workflow_id)
+    return validate_root_agent_id(workflow_id[:20])
 
 
 def _status_from_events(events: dict[str, Any]) -> dict[str, Any] | None:
@@ -87,9 +86,9 @@ def _status_from_events(events: dict[str, Any]) -> dict[str, Any] | None:
     return status if isinstance(status, dict) else None
 
 
-async def list_direct_child_workflow_ids_async(dbos_api: Any, parent_workflow_id: str) -> list[str]:
+async def list_direct_child_agent_ids_async(dbos_api: Any, parent_workflow_id: str) -> list[str]:
     """Return workflow IDs whose DBOS metadata names this workflow as their direct parent."""
-    parent_workflow_id = validate_workflow_id(parent_workflow_id)
+    parent_workflow_id = validate_agent_id(parent_workflow_id)
     workflow_statuses = await _maybe_await(
         dbos_api.list_workflows_async(
             parent_workflow_id=parent_workflow_id,
@@ -101,14 +100,14 @@ async def list_direct_child_workflow_ids_async(dbos_api: Any, parent_workflow_id
     for workflow_status in workflow_statuses:
         workflow_id = getattr(workflow_status, "workflow_id", "")
         if getattr(workflow_status, "parent_workflow_id", None) == parent_workflow_id:
-            workflow_ids.append(validate_workflow_id(workflow_id))
+            workflow_ids.append(validate_agent_id(workflow_id))
     return sorted(workflow_ids)
 
 
 async def query_direct_child_statuses_async(dbos_api: Any, parent_workflow_id: str) -> list[dict[str, Any]]:
     """Query status snapshots for direct children using DBOS parent workflow metadata."""
     snapshots = []
-    for workflow_id in await list_direct_child_workflow_ids_async(dbos_api, parent_workflow_id):
+    for workflow_id in await list_direct_child_agent_ids_async(dbos_api, parent_workflow_id):
         snapshot = _status_from_events(await _maybe_await(dbos_api.get_all_events_async(workflow_id)))
         if snapshot is not None:
             snapshots.append(snapshot)
@@ -119,8 +118,8 @@ async def query_direct_child_status_async(
     dbos_api: Any, *, parent_workflow_id: str, child_workflow_id: str
 ) -> dict[str, Any] | None:
     """Query one status snapshot after DBOS metadata proves it is a direct child."""
-    parent_workflow_id = validate_workflow_id(parent_workflow_id)
-    child_workflow_id = validate_workflow_id(child_workflow_id)
+    parent_workflow_id = validate_agent_id(parent_workflow_id)
+    child_workflow_id = validate_agent_id(child_workflow_id)
     workflow_statuses = await _maybe_await(
         dbos_api.list_workflows_async(
             workflow_ids=[child_workflow_id],
@@ -136,7 +135,7 @@ async def query_direct_child_status_async(
 
 def _format_snapshot(snapshot: dict[str, Any]) -> list[str]:
     lines = [
-        f"workflow_id: {snapshot['workflow_id']}",
+        f"agent_id: {snapshot['workflow_id']}",
         f"lifecycle_state: {snapshot['lifecycle_state']}",
     ]
     if snapshot.get("latest_submission"):
@@ -154,9 +153,9 @@ def _format_snapshot(snapshot: dict[str, Any]) -> list[str]:
 
 def format_direct_child_statuses(snapshots: list[dict[str, Any]], *, parent_workflow_id: str) -> str:
     """Format direct-child status snapshots as a bash observation."""
-    lines = [f"Direct Child Agent Workflows for: {parent_workflow_id}"]
+    lines = [f"Direct Child Agents for: {parent_workflow_id}"]
     if not snapshots:
-        lines.append("No direct Child Agent Workflow status snapshots found.")
+        lines.append("No direct Child Agent status snapshots found.")
         return "\n".join(lines) + "\n"
     for index, snapshot in enumerate(snapshots):
         if index:

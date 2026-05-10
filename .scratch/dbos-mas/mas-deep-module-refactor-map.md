@@ -2,12 +2,12 @@
 
 ## Purpose
 
-This note records the intended behavior-preserving deep module extraction for the MAS Agent Workflow implementation. It is an implementation refactor map and AFK-agent guide, not a new MAS semantics proposal.
+This note records the intended behavior-preserving deep module extraction for the MAS Agent implementation. It is an implementation refactor map and AFK-agent guide, not a new MAS semantics proposal.
 
 Later refactor slices must preserve the current MAS MVP behavior:
 
-- **MAS Command Interception** stays at the Agent Workflow layer.
-- **Direct Child Authority Policy** remains the fixed MVP Coordination Authority Model.
+- **MAS Command Interception** stays at the Agent layer.
+- **Direct Child Authority Policy** remains the fixed MVP Authority Model.
 - **Child Status Events** and **First Observable Events** remain lightweight DBOS event shapes.
 - **Continuation Signals** and **Close Signals** remain parent-to-child DBOS messages.
 - **Remote Interactive Agent** workflows keep waiting for parent direction after submission.
@@ -27,11 +27,11 @@ Responsibilities:
 - Keep `root_agent_workflow` and `child_agent_workflow` as async module-level `@DBOS.workflow()` functions.
 - Keep model query, ordinary bash execution, and trajectory persistence as module-level `@DBOS.step()` wrappers.
 - Construct `MasAgent` inside workflow entrypoints and await its `run` method.
-- Keep the top-level Agent Workflow loop readable as an Agent loop first.
+- Keep the top-level Agent loop readable as an Agent loop first.
 
 Non-responsibilities:
 
-- Do not inline `spawn`, `wait`, `status`, `continue`, or `close` coordination logic.
+- Do not inline `spawn`, `wait`, `status`, `continue`, or `close` Agent Interaction logic.
 - Do not inline child event polling, signal payload construction, or direct-child authority validation.
 - Do not make DBOS recovery depend on reconstructing a dynamic `MasAgent` instance or a `DBOSConfiguredInstance.config_name`.
 
@@ -61,7 +61,7 @@ Responsibilities:
 
 - Accept an already-classified `MasCommandClassification` whose kind is `STANDALONE`.
 - Parse MAS subcommand arguments such as `spawn`, `wait`, `status`, `continue`, and `close`.
-- Convert structured coordination results into the model-facing bash observation dictionary shape: `output`, `returncode`, `exception_info`, and `extra`.
+- Convert structured Agent Interaction results into the model-facing bash observation dictionary shape: `output`, `returncode`, `exception_info`, and `extra`.
 
 Non-responsibilities:
 
@@ -76,13 +76,13 @@ The intended action execution route is:
 3. Reject invalid MAS shell compositions before bash execution.
 4. Send only ordinary bash actions to `execute_bash_step`.
 
-### `coordination.py`
+### `agent_interactions.py`
 
-Owns MAS workflow-control orchestration for `spawn`, `wait`, `status`, `continue`, and `close`.
+Owns MAS workflow-control orchestration for `spawn`, `wait`, `status`, `continue`, and `close` Agent Interactions.
 
 Responsibilities:
 
-- Start Child Agent Workflows through the child workflow queue.
+- Start Child Agents through the child workflow queue.
 - Wait for direct children through First Observable Events.
 - Query direct child status data.
 - Coordinate Continuation Signal and Close Signal delivery.
@@ -96,7 +96,7 @@ Non-responsibilities:
 
 ### `authority.py`
 
-Owns the narrow Coordination Authority Policy contract and its default Direct Child Authority Policy implementation.
+Owns the narrow Authority Policy contract and its default Direct Child Authority Policy implementation.
 
 Responsibilities:
 
@@ -104,21 +104,21 @@ Responsibilities:
 - Implement only the fixed MVP Direct Child Authority Policy as the default policy.
 - Validate direct-child scope from DBOS workflow metadata where `parent_workflow_id == DBOS.workflow_id`.
 - Return the authorized child status snapshot or a structured command error.
-- Reject the current Agent Workflow, the Root Agent Workflow, non-direct children, siblings, ancestors, descendants beyond one level, and workflows outside the direct child boundary.
+- Reject the current Agent, the Root Agent, non-direct children, siblings, ancestors, descendants beyond one level, and workflows outside the direct child boundary.
 - Require `waiting_for_parent` for `continue` and `close`.
-- Treat `waiting_for_child` as a local coordination state that does not authorize parent-direction commands.
+- Treat `waiting_for_child` as a local Agent Interaction state that does not authorize parent-direction commands.
 
 Non-responsibilities:
 
 - Do not introduce Authority Grants.
 - Do not introduce subtree-wide authority.
-- Do not introduce tree-wide Root Agent Workflow authority.
-- Do not accept caller-supplied current workflow IDs.
-- Do not use Workflow Tree ID prefixes for authorization.
+- Do not introduce tree-wide Root Agent authority.
+- Do not accept caller-supplied current Agent IDs.
+- Do not use Agent ID prefixes for authorization.
 - Do not introduce external operator authority.
-- Do not parse MAS command syntax, allocate child workflow IDs, enqueue child workflows, wait on events, send signals, or format command results.
+- Do not parse MAS command syntax, allocate child Agent IDs, enqueue DBOS child workflows, wait on events, send signals, or format command results.
 
-Future non-default Coordination Authority Models are out of scope for this refactor map.
+Future non-default Authority Models are out of scope for this refactor map.
 
 ### `status_events.py`
 
@@ -148,7 +148,7 @@ Responsibilities:
 - Define the parent-direction message topic.
 - Build Continuation Signal payloads.
 - Build Close Signal payloads.
-- Recognize parent-direction messages inside Child Agent Workflows.
+- Recognize parent-direction messages inside Child Agents.
 - Define continuation user-message metadata shape.
 
 Non-responsibilities:
@@ -156,36 +156,36 @@ Non-responsibilities:
 - Do not publish or query Child Status Events.
 - Do not decide whether a parent is authorized to signal a target child.
 
-## DBOS Coordination Adapter
+## DBOS Agent Interaction Adapter
 
-Deep MAS modules should not freely reach into the concrete `_dbos.DBOS` object. Introduce a thin `DBOSCoordinationAdapter` for MAS workflow-control primitives.
+Deep MAS modules should not freely reach into the concrete `_dbos.DBOS` object. Introduce a thin `DBOSAgentInteractionAdapter` for MAS workflow-control primitives.
 
-The adapter is not a generic port layer and does not imply support for non-DBOS backends. Its purpose is to stop DBOS coordination calls from spreading across command, coordination, event, signal, and authority modules.
+The adapter is not a generic port layer and does not imply support for non-DBOS backends. Its purpose is to stop DBOS Agent Interaction calls from spreading across command, Agent Interaction, event, signal, and authority modules.
 
 The adapter should expose only MAS workflow-control capabilities:
 
-- Current Agent Workflow identity from DBOS workflow context.
+- Current Agent identity from DBOS workflow context.
 - Child workflow enqueueing through the child workflow queue.
 - Direct child workflow metadata lookup.
 - Child Status Event publication and lookup.
 - First Observable Event publication and waiting.
 - Waiting over several child First Observable Events.
 - Continuation Signal and Close Signal delivery through DBOS messages.
-- Receiving parent direction messages inside a Child Agent Workflow.
+- Receiving parent direction messages inside a Child Agent.
 
-Adapter methods may be called only from the async Agent Workflow path. DBOS step wrappers must not receive this adapter and must not call it.
+Adapter methods may be called only from the async Agent path. DBOS step wrappers must not receive this adapter and must not call it.
 
-Model query, ordinary bash execution, and trajectory persistence remain separate module-level DBOS steps rather than adapter methods so MAS coordination remains visible at the Agent Workflow layer.
+Model query, ordinary bash execution, and trajectory persistence remain separate module-level DBOS steps rather than adapter methods so MAS Governance remains visible at the Agent layer.
 
-DBOS does technically support some communication and event operations from steps, such as sending messages or setting events. MAS should still default to keeping coordination adapter calls out of step wrappers because MAS command handling, direct-child authority validation, child event synchronization, and parent-direction signaling are part of Agent Workflow orchestration. If a future slice wants a specific DBOS step to call a communication primitive directly, that slice must document why the call belongs inside that step and what the recovery semantics are.
+DBOS does technically support some communication and event operations from steps, such as sending messages or setting events. MAS should still default to keeping Agent Interaction adapter calls out of step wrappers because MAS command handling, direct-child authority validation, child event synchronization, and parent-direction signaling are part of Agent orchestration. If a future slice wants a specific DBOS step to call a communication primitive directly, that slice must document why the call belongs inside that step and what the recovery semantics are.
 
 The adapter must not change authority semantics.
 
 ## Authority Semantics
 
-Workflow-layer `mini-mas status`, `mini-mas wait`, `mini-mas continue`, and `mini-mas close` derive the current Parent Agent Workflow from `DBOS.workflow_id`.
+Workflow-layer `mini-mas status`, `mini-mas wait`, `mini-mas continue`, and `mini-mas close` derive the current Parent Agent from `DBOS.workflow_id`.
 
-Explicit workflow IDs in `status <workflow-id>`, `wait <workflow-id>`, `continue <workflow-id>`, and `close <workflow-id>` are target identifiers only. They are not scope overrides.
+Explicit Agent IDs in `status <agent-id>`, `wait <agent-id>`, `continue <agent-id>`, and `close <agent-id>` are target identifiers only. They are not scope overrides.
 
 Direct-child scope is resolved from DBOS workflow metadata where:
 
@@ -193,9 +193,9 @@ Direct-child scope is resolved from DBOS workflow metadata where:
 parent_workflow_id == DBOS.workflow_id
 ```
 
-`root_workflow_id`, Workflow Tree ID prefixes, caller-supplied current workflow IDs, DBOS API object parameters, and external operator identity are not authority inputs.
+`root_workflow_id`, Agent ID prefixes, caller-supplied current Agent IDs, DBOS API object parameters, and external operator identity are not authority inputs.
 
-The Root Agent Workflow has no special tree-wide Coordination Authority under the MVP Direct Child Authority Policy. The child agent of my child agent is not my child agent.
+The Root Agent has no special tree-wide Authority under the MVP Direct Child Authority Policy. The child agent of my child agent is not my child agent.
 
 ## Out of Scope
 
@@ -203,7 +203,7 @@ This refactor map does not include:
 
 - Authority Grants.
 - Subtree-wide authority.
-- Tree-wide Root Agent Workflow authority.
+- Tree-wide Root Agent authority.
 - External operator authority for naked `status`, `wait`, `continue`, or `close` paths.
 - New command fallbacks.
 - New DBOS behavior.
@@ -217,12 +217,12 @@ This refactor map does not include:
 
 Future slices using this map should preserve these properties:
 
-- Standalone MAS Commands are intercepted at the Agent Workflow layer.
+- Standalone MAS Commands are intercepted at the Agent layer.
 - Non-standalone `mini-mas` shell compositions return a clear model-visible correction and are not executed as ordinary bash.
 - Ordinary bash actions still execute through the checkpointed bash step.
-- DBOS workflow-control operations remain in async Agent Workflow code.
+- DBOS workflow-control operations remain in async Agent code.
 - Model calls, bash execution, and trajectory persistence remain DBOS steps.
-- Parent-direction commands only affect direct Child Agent Workflows whose latest status is `waiting_for_parent`.
+- Parent-direction commands only affect direct Child Agents whose latest status is `waiting_for_parent`.
 - `waiting_for_child` does not authorize `continue` or `close`.
-- Grandchildren, siblings, ancestors, workflows outside the tree, the Root Agent Workflow, and the current Agent Workflow are rejected consistently where the current Direct Child Authority Policy requires rejection.
+- Grandchildren, siblings, ancestors, workflows outside the tree, the Root Agent, and the current Agent are rejected consistently where the current Direct Child Authority Policy requires rejection.
 - Existing direct-child authority tests pass without weakening assertions.

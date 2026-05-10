@@ -1,4 +1,4 @@
-"""Parent-direction signals for MAS Child Agent Workflows."""
+"""Parent-direction signals for MAS Child Agents."""
 
 from __future__ import annotations
 

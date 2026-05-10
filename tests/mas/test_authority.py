@@ -101,9 +101,9 @@ def test_direct_child_authority_policy_success_and_rejection_paths(monkeypatch):
     assert authorized["workflow_id"] == "mas-0123456789abcdef-c001"
     assert authorized["trajectory_artifact_path"].endswith("mas-0123456789abcdef-c001.traj.json")
     assert isinstance(not_direct, AuthorityCommandError)
-    assert not_direct.exception_info == "workflow_not_direct_child"
+    assert not_direct.exception_info == "agent_not_direct_child"
     assert isinstance(not_waiting, AuthorityCommandError)
-    assert not_waiting.exception_info == "workflow_not_waiting_for_parent"
+    assert not_waiting.exception_info == "agent_not_waiting_for_parent"
 
 def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
@@ -150,6 +150,6 @@ def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(
         text = _observation_text(observations[0])
         assert "<returncode>1</returncode>" in text
         assert (
-            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef: "
+            "Agent is not a direct Child Agent of mas-0123456789abcdef: "
             "mas-0123456789abcdef-c001-c001"
         ) in text

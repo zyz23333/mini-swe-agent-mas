@@ -33,7 +33,7 @@ def test_workflow_action_execution_dispatches_standalone_mas_commands():
 
     env.execute.assert_not_called()
     assert len(observations) == 1
-    assert "mini-mas wait requires Agent Workflow context" in _observation_text(observations[0])
+    assert "mini-mas wait requires Agent context" in _observation_text(observations[0])
 
 def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
     from minisweagent.mas.mas_agent import execute_agent_workflow_actions

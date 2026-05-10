@@ -8,9 +8,9 @@ from enum import Enum
 from typing import Any
 
 from minisweagent.mas import agent_interactions
-from minisweagent.mas.artifacts import validate_workflow_id
-from minisweagent.mas.authority import AuthorityCommandError, AuthorityPolicy, DirectChildAuthorityPolicy
 from minisweagent.mas.agent_interactions import ChildWaitResult
+from minisweagent.mas.artifacts import validate_agent_id
+from minisweagent.mas.authority import AuthorityCommandError, AuthorityPolicy, DirectChildAuthorityPolicy
 from minisweagent.mas.signals import PARENT_DIRECTION_TOPIC, make_close_signal, make_continuation_signal
 
 from .status_events import format_direct_child_statuses, format_specific_status, root_id_for_workflow
@@ -78,7 +78,7 @@ def _contains_shell_composition(tokens: list[str]) -> bool:
 
 
 def classify_mas_command(command: str) -> MasCommandClassification:
-    """Classify a bash-shaped action command before Agent Workflow execution."""
+    """Classify a bash-shaped action command before Agent execution."""
     stripped_command = command.strip()
     if MAS_COMMAND_NAME not in stripped_command:
         return MasCommandClassification(
@@ -163,12 +163,12 @@ class MasCommandResultFormatter:
             extra={"mas_command": mas_command},
         )
 
-    def missing_agent_workflow_context(self, command_name: str) -> dict[str, Any]:
+    def missing_agent_context(self, command_name: str) -> dict[str, Any]:
         return self.error(
-            output=f"mini-mas {command_name} requires Agent Workflow context.\n",
+            output=f"mini-mas {command_name} requires Agent context.\n",
             returncode=2,
-            exception_info="missing_agent_workflow_context",
-            mas_command_error="missing_agent_workflow_context",
+            exception_info="missing_agent_context",
+            mas_command_error="missing_agent_context",
         )
 
     def invalid_arguments(
@@ -211,7 +211,7 @@ class MasCommandResultFormatter:
             mas_command=mas_command,
             children=children,
             output=_format_detached_spawn_output(children),
-            extra={"waited": False, "ready_children": [], "still_running_child_workflow_ids": []},
+            extra={"waited": False, "ready_children": [], "still_running_child_agent_ids": []},
         )
 
     def spawn_waited(
@@ -237,7 +237,7 @@ class MasCommandResultFormatter:
                 "wait_mode": wait_result.wait_mode,
                 "timed_out": wait_result.timed_out,
                 "ready_children": wait_result.ready_snapshots,
-                "still_running_child_workflow_ids": wait_result.still_running_ids,
+                "still_running_child_agent_ids": wait_result.still_running_ids,
             },
         )
 
@@ -271,7 +271,7 @@ class MasCommandResultFormatter:
                 "wait_mode": wait_result.wait_mode,
                 "timed_out": wait_result.timed_out,
                 "ready_children": wait_result.ready_snapshots,
-                "still_running_child_workflow_ids": wait_result.still_running_ids,
+                "still_running_child_agent_ids": wait_result.still_running_ids,
                 "children": children,
             },
         )
@@ -293,7 +293,7 @@ class MasCommandResultFormatter:
             ),
             extra={
                 "mas_command": mas_command,
-                "continued_workflow_id": target_workflow_id,
+                "continued_agent_id": target_workflow_id,
                 "continuation_signal": signal,
                 "target_status": target_status,
             },
@@ -311,7 +311,7 @@ class MasCommandResultFormatter:
             output=_format_close_output(target_workflow_id=target_workflow_id, snapshot=target_status),
             extra={
                 "mas_command": mas_command,
-                "closed_workflow_id": target_workflow_id,
+                "closed_agent_id": target_workflow_id,
                 "close_signal": signal,
                 "target_status": target_status,
             },
@@ -352,15 +352,15 @@ class MasCommandResultFormatter:
         output: str,
         extra: dict[str, Any],
     ) -> dict[str, Any]:
-        child_workflow_ids = [child["workflow_id"] for child in children]
+        child_agent_ids = [child["workflow_id"] for child in children]
         result_extra: dict[str, Any] = {
             "mas_command": mas_command,
             "spawned_child_count": len(children),
-            "child_workflow_ids": child_workflow_ids,
+            "child_agent_ids": child_agent_ids,
             "children": children,
         }
         if len(children) == 1:
-            result_extra["child_workflow_id"] = children[0]["workflow_id"]
+            result_extra["child_agent_id"] = children[0]["workflow_id"]
             result_extra.update({key: value for key, value in children[0].items() if key != "task"})
         result_extra.update(extra)
         return self.success(output=output, extra=result_extra)
@@ -400,7 +400,7 @@ class MasCommandHandler:
     async def _status(self, classification: MasCommandClassification) -> dict[str, Any]:
         current_workflow_id = self._validated_context("status")
         if current_workflow_id is None:
-            return self.result_formatter.missing_agent_workflow_context("status")
+            return self.result_formatter.missing_agent_context("status")
         if len(classification.arguments) == 1:
             snapshots = await self.authority.list_observable_children(parent_workflow_id=current_workflow_id)
             return self.result_formatter.direct_child_statuses(
@@ -421,7 +421,7 @@ class MasCommandHandler:
             snapshot = _authority_result_snapshot(authority_result)
             return self.result_formatter.specific_status(mas_command=classification.arguments, snapshot=snapshot)
         return self.result_formatter.invalid_arguments(
-            output="Usage: mini-mas status [workflow-id]\n",
+            output="Usage: mini-mas status [agent-id]\n",
             exception_info="invalid_status_arguments",
             mas_command_error="invalid_status_arguments",
         )
@@ -429,7 +429,7 @@ class MasCommandHandler:
     async def _spawn(self, classification: MasCommandClassification) -> dict[str, Any]:
         current_workflow_id = self._validated_context("spawn")
         if current_workflow_id is None:
-            return self.result_formatter.missing_agent_workflow_context("spawn")
+            return self.result_formatter.missing_agent_context("spawn")
         root_workflow_id = root_id_for_workflow(current_workflow_id)
         try:
             request = _parse_spawn_arguments(classification.arguments)
@@ -467,7 +467,7 @@ class MasCommandHandler:
     async def _wait(self, classification: MasCommandClassification) -> dict[str, Any]:
         current_workflow_id = self._validated_context("wait")
         if current_workflow_id is None:
-            return self.result_formatter.missing_agent_workflow_context("wait")
+            return self.result_formatter.missing_agent_context("wait")
         try:
             request = _parse_wait_arguments(classification.arguments)
         except ValueError as exc:
@@ -509,7 +509,7 @@ class MasCommandHandler:
     async def _continue(self, classification: MasCommandClassification) -> dict[str, Any]:
         current_workflow_id = self._validated_context("continue")
         if current_workflow_id is None:
-            return self.result_formatter.missing_agent_workflow_context("continue")
+            return self.result_formatter.missing_agent_context("continue")
         try:
             request = _parse_continue_arguments(classification.arguments)
         except ValueError as exc:
@@ -548,7 +548,7 @@ class MasCommandHandler:
     async def _close(self, classification: MasCommandClassification) -> dict[str, Any]:
         current_workflow_id = self._validated_context("close")
         if current_workflow_id is None:
-            return self.result_formatter.missing_agent_workflow_context("close")
+            return self.result_formatter.missing_agent_context("close")
         try:
             request = _parse_close_arguments(classification.arguments)
         except ValueError as exc:
@@ -587,9 +587,9 @@ class MasCommandHandler:
         if workflow_id is None:
             return None
         try:
-            return validate_workflow_id(workflow_id)
+            return validate_agent_id(workflow_id)
         except ValueError as exc:
-            raise ValueError(f"Invalid Agent Workflow context for mini-mas {command_name}: {workflow_id}") from exc
+            raise ValueError(f"Invalid Agent context for mini-mas {command_name}: {workflow_id}") from exc
 
 
 def _parse_timeout_seconds(raw_timeout: str) -> float:
@@ -663,8 +663,8 @@ def _parse_wait_arguments(arguments: list[str]) -> WaitCommandRequest:
         if argument.startswith("--"):
             raise ValueError(f"Unsupported wait option: {argument}")
         if workflow_id is not None:
-            raise ValueError("mini-mas wait accepts at most one workflow ID")
-        workflow_id = validate_workflow_id(argument)
+            raise ValueError("mini-mas wait accepts at most one Agent ID")
+        workflow_id = validate_agent_id(argument)
         index += 1
 
     if workflow_id is not None and (wait_any or wait_all):
@@ -676,18 +676,18 @@ def _parse_wait_arguments(arguments: list[str]) -> WaitCommandRequest:
 
 def _parse_continue_arguments(arguments: list[str]) -> ContinueCommandRequest:
     if len(arguments) != 3:
-        raise ValueError('Usage: mini-mas continue <workflow-id> "message"')
-    workflow_id = validate_workflow_id(arguments[1])
+        raise ValueError('Usage: mini-mas continue <agent-id> "message"')
+    workflow_id = validate_agent_id(arguments[1])
     content = arguments[2]
     if not content:
-        raise ValueError('Usage: mini-mas continue <workflow-id> "message"')
+        raise ValueError('Usage: mini-mas continue <agent-id> "message"')
     return ContinueCommandRequest(workflow_id=workflow_id, content=content)
 
 
 def _parse_close_arguments(arguments: list[str]) -> CloseCommandRequest:
     if len(arguments) != 2:
-        raise ValueError("Usage: mini-mas close <workflow-id>")
-    return CloseCommandRequest(workflow_id=validate_workflow_id(arguments[1]))
+        raise ValueError("Usage: mini-mas close <agent-id>")
+    return CloseCommandRequest(workflow_id=validate_agent_id(arguments[1]))
 
 
 def _authority_result_error(result: Any) -> dict[str, Any] | None:
@@ -715,7 +715,7 @@ def _child_metadata_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
 def _format_child_metadata_lines(child: dict[str, str]) -> list[str]:
     return [
         f"task: {child['task']}",
-        f"workflow_id: {child['workflow_id']}",
+        f"agent_id: {child['workflow_id']}",
         f"run_directory: {child['run_directory']}",
         f"trajectory_artifact_path: {child['trajectory_artifact_path']}",
     ]
@@ -736,7 +736,7 @@ def _format_still_running_ids(still_running_ids: list[str]) -> str:
 
 def _format_ready_snapshot(snapshot: dict[str, Any]) -> list[str]:
     lines = [
-        f"ready_workflow_id: {snapshot['workflow_id']}",
+        f"ready_agent_id: {snapshot['workflow_id']}",
         f"lifecycle_state: {snapshot['lifecycle_state']}",
     ]
     if snapshot.get("latest_submission"):
@@ -766,7 +766,7 @@ def _format_wait_summary_output(
         f"wait_mode: {wait_mode}",
         f"child_count: {len(children)}",
         f"ready_child_count: {len(ready_snapshots)}",
-        f"still_running_child_workflow_ids: {_format_still_running_ids(still_running_ids)}",
+        f"still_running_child_agent_ids: {_format_still_running_ids(still_running_ids)}",
         "",
         "started_children:",
     ]
@@ -786,7 +786,7 @@ def _format_wait_summary_output(
 def _format_continue_output(*, target_workflow_id: str, content: str, snapshot: dict[str, Any]) -> str:
     lines = [
         "Continuation signal sent",
-        f"workflow_id: {target_workflow_id}",
+        f"agent_id: {target_workflow_id}",
         f"lifecycle_state: {snapshot['lifecycle_state']}",
         f"message: {content}",
         f"run_directory: {snapshot['run_directory']}",
@@ -798,7 +798,7 @@ def _format_continue_output(*, target_workflow_id: str, content: str, snapshot: 
 def _format_close_output(*, target_workflow_id: str, snapshot: dict[str, Any]) -> str:
     lines = [
         "Close signal sent",
-        f"workflow_id: {target_workflow_id}",
+        f"agent_id: {target_workflow_id}",
         f"lifecycle_state: {snapshot['lifecycle_state']}",
     ]
     if snapshot.get("latest_submission"):

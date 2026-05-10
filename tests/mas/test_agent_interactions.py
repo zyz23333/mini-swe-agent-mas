@@ -77,7 +77,7 @@ def test_agent_interactions_module_owns_status_first_observable_wait_and_message
     )
     ready, still_running, timed_out = asyncio.run(
         agent_interactions.wait_for_first_observable_events(
-            child_workflow_ids=["mas-0123456789abcdef-c001"],
+            child_agent_ids=["mas-0123456789abcdef-c001"],
             wait_all=False,
             timeout_seconds=0.25,
         )
@@ -124,12 +124,12 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "list_workflows",
-        Mock(side_effect=AssertionError("Agent Workflow status dispatch must use list_workflows_async")),
+        Mock(side_effect=AssertionError("Agent status dispatch must use list_workflows_async")),
     )
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "get_all_events",
-        Mock(side_effect=AssertionError("Agent Workflow status dispatch must use get_all_events_async")),
+        Mock(side_effect=AssertionError("Agent status dispatch must use get_all_events_async")),
     )
 
     message = make_output("status", [{"command": "mini-mas status"}])
@@ -153,9 +153,9 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     )
     text = _observation_text(observations[0])
     assert "<returncode>0</returncode>" in text
-    assert "Direct Child Agent Workflows for: mas-0123456789abcdef" in text
-    assert "workflow_id: mas-0123456789abcdef\n" not in text
-    assert "workflow_id: mas-0123456789abcdef-c001" in text
+    assert "Direct Child Agents for: mas-0123456789abcdef" in text
+    assert "agent_id: mas-0123456789abcdef\n" not in text
+    assert "agent_id: mas-0123456789abcdef-c001" in text
     assert "lifecycle_state: waiting_for_parent" in text
     assert "latest_submission: ready for review" in text
     assert "trajectory_artifact_path: .mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json" in text
@@ -183,7 +183,7 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "get_all_events",
-        Mock(side_effect=AssertionError("Agent Workflow status dispatch must use get_all_events_async")),
+        Mock(side_effect=AssertionError("Agent status dispatch must use get_all_events_async")),
     )
 
     model = DeterministicModel(outputs=[])
@@ -201,7 +201,7 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
 
     found_text = _observation_text(found[0])
     assert "<returncode>0</returncode>" in found_text
-    assert "workflow_id: mas-0123456789abcdef-c001" in found_text
+    assert "agent_id: mas-0123456789abcdef-c001" in found_text
     assert "lifecycle_state: failed" in found_text
     assert "latest_error: model failed" in found_text
 
@@ -219,7 +219,7 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
 
     missing_text = _observation_text(missing[0])
     assert "<returncode>1</returncode>" in missing_text
-    assert "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef: mas-0123456789abcdef-c999" in missing_text
+    assert "Agent is not a direct Child Agent of mas-0123456789abcdef: mas-0123456789abcdef-c999" in missing_text
 
 def test_status_snapshot_accepts_waiting_for_child_lifecycle_state():
 

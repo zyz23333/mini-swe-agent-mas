@@ -69,7 +69,7 @@ def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, mo
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
     observation = _observation_text(artifact["messages"][3])
     assert "Detached spawn started" in observation
-    assert "workflow_id: mas-0123456789abcdef-c001" in observation
+    assert "agent_id: mas-0123456789abcdef-c001" in observation
     assert "run_directory: .mini-mas/runs/mas-0123456789abcdef" in observation
     assert (
         "trajectory_artifact_path: "
@@ -131,7 +131,7 @@ def test_detached_spawn_allocates_stable_sibling_child_ids_without_duplicate_enq
     )
 
     assert [call["args"][1] for call in replay_queue.enqueued] == ["mas-0123456789abcdef-c001"]
-    assert "workflow_id: mas-0123456789abcdef-c001" in _observation_text(replay_observations[0])
+    assert "agent_id: mas-0123456789abcdef-c001" in _observation_text(replay_observations[0])
 
 def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_path, monkeypatch):
     import minisweagent.mas.mas_agent as workflows
@@ -181,8 +181,8 @@ def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_pat
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
     observation = _observation_text(artifact["messages"][3])
     assert "Detached spawn started" in observation
-    assert "workflow_id: mas-0123456789abcdef-c001" in observation
-    assert "workflow_id: mas-0123456789abcdef-c002" in observation
+    assert "agent_id: mas-0123456789abcdef-c001" in observation
+    assert "agent_id: mas-0123456789abcdef-c002" in observation
     assert "trajectory_artifact_path: .mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json" in observation
     assert "trajectory_artifact_path: .mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c002.traj.json" in observation
 
@@ -226,8 +226,8 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
         ("mas-0123456789abcdef", "mas-0123456789abcdef-c001-c002", "task B"),
     ]
     observation = _observation_text(json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())["messages"][3])
-    assert "workflow_id: mas-0123456789abcdef-c001-c001" in observation
-    assert "workflow_id: mas-0123456789abcdef-c001-c002" in observation
+    assert "agent_id: mas-0123456789abcdef-c001-c001" in observation
+    assert "agent_id: mas-0123456789abcdef-c001-c002" in observation
     assert "run_directory: .mini-mas/runs/mas-0123456789abcdef" in observation
     assert (
         "trajectory_artifact_path: "
@@ -240,7 +240,7 @@ def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatc
 
     first_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", first_queue)
-    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
 
     for parent_workflow_id, queue in [
         ("mas-0123456789abcdef-c001", first_queue),
@@ -265,7 +265,7 @@ def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
-    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "asyncio_wait",
@@ -318,7 +318,7 @@ def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
     assert "Waited spawn completed" in text
     assert "wait_mode: any" in text
     assert "ready_child_count: 1" in text
-    assert "still_running_child_workflow_ids: mas-0123456789abcdef-c002" in text
+    assert "still_running_child_agent_ids: mas-0123456789abcdef-c002" in text
     assert "latest_submission: A ready" in text
 
 def test_waited_spawn_all_and_partial_timeout(monkeypatch):
@@ -327,7 +327,7 @@ def test_waited_spawn_all_and_partial_timeout(monkeypatch):
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
-    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "asyncio_wait",
@@ -370,7 +370,7 @@ def test_waited_spawn_all_and_partial_timeout(monkeypatch):
     assert "Waited spawn timed out" in text
     assert "wait_mode: all" in text
     assert "ready_child_count: 1" in text
-    assert "still_running_child_workflow_ids: mas-0123456789abcdef-c002" in text
+    assert "still_running_child_agent_ids: mas-0123456789abcdef-c002" in text
     assert "latest_error: boom" in text
 
 def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
@@ -379,7 +379,7 @@ def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_queue = _recording_child_queue()
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
-    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     monkeypatch.setattr(workflows._dbos.DBOS, "asyncio_wait", Mock(wraps=asyncio.wait))
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
@@ -406,7 +406,7 @@ def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
     assert "Waited spawn timed out" in text
     assert "wait_mode: any" in text
     assert "ready_child_count: 0" in text
-    assert "still_running_child_workflow_ids: mas-0123456789abcdef-c001, mas-0123456789abcdef-c002" in text
+    assert "still_running_child_agent_ids: mas-0123456789abcdef-c001, mas-0123456789abcdef-c002" in text
     assert [call["args"][1] for call in child_queue.enqueued] == [
         "mas-0123456789abcdef-c001",
         "mas-0123456789abcdef-c002",
@@ -419,7 +419,7 @@ def test_waited_spawn_publishes_waiting_for_child_status_and_restores_running_on
     child_queue = _recording_child_queue()
     published = []
     monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
-    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _workflow_id: patch("builtins.id"))
+    monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
 
     async def set_event_async(key, value):
         published.append((key, value))
@@ -760,7 +760,7 @@ def test_workflow_wait_any_all_and_timeout_use_current_child_statuses(monkeypatc
     all_text = _observation_text(wait_all[0])
     assert "wait_mode: all" in all_text
     assert "mini-mas wait timed out" in all_text
-    assert "still_running_child_workflow_ids: mas-0123456789abcdef-c002" in all_text
+    assert "still_running_child_agent_ids: mas-0123456789abcdef-c002" in all_text
 
 def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
@@ -806,4 +806,4 @@ def test_workflow_wait_timeout_returns_running_children_when_none_are_ready(monk
     text = _observation_text(observations[0])
     assert "mini-mas wait timed out" in text
     assert "ready_child_count: 0" in text
-    assert "still_running_child_workflow_ids: mas-0123456789abcdef-c001" in text
+    assert "still_running_child_agent_ids: mas-0123456789abcdef-c001" in text

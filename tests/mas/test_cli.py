@@ -33,15 +33,15 @@ def test_mini_mas_run_cli_outputs_artifact_locations():
         cli_result = CliRunner().invoke(app, ["run", "--workflow-id", "mas-2222222222222222"])
 
     assert cli_result.exit_code == 0
-    assert "root_workflow_id: mas-2222222222222222" in cli_result.stdout
-    assert "workflow_id: mas-2222222222222222" in cli_result.stdout
+    assert "root_agent_id: mas-2222222222222222" in cli_result.stdout
+    assert "agent_id: mas-2222222222222222" in cli_result.stdout
     assert "run_directory: .mini-mas/runs/mas-2222222222222222" in cli_result.stdout
     assert (
         "trajectory_artifact_path: .mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json"
         in cli_result.stdout
     )
 
-def test_mini_mas_status_cli_reports_external_coordination_unsupported(monkeypatch):
+def test_mini_mas_status_cli_reports_external_agent_interaction_unsupported(monkeypatch):
     monkeypatch.setattr(
         "minisweagent.mas.cli.get_agent_workflow_status",
         Mock(
@@ -50,8 +50,8 @@ def test_mini_mas_status_cli_reports_external_coordination_unsupported(monkeypat
                 "workflow_id": "mas-2222222222222222",
                 "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
                 "returncode": 2,
-                "exception_info": "external_coordination_unsupported",
-                "extra": {"mas_command_error": "external_coordination_unsupported"},
+                "exception_info": "external_agent_interaction_unsupported",
+                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
             }
         ),
     )
@@ -69,8 +69,8 @@ def test_mini_mas_status_cli_does_not_support_missing_descendant_lookup(monkeypa
                 "workflow_id": "mas-2222222222222222-c999",
                 "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
                 "returncode": 2,
-                "exception_info": "external_coordination_unsupported",
-                "extra": {"mas_command_error": "external_coordination_unsupported"},
+                "exception_info": "external_agent_interaction_unsupported",
+                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
             }
         ),
     )
@@ -88,8 +88,8 @@ def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
                 "workflow_id": "mas-2222222222222222-c001",
                 "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
                 "returncode": 2,
-                "exception_info": "external_coordination_unsupported",
-                "extra": {"mas_command_error": "external_coordination_unsupported"},
+                "exception_info": "external_agent_interaction_unsupported",
+                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
             }
         ),
     )
@@ -107,8 +107,8 @@ def test_mini_mas_wait_cli_outputs_closed_event_neutrally(monkeypatch):
                 "workflow_id": "mas-2222222222222222-c001",
                 "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
                 "returncode": 2,
-                "exception_info": "external_coordination_unsupported",
-                "extra": {"mas_command_error": "external_coordination_unsupported"},
+                "exception_info": "external_agent_interaction_unsupported",
+                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
             }
         ),
     )
@@ -130,7 +130,7 @@ def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
                 "ok": True,
                 "output": (
                     "Continuation signal sent\n"
-                    "workflow_id: mas-2222222222222222-c001\n"
+                    "agent_id: mas-2222222222222222-c001\n"
                     "lifecycle_state: waiting_for_parent\n"
                     "message: go on\n"
                     "run_directory: .mini-mas/runs/mas-2222222222222222\n"
@@ -148,7 +148,7 @@ def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
 
     assert cli_result.exit_code == 0
     assert "Continuation signal sent" in cli_result.stdout
-    assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "agent_id: mas-2222222222222222-c001" in cli_result.stdout
     assert "message: go on" in cli_result.stdout
 
 def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
@@ -159,7 +159,7 @@ def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
                 "ok": True,
                 "output": (
                     "Close signal sent\n"
-                    "workflow_id: mas-2222222222222222-c001\n"
+                    "agent_id: mas-2222222222222222-c001\n"
                     "lifecycle_state: waiting_for_parent\n"
                     "latest_submission: ready\n"
                     "run_directory: .mini-mas/runs/mas-2222222222222222\n"
@@ -177,7 +177,7 @@ def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
 
     assert cli_result.exit_code == 0
     assert "Close signal sent" in cli_result.stdout
-    assert "workflow_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "agent_id: mas-2222222222222222-c001" in cli_result.stdout
     assert "latest_submission: ready" in cli_result.stdout
     assert "accepted" not in cli_result.stdout.lower()
     assert "rejected" not in cli_result.stdout.lower()

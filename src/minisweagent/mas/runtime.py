@@ -8,14 +8,14 @@ import secrets
 from collections.abc import Mapping
 from typing import Any
 
-from minisweagent.mas.artifacts import make_artifact_metadata, validate_root_workflow_id, validate_workflow_id
+from minisweagent.mas.artifacts import make_artifact_metadata, validate_agent_id, validate_root_agent_id
 
 MAS_APP_NAME = "mini-swe-agent-mas"
 UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE = (
     "External mini-mas status, wait, continue, and close are unsupported until terminal commands are routed through "
-    "an Interactive Root Agent Workflow.\n"
+    "an Interactive Root Agent.\n"
 )
-UNSUPPORTED_EXTERNAL_COORDINATION_ERROR = "external_coordination_unsupported"
+UNSUPPORTED_EXTERNAL_COORDINATION_ERROR = "external_agent_interaction_unsupported"
 
 
 def load_dbos():
@@ -25,8 +25,8 @@ def load_dbos():
     return dbos
 
 
-def make_root_workflow_id() -> str:
-    """Return a readable root Workflow Tree ID."""
+def make_root_agent_id() -> str:
+    """Return a readable Root Agent ID."""
     return f"mas-{secrets.token_hex(8)}"
 
 
@@ -56,8 +56,8 @@ def _format_run_result(*, root_workflow_id: str, result: Any | None, wait: bool)
     return data
 
 
-def _unsupported_external_coordination_result(*, workflow_id: str) -> dict[str, Any]:
-    """Return the shared unsupported result for naked external coordination commands."""
+def _unsupported_external_agent_interaction_result(*, workflow_id: str) -> dict[str, Any]:
+    """Return the shared unsupported result for naked external Agent Interaction commands."""
     return {
         "kind": "unsupported",
         "workflow_id": workflow_id,
@@ -83,7 +83,7 @@ async def _start_root_agent_workflow_async(
 
     dbos_module.DBOS.launch()
 
-    assigned_workflow_id = validate_root_workflow_id(workflow_id or make_root_workflow_id())
+    assigned_workflow_id = validate_root_agent_id(workflow_id or make_root_agent_id())
     with dbos_module.SetWorkflowID(assigned_workflow_id):
         handle = await dbos_module.DBOS.start_workflow_async(root_agent_workflow, assigned_workflow_id)
 
@@ -98,7 +98,7 @@ def start_root_agent_workflow(
     wait: bool = True,
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
-    """Initialize DBOS, launch it, and start a Root Agent Workflow through async DBOS APIs."""
+    """Initialize DBOS, launch it, and start a Root Agent through async DBOS APIs."""
     return asyncio.run(
         _start_root_agent_workflow_async(
             workflow_id=workflow_id,
@@ -114,7 +114,7 @@ async def _get_agent_workflow_status_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for non-blocking MAS status snapshot or tree lookup."""
-    return _unsupported_external_coordination_result(workflow_id=workflow_id)
+    return _unsupported_external_agent_interaction_result(workflow_id=workflow_id)
 
 
 def get_agent_workflow_status(
@@ -138,7 +138,7 @@ async def _wait_for_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external waiting on one Child First Observable Event."""
-    return _unsupported_external_coordination_result(workflow_id=workflow_id)
+    return _unsupported_external_agent_interaction_result(workflow_id=workflow_id)
 
 
 def wait_for_agent_workflow(
@@ -158,12 +158,12 @@ def wait_for_agent_workflow(
 
 
 def parent_id_for_workflow(workflow_id: str) -> str:
-    """Return the encoded immediate parent Workflow Tree ID for a descendant."""
-    workflow_id = validate_workflow_id(workflow_id)
+    """Return the encoded immediate Parent Agent ID for a descendant Agent."""
+    workflow_id = validate_agent_id(workflow_id)
     parent_id, separator, _child_suffix = workflow_id.rpartition("-c")
     if not separator:
         return workflow_id
-    return validate_workflow_id(parent_id)
+    return validate_agent_id(parent_id)
 
 
 async def _continue_agent_workflow_async(
@@ -173,7 +173,7 @@ async def _continue_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external parent-to-child continuation signaling."""
-    return _unsupported_external_coordination_result(workflow_id=workflow_id)
+    return _unsupported_external_agent_interaction_result(workflow_id=workflow_id)
 
 
 def continue_agent_workflow(
@@ -182,7 +182,7 @@ def continue_agent_workflow(
     message: str,
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
-    """Initialize DBOS and send a continuation signal to one waiting Child Agent Workflow."""
+    """Initialize DBOS and send a continuation signal to one waiting Child Agent."""
     return asyncio.run(
         _continue_agent_workflow_async(
             workflow_id=workflow_id,
@@ -198,7 +198,7 @@ async def _close_agent_workflow_async(
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for external parent-to-child neutral close signaling."""
-    return _unsupported_external_coordination_result(workflow_id=workflow_id)
+    return _unsupported_external_agent_interaction_result(workflow_id=workflow_id)
 
 
 def close_agent_workflow(
@@ -206,7 +206,7 @@ def close_agent_workflow(
     workflow_id: str,
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
-    """Initialize DBOS and send a neutral close signal to one waiting Child Agent Workflow."""
+    """Initialize DBOS and send a neutral close signal to one waiting Child Agent."""
     return asyncio.run(
         _close_agent_workflow_async(
             workflow_id=workflow_id,

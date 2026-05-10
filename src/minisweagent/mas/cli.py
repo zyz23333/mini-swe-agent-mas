@@ -24,15 +24,15 @@ def main() -> None:
     """External MAS CLI entrypoint."""
 
 
-@app.command(help="Start a minimal Root Agent Workflow through DBOS.")
+@app.command(help="Start a minimal Root Agent through DBOS.")
 def run(
     workflow_id: Annotated[
         str | None,
-        typer.Option("--workflow-id", help="Explicit Root Agent Workflow ID. Defaults to a generated mas-<16hex> ID."),
+        typer.Option("--agent-id", "--workflow-id", help="Explicit Root Agent ID. Defaults to a generated mas-<16hex> ID."),
     ] = None,
     wait: Annotated[
         bool,
-        typer.Option("--wait", help="Wait for the minimal Root Agent Workflow result before returning."),
+        typer.Option("--wait", help="Wait for the minimal Root Agent result before returning."),
     ] = True,
     system_database_url: Annotated[
         str | None,
@@ -50,8 +50,8 @@ def run(
             system_database_url=system_database_url,
         )
     )
-    console.print(f"root_workflow_id: {result['root_workflow_id']}")
-    console.print(f"workflow_id: {result['workflow_id']}")
+    console.print(f"root_agent_id: {result['root_workflow_id']}")
+    console.print(f"agent_id: {result['workflow_id']}")
     console.print(f"run_directory: {result['run_directory']}")
     console.print(f"trajectory_artifact_path: {result['trajectory_artifact_path']}")
     if "result" in result:
@@ -59,9 +59,9 @@ def run(
     return result
 
 
-@app.command(help="Inspect a Root Agent Workflow tree or one descendant without waiting for completion.")
+@app.command(help="Inspect a Root Agent or one descendant Agent without waiting for completion.")
 def status(
-    workflow_id: Annotated[str, typer.Argument(help="Root or descendant Workflow Tree ID to inspect.")],
+    workflow_id: Annotated[str, typer.Argument(help="Root or descendant Agent ID to inspect.")],
     system_database_url: Annotated[
         str | None,
         typer.Option(
@@ -76,9 +76,9 @@ def status(
     raise typer.Exit(code=result["returncode"])
 
 
-@app.command(help="Wait for one Child Agent Workflow First Observable Event.")
+@app.command(help="Wait for one Child Agent First Observable Event.")
 def wait(
-    workflow_id: Annotated[str, typer.Argument(help="Child Workflow Tree ID to wait for.")],
+    workflow_id: Annotated[str, typer.Argument(help="Child Agent ID to wait for.")],
     timeout_seconds: Annotated[
         float | None,
         typer.Option("--timeout", help="Maximum seconds to wait for the First Observable Event.", show_default=False),
@@ -103,9 +103,9 @@ def wait(
     raise typer.Exit(code=result["returncode"])
 
 
-@app.command("continue", help="Send a Continuation Signal to one waiting Child Agent Workflow.")
+@app.command("continue", help="Send a Continuation Signal to one waiting Child Agent.")
 def continue_(
-    workflow_id: Annotated[str, typer.Argument(help="Waiting Child Workflow Tree ID to continue.")],
+    workflow_id: Annotated[str, typer.Argument(help="Waiting Child Agent ID to continue.")],
     message: Annotated[str, typer.Argument(help="Continuation message to append to the child trajectory.")],
     system_database_url: Annotated[
         str | None,
@@ -129,9 +129,9 @@ def continue_(
     return result
 
 
-@app.command(help="Send a neutral Close Signal to one waiting Child Agent Workflow.")
+@app.command(help="Send a neutral Close Signal to one waiting Child Agent.")
 def close(
-    workflow_id: Annotated[str, typer.Argument(help="Waiting Child Workflow Tree ID to close.")],
+    workflow_id: Annotated[str, typer.Argument(help="Waiting Child Agent ID to close.")],
     system_database_url: Annotated[
         str | None,
         typer.Option(

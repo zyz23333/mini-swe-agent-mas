@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from minisweagent.mas import agent_interactions
-from minisweagent.mas.artifacts import validate_workflow_id
+from minisweagent.mas.artifacts import validate_agent_id
 
 from .status_events import root_id_for_workflow
 
@@ -64,7 +64,7 @@ class DirectChildAuthorityPolicy:
     """Fixed MVP authority policy for direct Child Agent Interactions."""
 
     async def list_observable_children(self, *, parent_workflow_id: str) -> list[dict[str, Any]]:
-        parent_workflow_id = validate_workflow_id(parent_workflow_id)
+        parent_workflow_id = validate_agent_id(parent_workflow_id)
         return await agent_interactions.query_direct_child_statuses(parent_workflow_id)
 
     async def require_observable_child(
@@ -74,8 +74,8 @@ class DirectChildAuthorityPolicy:
         target_workflow_id: str,
         command_name: str,
     ) -> AuthorityResult:
-        parent_workflow_id = validate_workflow_id(parent_workflow_id)
-        target_workflow_id = validate_workflow_id(target_workflow_id)
+        parent_workflow_id = validate_agent_id(parent_workflow_id)
+        target_workflow_id = validate_agent_id(target_workflow_id)
 
         if target_workflow_id == parent_workflow_id:
             return _cannot_target_current_workflow(command_name)
@@ -87,7 +87,7 @@ class DirectChildAuthorityPolicy:
             child_workflow_id=target_workflow_id,
         )
         if snapshot is None:
-            return _workflow_not_direct_child(parent_workflow_id, target_workflow_id)
+            return _agent_not_direct_child(parent_workflow_id, target_workflow_id)
         return snapshot
 
     async def require_waiting_child(
@@ -106,36 +106,36 @@ class DirectChildAuthorityPolicy:
             return direct_child
         if direct_child.get("lifecycle_state") != "waiting_for_parent":
             return AuthorityCommandError(
-                output=f"Workflow is not waiting for parent direction: {target_workflow_id}\n",
+                output=f"Agent is not waiting for parent direction: {target_workflow_id}\n",
                 returncode=1,
-                exception_info="workflow_not_waiting_for_parent",
-                extra={"mas_command_error": "workflow_not_waiting_for_parent"},
+                exception_info="agent_not_waiting_for_parent",
+                extra={"mas_command_error": "agent_not_waiting_for_parent"},
             )
         return direct_child
 
 
 def _cannot_target_current_workflow(command_name: str) -> AuthorityCommandError:
     return AuthorityCommandError(
-        output=f"Cannot {command_name} the current Agent Workflow.\n",
+        output=f"Cannot {command_name} the current Agent.\n",
         returncode=1,
-        exception_info=f"cannot_{command_name}_current_workflow",
-        extra={"mas_command_error": f"cannot_{command_name}_current_workflow"},
+        exception_info=f"cannot_{command_name}_current_agent",
+        extra={"mas_command_error": f"cannot_{command_name}_current_agent"},
     )
 
 
 def _cannot_target_root_workflow(command_name: str) -> AuthorityCommandError:
     return AuthorityCommandError(
-        output=f"Cannot {command_name} the Root Agent Workflow.\n",
+        output=f"Cannot {command_name} the Root Agent.\n",
         returncode=1,
-        exception_info=f"cannot_{command_name}_root_workflow",
-        extra={"mas_command_error": f"cannot_{command_name}_root_workflow"},
+        exception_info=f"cannot_{command_name}_root_agent",
+        extra={"mas_command_error": f"cannot_{command_name}_root_agent"},
     )
 
 
-def _workflow_not_direct_child(parent_workflow_id: str, target_workflow_id: str) -> AuthorityCommandError:
+def _agent_not_direct_child(parent_workflow_id: str, target_workflow_id: str) -> AuthorityCommandError:
     return AuthorityCommandError(
-        output=f"Workflow is not a direct Child Agent Workflow of {parent_workflow_id}: {target_workflow_id}\n",
+        output=f"Agent is not a direct Child Agent of {parent_workflow_id}: {target_workflow_id}\n",
         returncode=1,
-        exception_info="workflow_not_direct_child",
-        extra={"mas_command_error": "workflow_not_direct_child"},
+        exception_info="agent_not_direct_child",
+        extra={"mas_command_error": "agent_not_direct_child"},
     )

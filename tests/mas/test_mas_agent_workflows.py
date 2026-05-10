@@ -191,7 +191,7 @@ def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypat
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "set_event",
-        Mock(side_effect=AssertionError("Agent Workflow status publishing must use set_event_async")),
+        Mock(side_effect=AssertionError("Agent status publishing must use set_event_async")),
     )
 
     model = DeterministicModel(outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)])
@@ -216,7 +216,7 @@ def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypat
 
     assert [event[0] for event in published] == ["mini_mas_status", "mini_mas_status"]
     assert published[0][1]["lifecycle_state"] == "running"
-    assert published[0][1]["workflow_tree_id"] == "mas-0123456789abcdef"
+    assert published[0][1]["workflow_id"] == "mas-0123456789abcdef"
     assert published[1][1]["lifecycle_state"] == "closed"
     assert published[1][1]["latest_submission"] == "done"
     assert "messages" not in published[1][1]
@@ -253,7 +253,7 @@ def test_agent_workflow_publishes_failed_status(monkeypatch, tmp_path):
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "set_event",
-        Mock(side_effect=AssertionError("Agent Workflow status publishing must use set_event_async")),
+        Mock(side_effect=AssertionError("Agent status publishing must use set_event_async")),
     )
 
     model = DeterministicModel(outputs=[])
@@ -470,7 +470,6 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
         {
             "root_workflow_id": "mas-0123456789abcdef",
             "workflow_id": "mas-0123456789abcdef-c001",
-            "workflow_tree_id": "mas-0123456789abcdef-c001",
             "lifecycle_state": "failed",
             "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
             "trajectory_artifact_path": (
@@ -612,7 +611,7 @@ def test_root_agent_workflow_keeps_standalone_mas_commands_out_of_bash_step(tmp_
     bash_step.assert_not_called()
     assert result["terminal_state"] == "limits_exceeded"
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
-    assert "Direct Child Agent Workflows for: mas-0123456789abcdef" in _observation_text(artifact["messages"][3])
+    assert "Direct Child Agents for: mas-0123456789abcdef" in _observation_text(artifact["messages"][3])
 
 def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(monkeypatch, tmp_path):
     import minisweagent.mas.mas_agent as workflows

@@ -83,7 +83,7 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
     text = _observation_text(observations[0])
     assert "<returncode>0</returncode>" in text
     assert "Continuation signal sent" in text
-    assert "workflow_id: mas-0123456789abcdef-c001" in text
+    assert "agent_id: mas-0123456789abcdef-c001" in text
 
 def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
@@ -145,7 +145,7 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
     text = _observation_text(observations[0])
     assert "<returncode>0</returncode>" in text
     assert "Close signal sent" in text
-    assert "workflow_id: mas-0123456789abcdef-c001" in text
+    assert "agent_id: mas-0123456789abcdef-c001" in text
     assert "lifecycle_state: waiting_for_parent" in text
     assert "accepted" not in text.lower()
     assert "rejected" not in text.lower()
@@ -155,14 +155,14 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
 @pytest.mark.parametrize(
     ("command", "expected_error"),
     [
-        ("mini-mas continue mas-0123456789abcdef root", "Cannot continue the current Agent Workflow"),
+        ("mini-mas continue mas-0123456789abcdef root", "Cannot continue the current Agent"),
         (
             "mini-mas continue mas-fedcba9876543210-c001 no",
-            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+            "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
         (
             "mini-mas continue mas-0123456789abcdef-c002 no",
-            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+            "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
     ],
 )
@@ -218,19 +218,19 @@ def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
+    assert "Agent is not a direct Child Agent of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
 
 @pytest.mark.parametrize(
     ("command", "expected_error"),
     [
-        ("mini-mas close mas-0123456789abcdef", "Cannot close the current Agent Workflow"),
+        ("mini-mas close mas-0123456789abcdef", "Cannot close the current Agent"),
         (
             "mini-mas close mas-fedcba9876543210-c001",
-            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+            "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
         (
             "mini-mas close mas-0123456789abcdef-c002",
-            "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef",
+            "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
     ],
 )
@@ -286,7 +286,7 @@ def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Workflow is not a direct Child Agent Workflow of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
+    assert "Agent is not a direct Child Agent of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
 
 @pytest.mark.parametrize("lifecycle_state", ["closed", "failed", "limits_exceeded", "running", "waiting_for_child"])
 def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, lifecycle_state):
@@ -327,7 +327,7 @@ def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, l
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Workflow is not waiting for parent direction: mas-0123456789abcdef-c001" in text
+    assert "Agent is not waiting for parent direction: mas-0123456789abcdef-c001" in text
 
 def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
@@ -378,4 +378,4 @@ def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch
     for observations in (continued, closed):
         text = _observation_text(observations[0])
         assert "<returncode>1</returncode>" in text
-        assert "Workflow is not waiting for parent direction: mas-0123456789abcdef-c001" in text
+        assert "Agent is not waiting for parent direction: mas-0123456789abcdef-c001" in text

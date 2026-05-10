@@ -9,7 +9,7 @@ from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
     get_agent_workflow_status,
-    make_root_workflow_id,
+    make_root_agent_id,
     wait_for_agent_workflow,
 )
 
@@ -112,7 +112,7 @@ def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
         (close_agent_workflow, {"workflow_id": "mas-1111111111111111-c001"}),
     ],
 )
-def test_external_coordination_runtimes_share_unsupported_response_without_dbos(runtime_func, kwargs):
+def test_external_agent_interaction_runtimes_share_unsupported_response_without_dbos(runtime_func, kwargs):
     dbos_module = _mock_dbos_module()
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
@@ -125,15 +125,15 @@ def test_external_coordination_runtimes_share_unsupported_response_without_dbos(
         "workflow_id": "mas-1111111111111111-c001",
         "output": (
             "External mini-mas status, wait, continue, and close are unsupported until terminal commands are routed "
-            "through an Interactive Root Agent Workflow.\n"
+            "through an Interactive Root Agent.\n"
         ),
         "returncode": 2,
-        "exception_info": "external_coordination_unsupported",
-        "extra": {"mas_command_error": "external_coordination_unsupported"},
+        "exception_info": "external_agent_interaction_unsupported",
+        "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
     }
-    assert "unsupported until terminal commands are routed through an Interactive Root Agent Workflow" in result["output"]
+    assert "unsupported until terminal commands are routed through an Interactive Root Agent" in result["output"]
 
 def test_root_workflow_ids_use_mas_16_hex_shape():
-    generated_ids = [make_root_workflow_id() for _ in range(20)]
+    generated_ids = [make_root_agent_id() for _ in range(20)]
 
     assert all(re.fullmatch(r"mas-[0-9a-f]{16}", workflow_id) for workflow_id in generated_ids)

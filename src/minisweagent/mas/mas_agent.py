@@ -1,4 +1,4 @@
-"""MAS Agent Workflow orchestration and DBOS entrypoints."""
+"""MAS Agent orchestration and DBOS entrypoints."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from minisweagent.mas import agent_interactions
 from minisweagent.mas.artifacts import (
     make_artifact_metadata,
     save_trajectory_artifact,
-    validate_root_workflow_id,
-    validate_workflow_id,
+    validate_agent_id,
+    validate_root_agent_id,
 )
 from minisweagent.mas.commands import (
     MasCommandClassification,
@@ -103,7 +103,7 @@ async def _execute_agent_workflow_outputs(
     env,
     command_handler: MasCommandHandler,
 ) -> list[dict]:
-    """Execute bash-shaped Agent Workflow actions with workflow-layer MAS interception."""
+    """Execute bash-shaped Agent actions with workflow-layer MAS interception."""
     outputs = []
     for action in message.get("extra", {}).get("actions", []):
         classification = classify_mas_command(action.get("command", ""))
@@ -177,7 +177,7 @@ def _limits_exceeded_message(model) -> dict:
 
 def _initial_messages(model, task: str) -> list[dict]:
     return [
-        model.format_message(role="system", content="You are a mini-swe-agent MAS Root Agent Workflow."),
+        model.format_message(role="system", content="You are a mini-swe-agent MAS Root Agent."),
         model.format_message(role="user", content=task),
     ]
 
@@ -199,7 +199,7 @@ class MasAgent:
         self.command_handler = MasCommandHandler()
 
     async def run(self, *, task: str = "", initial_messages: list[dict] | None = None) -> dict:
-        """Run the MAS Agent Workflow until a terminal state or parent direction wait."""
+        """Run the MAS Agent until a terminal state or parent direction wait."""
         self.task = task
         if self.model is None or self.env is None:
             return await self._record_started_workflow()
@@ -394,7 +394,7 @@ async def save_trajectory_artifact_step(
     model_stats: dict | None = None,
     submission: str = "",
 ) -> dict[str, str]:
-    """Persist any Agent Workflow trajectory through one DBOS checkpointed step."""
+    """Persist any Agent trajectory through one DBOS checkpointed step."""
     await asyncio.to_thread(
         save_trajectory_artifact,
         root_workflow_id=root_workflow_id,
@@ -465,8 +465,8 @@ async def root_agent_workflow(
     step_limit: int = 0,
     initial_messages: list[dict] | None = None,
 ) -> dict:
-    """Root Agent Workflow for the ordinary non-child-coordination MAS path."""
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
+    """Root Agent DBOS workflow for the ordinary non-child-interaction MAS path."""
+    root_workflow_id = validate_root_agent_id(root_workflow_id)
     return await _run_agent_workflow(
         root_workflow_id=root_workflow_id,
         workflow_id=root_workflow_id,
@@ -489,9 +489,9 @@ async def child_agent_workflow(
     step_limit: int = 0,
     initial_messages: list[dict] | None = None,
 ) -> dict:
-    """Child Agent Workflow started by detached spawn through the child queue."""
-    root_workflow_id = validate_root_workflow_id(root_workflow_id)
-    workflow_id = validate_workflow_id(workflow_id)
+    """Child Agent DBOS workflow started by detached spawn through the child queue."""
+    root_workflow_id = validate_root_agent_id(root_workflow_id)
+    workflow_id = validate_agent_id(workflow_id)
     return await _run_agent_workflow(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,

@@ -5,8 +5,8 @@ from .helpers import _child_metadata
 
 
 def test_mas_command_result_formatter_owns_success_and_error_shapes():
-    from minisweagent.mas.commands import MasCommandResultFormatter
     from minisweagent.mas.agent_interactions import ChildWaitResult
+    from minisweagent.mas.commands import MasCommandResultFormatter
 
     formatter = MasCommandResultFormatter()
     children = [
@@ -40,12 +40,16 @@ def test_mas_command_result_formatter_owns_success_and_error_shapes():
     assert spawn_result["returncode"] == 0
     assert spawn_result["exception_info"] == ""
     assert "Waited spawn timed out" in spawn_result["output"]
-    assert "ready_workflow_id: mas-0123456789abcdef-c001" in spawn_result["output"]
-    assert "still_running_child_workflow_ids: mas-0123456789abcdef-c002" in spawn_result["output"]
+    assert "ready_agent_id: mas-0123456789abcdef-c001" in spawn_result["output"]
+    assert "still_running_child_agent_ids: mas-0123456789abcdef-c002" in spawn_result["output"]
     assert spawn_result["extra"]["mas_command"] == ["spawn", "task A", "task B"]
     assert spawn_result["extra"]["spawned_child_count"] == 2
     assert spawn_result["extra"]["ready_children"] == [ready_snapshot]
-    assert spawn_result["extra"]["still_running_child_workflow_ids"] == ["mas-0123456789abcdef-c002"]
+    assert spawn_result["extra"]["child_agent_ids"] == [
+        "mas-0123456789abcdef-c001",
+        "mas-0123456789abcdef-c002",
+    ]
+    assert spawn_result["extra"]["still_running_child_agent_ids"] == ["mas-0123456789abcdef-c002"]
 
     signal = {
         "type": "continuation",
@@ -64,7 +68,8 @@ def test_mas_command_result_formatter_owns_success_and_error_shapes():
 
     assert "Continuation signal sent" in continue_result["output"]
     assert "message: please revise" in continue_result["output"]
-    assert continue_result["extra"]["continued_workflow_id"] == "mas-0123456789abcdef-c001"
+    assert "agent_id: mas-0123456789abcdef-c001" in continue_result["output"]
+    assert continue_result["extra"]["continued_agent_id"] == "mas-0123456789abcdef-c001"
     assert continue_result["extra"]["target_status"] == ready_snapshot
     assert continue_result["extra"]["continuation_signal"] == signal
 
@@ -82,23 +87,24 @@ def test_mas_command_result_formatter_owns_success_and_error_shapes():
 
     assert "Close signal sent" in close_result["output"]
     assert "latest_submission: ready" in close_result["output"]
-    assert close_result["extra"]["closed_workflow_id"] == "mas-0123456789abcdef-c001"
+    assert "agent_id: mas-0123456789abcdef-c001" in close_result["output"]
+    assert close_result["extra"]["closed_agent_id"] == "mas-0123456789abcdef-c001"
     assert close_result["extra"]["target_status"] == ready_snapshot
 
     error_result = formatter.error(
-        output="mini-mas wait requires Agent Workflow context.\n",
+        output="mini-mas wait requires Agent context.\n",
         returncode=2,
-        exception_info="missing_agent_workflow_context",
-        mas_command_error="missing_agent_workflow_context",
+        exception_info="missing_agent_context",
+        mas_command_error="missing_agent_context",
         mas_command=["wait"],
     )
 
     assert error_result == {
-        "output": "mini-mas wait requires Agent Workflow context.\n",
+        "output": "mini-mas wait requires Agent context.\n",
         "returncode": 2,
-        "exception_info": "missing_agent_workflow_context",
+        "exception_info": "missing_agent_context",
         "extra": {
             "mas_command": ["wait"],
-            "mas_command_error": "missing_agent_workflow_context",
+            "mas_command_error": "missing_agent_context",
         },
     }

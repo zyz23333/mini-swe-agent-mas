@@ -14,16 +14,16 @@ def test_mas_command_handler_accepts_classified_standalone_command():
     )
 
     assert result == {
-        "output": "mini-mas wait requires Agent Workflow context.\n",
+        "output": "mini-mas wait requires Agent context.\n",
         "returncode": 2,
-        "exception_info": "missing_agent_workflow_context",
-        "extra": {"mas_command_error": "missing_agent_workflow_context"},
+        "exception_info": "missing_agent_context",
+        "extra": {"mas_command_error": "missing_agent_context"},
     }
 
-def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(monkeypatch):
+def test_mas_command_handler_owns_spawn_cursor_and_uses_agent_interaction_functions(monkeypatch):
     import minisweagent.mas.commands as commands
-    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
     from minisweagent.mas.agent_interactions import ChildWaitResult, SpawnChildrenResult
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
 
     calls = []
 
@@ -112,14 +112,14 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(m
     assert result["extra"]["waited"] is True
     assert result["extra"]["wait_mode"] == "all"
     assert result["extra"]["timed_out"] is True
-    assert result["extra"]["still_running_child_workflow_ids"] == ["mas-0123456789abcdef-c002"]
+    assert result["extra"]["still_running_child_agent_ids"] == ["mas-0123456789abcdef-c002"]
     assert "Waited spawn timed out" in result["output"]
-    assert "workflow_id: mas-0123456789abcdef-c003" in second_result["output"]
+    assert "agent_id: mas-0123456789abcdef-c003" in second_result["output"]
 
 def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypatch):
     import minisweagent.mas.commands as commands
-    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
     from minisweagent.mas.agent_interactions import ChildWaitResult
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
 
     calls = []
     child_snapshot = {
@@ -187,8 +187,8 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
 
 def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
     import minisweagent.mas.commands as commands
-    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
     from minisweagent.mas.agent_interactions import ChildWaitResult
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
 
     calls = []
     child_snapshot = {

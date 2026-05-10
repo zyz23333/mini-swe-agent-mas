@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from inspect import isawaitable
 from typing import Any
 
-from minisweagent.mas.artifacts import make_artifact_metadata, validate_workflow_id
+from minisweagent.mas.artifacts import make_artifact_metadata, validate_agent_id
 from minisweagent.mas.runtime import load_dbos
 
 from .status_events import (
@@ -49,7 +49,7 @@ class SpawnChildrenResult:
     children: list[dict[str, str]]
 
     @property
-    def child_workflow_ids(self) -> list[str]:
+    def child_agent_ids(self) -> list[str]:
         return [child["workflow_id"] for child in self.children]
 
 
@@ -65,13 +65,13 @@ class ChildWaitResult:
 
 
 def current_workflow_id() -> str | None:
-    """Return the current DBOS workflow ID only when DBOS exposes a real workflow context."""
+    """Return the current Agent ID only when DBOS exposes a real workflow context."""
     workflow_id = _dbos.DBOS.workflow_id
     return workflow_id if isinstance(workflow_id, str) else None
 
 
 async def enqueue_child_agent_workflow(*, root_workflow_id: str, child_workflow_id: str, task: str) -> None:
-    """Start a Child Agent Workflow through the configured DBOS child queue."""
+    """Start a Child Agent through the configured DBOS child queue."""
     from minisweagent.mas import mas_agent
 
     with _dbos.SetWorkflowID(child_workflow_id):
@@ -167,25 +167,25 @@ async def wait_for_first_observable_event(
     workflow_id: str,
     timeout_seconds: float,
 ) -> dict[str, Any] | None:
-    """Wait for one Child Agent Workflow First Observable Event."""
+    """Wait for one Child Agent First Observable Event."""
     event = await _maybe_await(_dbos.DBOS.get_event_async(workflow_id, FIRST_OBSERVABLE_EVENT_KEY, timeout_seconds))
     return event if isinstance(event, dict) else None
 
 
 async def wait_for_first_observable_events(
     *,
-    child_workflow_ids: list[str],
+    child_agent_ids: list[str],
     wait_all: bool,
     timeout_seconds: float | None,
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
     """Wait for First Observable Events with wait-any, wait-all, and timeout behavior."""
-    if not child_workflow_ids:
+    if not child_agent_ids:
         return [], [], False
 
     per_child_timeout = timeout_seconds if timeout_seconds is not None else 60
     waits = [
         asyncio.create_task(wait_for_first_observable_event(workflow_id, per_child_timeout))
-        for workflow_id in child_workflow_ids
+        for workflow_id in child_agent_ids
     ]
     done, pending = await _maybe_await(
         _dbos.DBOS.asyncio_wait(
@@ -197,8 +197,8 @@ async def wait_for_first_observable_events(
 
     ready_snapshots = [task.result() for task in done if task.result() is not None]
     ready_ids = {_snapshot_workflow_id(snapshot) for snapshot in ready_snapshots}
-    still_running_ids = [workflow_id for workflow_id in child_workflow_ids if workflow_id not in ready_ids]
-    timed_out = not ready_snapshots or (wait_all and len(ready_snapshots) < len(child_workflow_ids))
+    still_running_ids = [workflow_id for workflow_id in child_agent_ids if workflow_id not in ready_ids]
+    timed_out = not ready_snapshots or (wait_all and len(ready_snapshots) < len(child_agent_ids))
 
     for pending_task in pending:
         pending_task.cancel()
@@ -209,7 +209,7 @@ async def wait_for_first_observable_events(
 async def wait_for_direct_child_first_observable_events(
     *,
     parent_workflow_id: str,
-    child_workflow_ids: list[str],
+    child_agent_ids: list[str],
     wait_all: bool,
     timeout_seconds: float | None,
 ) -> tuple[list[dict[str, Any]], list[str], bool]:
@@ -222,7 +222,7 @@ async def wait_for_direct_child_first_observable_events(
     )
     try:
         return await wait_for_first_observable_events(
-            child_workflow_ids=child_workflow_ids,
+            child_agent_ids=child_agent_ids,
             wait_all=wait_all,
             timeout_seconds=timeout_seconds,
         )
@@ -235,12 +235,12 @@ async def wait_for_direct_child_first_observable_events(
 
 
 async def send_parent_direction(*, target_workflow_id: str, signal: dict[str, Any], topic: str) -> None:
-    """Send a parent-direction signal to a direct child workflow."""
+    """Send a parent-direction signal to a direct Child Agent."""
     await _maybe_await(_dbos.DBOS.send_async(target_workflow_id, signal, topic))
 
 
 async def receive_parent_direction(*, topic: str, timeout_seconds: float) -> dict | str | None:
-    """Receive one parent-direction workflow message."""
+    """Receive one parent-direction message inside a Child Agent."""
     return await _maybe_await(_dbos.DBOS.recv_async(topic, timeout_seconds=timeout_seconds))
 
 
@@ -251,10 +251,10 @@ async def spawn_children(
     first_spawn_index: int,
     tasks: list[str],
 ) -> SpawnChildrenResult:
-    """Allocate deterministic child IDs and enqueue Child Agent Workflows."""
+    """Allocate deterministic Child Agent IDs and enqueue Child Agents."""
     children = []
     for offset, task in enumerate(tasks):
-        child_workflow_id = next_child_workflow_id(parent_workflow_id, first_spawn_index + offset)
+        child_workflow_id = next_child_agent_id(parent_workflow_id, first_spawn_index + offset)
         metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=child_workflow_id)
         await enqueue_child_agent_workflow(
             root_workflow_id=root_workflow_id,
@@ -293,7 +293,7 @@ async def wait_for_children(
     """Synchronize direct children on First Observable Events."""
     ready_snapshots, still_running_ids, timed_out = await wait_for_direct_child_first_observable_events(
         parent_workflow_id=parent_workflow_id,
-        child_workflow_ids=[child["workflow_id"] for child in children],
+        child_agent_ids=[child["workflow_id"] for child in children],
         wait_all=wait_all,
         timeout_seconds=timeout_seconds,
     )
@@ -306,9 +306,9 @@ async def wait_for_children(
     )
 
 
-def next_child_workflow_id(parent_workflow_id: str, spawn_index: int) -> str:
-    """Return the deterministic Workflow Tree ID for a child sibling index."""
-    validate_workflow_id(parent_workflow_id)
+def next_child_agent_id(parent_workflow_id: str, spawn_index: int) -> str:
+    """Return the deterministic Child Agent ID for a sibling index."""
+    validate_agent_id(parent_workflow_id)
     if spawn_index < 1:
         raise ValueError("Child spawn index must start at 1")
     return f"{parent_workflow_id}-c{spawn_index:03d}"
