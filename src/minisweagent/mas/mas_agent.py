@@ -7,17 +7,15 @@ from inspect import isawaitable
 from typing import Any
 
 from minisweagent.exceptions import InterruptAgentFlow
+from minisweagent.mas import coordination
 from minisweagent.mas.artifacts import (
     make_artifact_metadata,
     save_trajectory_artifact,
     validate_root_workflow_id,
     validate_workflow_id,
 )
-from minisweagent.mas.authority import DirectChildAuthorityPolicy
 from minisweagent.mas.command_dispatch import MasCommandHandler
-from minisweagent.mas.command_results import MasCommandResultFormatter
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
-from minisweagent.mas.coordination import ChildCoordinator, DBOSCoordinationAdapter
 from minisweagent.mas.remote_lifecycle import (
     RemoteInteractiveAgentLifecycle,
 )
@@ -28,13 +26,12 @@ from minisweagent.mas.signals import (
     continuation_user_message,
     is_close_signal,
     is_continuation_signal,
-    make_close_signal,
-    make_continuation_signal,
 )
 
 from .status_events import LifecycleState
 
 _dbos = load_dbos()
+coordination._dbos = _dbos
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
 
 
@@ -43,54 +40,7 @@ async def _maybe_await(value):
 
 
 def _current_agent_workflow_id() -> str | None:
-    return _coordination_adapter().current_agent_workflow_id()
-
-
-def _coordination_adapter() -> DBOSCoordinationAdapter:
-    return DBOSCoordinationAdapter(
-        dbos_api=_dbos.DBOS,
-        child_agent_queue=child_agent_queue,
-        set_workflow_id=_dbos.SetWorkflowID,
-        child_agent_workflow=child_agent_workflow,
-    )
-
-
-def _child_coordinator() -> ChildCoordinator:
-    return ChildCoordinator(adapter=_coordination_adapter())
-
-
-async def _publish_status_snapshot(
-    *,
-    root_workflow_id: str,
-    workflow_id: str,
-    lifecycle_state: LifecycleState,
-    latest_submission: str = "",
-    latest_error: str = "",
-) -> None:
-    await _coordination_adapter().publish_status(
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
-        lifecycle_state=lifecycle_state,
-        latest_submission=latest_submission,
-        latest_error=latest_error,
-    )
-
-
-async def _publish_first_observable_event(
-    *,
-    root_workflow_id: str,
-    workflow_id: str,
-    lifecycle_state: LifecycleState,
-    latest_submission: str = "",
-    latest_error: str = "",
-) -> dict[str, str]:
-    return await _coordination_adapter().publish_first_observable(
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
-        lifecycle_state=lifecycle_state,
-        latest_submission=latest_submission,
-        latest_error=latest_error,
-    )
+    return coordination.current_workflow_id()
 
 
 async def _publish_first_observable_event_once(
@@ -105,7 +55,7 @@ async def _publish_first_observable_event_once(
     if agent.first_observable_published:
         return None
     agent.first_observable_published = True
-    return await _publish_first_observable_event(
+    return await coordination.publish_first_observable(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         lifecycle_state=lifecycle_state,
@@ -117,111 +67,12 @@ async def _publish_first_observable_event_once(
 async def _wait_for_parent_direction_signal() -> dict | str:
     """Keep the child workflow waiting until the parent sends an actual direction signal."""
     while True:
-        signal = await _coordination_adapter().receive_parent_direction(
+        signal = await coordination.receive_parent_direction(
             topic=PARENT_DIRECTION_TOPIC,
             timeout_seconds=PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
         )
         if signal is not None:
             return signal
-
-
-async def send_continuation_signal_async(
-    *,
-    source_workflow_id: str,
-    target_workflow_id: str,
-    content: str,
-    target_status: dict[str, Any],
-) -> dict[str, Any]:
-    """Send a continuation signal after Direct Child Authority Policy validation."""
-    signal = make_continuation_signal(
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=target_workflow_id,
-        content=content,
-    )
-    await _coordination_adapter().send_parent_direction(
-        target_workflow_id=target_workflow_id,
-        signal=signal,
-        topic=PARENT_DIRECTION_TOPIC,
-    )
-    result = MasCommandResultFormatter().continuation_sent(
-        mas_command=["continue", target_workflow_id, content],
-        target_workflow_id=target_workflow_id,
-        content=content,
-        target_status=target_status,
-        signal=signal,
-    )
-    result["ok"] = True
-    return result
-
-
-async def send_close_signal_async(
-    *,
-    source_workflow_id: str,
-    target_workflow_id: str,
-    target_status: dict[str, Any],
-) -> dict[str, Any]:
-    """Send a neutral close signal after Direct Child Authority Policy validation."""
-    signal = make_close_signal(
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=target_workflow_id,
-    )
-    await _coordination_adapter().send_parent_direction(
-        target_workflow_id=target_workflow_id,
-        signal=signal,
-        topic=PARENT_DIRECTION_TOPIC,
-    )
-    result = MasCommandResultFormatter().close_sent(
-        mas_command=["close", target_workflow_id],
-        target_workflow_id=target_workflow_id,
-        target_status=target_status,
-        signal=signal,
-    )
-    result["ok"] = True
-    return result
-
-
-async def _query_direct_child_statuses(parent_workflow_id: str) -> list[dict[str, Any]]:
-    return await _coordination_adapter().query_direct_child_statuses(parent_workflow_id)
-
-
-async def _query_direct_child_status(parent_workflow_id: str, child_workflow_id: str) -> dict[str, Any] | None:
-    return await _coordination_adapter().query_direct_child_status(
-        parent_workflow_id=parent_workflow_id,
-        child_workflow_id=child_workflow_id,
-    )
-
-
-async def _send_continuation_signal_for_handler(
-    source_workflow_id: str, target_workflow_id: str, content: str, target_status: dict[str, Any]
-) -> dict[str, Any]:
-    return await send_continuation_signal_async(
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=target_workflow_id,
-        content=content,
-        target_status=target_status,
-    )
-
-
-async def _send_close_signal_for_handler(
-    source_workflow_id: str, target_workflow_id: str, target_status: dict[str, Any]
-) -> dict[str, Any]:
-    return await send_close_signal_async(
-        source_workflow_id=source_workflow_id,
-        target_workflow_id=target_workflow_id,
-        target_status=target_status,
-    )
-
-
-def _make_mas_command_handler() -> MasCommandHandler:
-    authority_policy = DirectChildAuthorityPolicy(query_direct_child_status=_query_direct_child_status)
-    return MasCommandHandler(
-        current_workflow_id=_current_agent_workflow_id,
-        query_direct_child_statuses=_query_direct_child_statuses,
-        authority_policy=authority_policy,
-        child_coordinator=_child_coordinator(),
-        send_continuation_signal=_send_continuation_signal_for_handler,
-        send_close_signal=_send_close_signal_for_handler,
-    )
 
 
 def _reject_mas_shell_composition(classification: MasCommandClassification) -> dict:
@@ -249,24 +100,15 @@ async def _execute_agent_workflow_outputs(
     *,
     message: dict,
     env,
-    spawn_index: int = 0,
-    existing_child_workflow_ids: set[str] | None = None,
+    command_handler: MasCommandHandler,
 ) -> list[dict]:
     """Execute bash-shaped Agent Workflow actions with workflow-layer MAS interception."""
     outputs = []
-    existing_child_workflow_ids = existing_child_workflow_ids if existing_child_workflow_ids is not None else set()
-    command_handler = _make_mas_command_handler()
-    current_spawn_index = spawn_index
     for action in message.get("extra", {}).get("actions", []):
         classification = classify_mas_command(action.get("command", ""))
         if classification.kind == MasCommandKind.STANDALONE:
-            output = await command_handler.execute(
-                classification,
-                spawn_index=current_spawn_index + 1,
-                existing_child_workflow_ids=existing_child_workflow_ids,
-            )
+            output = await command_handler.execute(classification)
             outputs.append(output)
-            current_spawn_index += output.get("extra", {}).get("spawned_child_count", 0)
         elif classification.kind == MasCommandKind.INVALID:
             outputs.append(_reject_mas_shell_composition(classification))
         else:
@@ -274,16 +116,20 @@ async def _execute_agent_workflow_outputs(
     return outputs
 
 
-async def execute_agent_workflow_actions(*, message: dict, model, env, template_vars: dict | None = None) -> list[dict]:
+async def execute_agent_workflow_actions(
+    *,
+    message: dict,
+    model,
+    env,
+    template_vars: dict | None = None,
+    command_handler: MasCommandHandler | None = None,
+) -> list[dict]:
     """Execute one model message and return model-specific observation messages."""
     template_vars = template_vars or {}
-    child_workflow_ids = template_vars.get("existing_child_workflow_ids", set())
-    existing_ids = child_workflow_ids if isinstance(child_workflow_ids, set) else set(child_workflow_ids)
     outputs = await _execute_agent_workflow_outputs(
         message=message,
         env=env,
-        spawn_index=template_vars.get("spawn_index", 0),
-        existing_child_workflow_ids=existing_ids,
+        command_handler=command_handler or MasCommandHandler(),
     )
     return model.format_observation_messages(message, outputs, template_vars)
 
@@ -348,9 +194,8 @@ class MasAgent:
         self.messages: list[dict] = []
         self.cost = 0.0
         self.n_calls = 0
-        self.spawn_count = 0
         self.first_observable_published = False
-        self.spawned_child_workflow_ids: set[str] = set()
+        self.command_handler = MasCommandHandler()
         self.remote_lifecycle = RemoteInteractiveAgentLifecycle(
             root_workflow_id=root_workflow_id,
             workflow_id=workflow_id,
@@ -427,11 +272,9 @@ class MasAgent:
             model=self.model,
             env=self.env,
             template_vars=self.get_template_vars(),
+            command_handler=self.command_handler,
         )
         self.add_messages(*observations)
-        self.spawn_count += sum(
-            observation.get("extra", {}).get("spawned_child_count", 0) for observation in observations
-        )
         return observations
 
     def add_messages(self, *messages: dict) -> list[dict]:
@@ -450,8 +293,6 @@ class MasAgent:
             "model_cost": self.cost,
             "root_workflow_id": self.root_workflow_id,
             "workflow_id": self.workflow_id,
-            "spawn_index": self.spawn_count,
-            "existing_child_workflow_ids": self.spawned_child_workflow_ids,
         }
         data |= kwargs
         return data
@@ -480,7 +321,7 @@ class MasAgent:
         latest_submission: str = "",
         latest_error: str = "",
     ) -> None:
-        await _publish_status_snapshot(
+        await coordination.publish_status(
             root_workflow_id=self.root_workflow_id,
             workflow_id=self.workflow_id,
             lifecycle_state=lifecycle_state,

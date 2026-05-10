@@ -1,6 +1,6 @@
 # Simplify MAS command handling around DBOS workflow context
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 Type: AFK
 
@@ -117,24 +117,24 @@ Duplicate child enqueue behavior must be handled deliberately. Remove the proces
 
 ## Acceptance criteria
 
-- [ ] Each `MasAgent` instance owns one private `MasCommandHandler` instance.
-- [ ] `MasCommandHandler` is not a module-level singleton and does not use global mutable state.
-- [ ] `MasCommandHandler.execute(...)` accepts only the classified Standalone MAS Command and no longer accepts `spawn_index` or `existing_child_workflow_ids`.
-- [ ] The agent action loop no longer passes current workflow callbacks, query callbacks, authority policy objects, child coordinator objects, continuation sender callbacks, or close sender callbacks into command execution.
-- [ ] `MasCommandHandler` maintains a handler-local `next_spawn_index` cursor and uses it only for deterministic spawn allocation.
-- [ ] Spawned child workflow IDs are generated inside spawn coordination from `DBOS.workflow_id` plus the handler-local spawn cursor.
-- [ ] `status`, `wait`, `continue`, and `close` still get their target child workflow IDs from command arguments and still validate Direct Child Authority Policy.
-- [ ] Child workflow allocation does not use `max(existing children) + 1` or any DBOS status/query result as the allocation cursor.
-- [ ] `existing_child_workflow_ids` is removed from the command execution path.
-- [ ] `coordination.py` exposes module-level DBOS workflow-control functions and command handling no longer requires `DBOSCoordinationAdapter` or `ChildCoordinator` construction.
-- [ ] `authority.py` no longer requires direct-child status query callback injection.
-- [ ] `MasAgent._publish_status` and first-observable publication call module-level coordination functions directly instead of routing through local pass-through wrappers.
-- [ ] Model query still runs through `query_model_step`.
-- [ ] Ordinary bash execution still runs through `execute_bash_step`.
-- [ ] Trajectory persistence still runs through DBOS step wrappers.
-- [ ] Spawn, wait, direct child status lookup, continuation send, close send, and parent-direction receive remain workflow-layer operations and are not moved into DBOS steps.
-- [ ] Non-standalone `mini-mas` shell compositions still return the existing model-visible correction and do not enter `execute_bash_step`.
-- [ ] Existing MAS command, authority, coordination, status-event, signal, runtime, and CLI behavior tests pass without weakening assertions.
+- [x] Each `MasAgent` instance owns one private `MasCommandHandler` instance.
+- [x] `MasCommandHandler` is not a module-level singleton and does not use global mutable state.
+- [x] `MasCommandHandler.execute(...)` accepts only the classified Standalone MAS Command and no longer accepts `spawn_index` or `existing_child_workflow_ids`.
+- [x] The agent action loop no longer passes current workflow callbacks, query callbacks, authority policy objects, child coordinator objects, continuation sender callbacks, or close sender callbacks into command execution.
+- [x] `MasCommandHandler` maintains a handler-local `next_spawn_index` cursor and uses it only for deterministic spawn allocation.
+- [x] Spawned child workflow IDs are generated inside spawn coordination from `DBOS.workflow_id` plus the handler-local spawn cursor.
+- [x] `status`, `wait`, `continue`, and `close` still get their target child workflow IDs from command arguments and still validate Direct Child Authority Policy.
+- [x] Child workflow allocation does not use `max(existing children) + 1` or any DBOS status/query result as the allocation cursor.
+- [x] `existing_child_workflow_ids` is removed from the command execution path.
+- [x] `coordination.py` exposes module-level DBOS workflow-control functions and command handling no longer requires `DBOSCoordinationAdapter` or `ChildCoordinator` construction.
+- [x] `authority.py` no longer requires direct-child status query callback injection.
+- [x] `MasAgent._publish_status` and first-observable publication call module-level coordination functions directly instead of routing through local pass-through wrappers.
+- [x] Model query still runs through `query_model_step`.
+- [x] Ordinary bash execution still runs through `execute_bash_step`.
+- [x] Trajectory persistence still runs through DBOS step wrappers.
+- [x] Spawn, wait, direct child status lookup, continuation send, close send, and parent-direction receive remain workflow-layer operations and are not moved into DBOS steps.
+- [x] Non-standalone `mini-mas` shell compositions still return the existing model-visible correction and do not enter `execute_bash_step`.
+- [x] Existing MAS command, authority, coordination, status-event, signal, runtime, and CLI behavior tests pass without weakening assertions.
 
 ## Blocked by
 
@@ -143,6 +143,24 @@ None - can start immediately.
 ## Comments
 
 > *This was generated by AI during triage.*
+
+> *This was generated by AI during execution.*
+>
+> Implemented the DBOS context simplification for Standalone MAS Command handling:
+> - `MasAgent` now constructs and owns one private `MasCommandHandler` instance for the Agent Workflow lifetime.
+> - `MasCommandHandler.execute(...)` now accepts only the classified Standalone MAS Command. The old caller-provided `spawn_index`, `existing_child_workflow_ids`, current workflow callbacks, query callbacks, authority policy object, child coordinator object, and signal callback dependencies were removed from command execution.
+> - `MasCommandHandler` now owns a handler-local `next_spawn_index` cursor and uses it to call module-level `coordination.spawn_children(...)` for deterministic child Workflow Tree ID allocation.
+> - `coordination.py` now exposes module-level workflow-control functions for current workflow lookup, status publication, first-observable publication, direct child status/metadata lookup, spawn, wait, parent-direction send, and parent-direction receive. Child workflow enqueue lazily imports `mas_agent` to avoid a top-level circular import.
+> - `DirectChildAuthorityPolicy` now has no constructor-injected direct-child status lookup callback and validates explicit targets through `coordination.query_direct_child_status(...)`.
+> - `MasAgent` status publication, first-observable publication, and parent-direction receive now call module-level coordination functions directly, while model queries, ordinary bash execution, and trajectory persistence remain DBOS steps.
+> - Removed the process-local `existing_child_workflow_ids` replay path. Local DBOS source inspection found precise queue deduplication and conflicting workflow errors, but no broad exception swallowing was added because the removed set was not a precise DBOS duplicate-workflow handler.
+>
+> Verification:
+> - `uv run --python 3.11 pytest tests/run/test_mini_mas.py -q` passed: 105 passed.
+> - `uv run --python 3.11 --extra dev ruff check` passed.
+> - `uv run --python 3.11 pytest tests -q` passed: 624 passed, 33 skipped, 1 warning.
+> - `git diff --check` passed.
+> - `make lint`, `make test-backend`, and `make test-frontend` were not run because this checkout has no `Makefile`.
 
 ## Agent Brief
 
@@ -165,24 +183,24 @@ DBOS workflow-control operations such as spawn, wait, direct child status lookup
 - Child workflow enqueue behavior — should handle only the precise duplicate deterministic workflow case confirmed from the local DBOS source/tests, without swallowing broad exceptions.
 
 **Acceptance criteria:**
-- [ ] Each `MasAgent` instance owns one private `MasCommandHandler` instance.
-- [ ] `MasCommandHandler` is not a module-level singleton and does not use global mutable state.
-- [ ] `MasCommandHandler.execute(...)` accepts only the classified Standalone MAS Command and no longer accepts `spawn_index` or `existing_child_workflow_ids`.
-- [ ] The agent action loop no longer passes current workflow callbacks, query callbacks, authority policy objects, child coordinator objects, continuation sender callbacks, or close sender callbacks into command execution.
-- [ ] `MasCommandHandler` maintains a handler-local `next_spawn_index` cursor and uses it only for deterministic spawn allocation.
-- [ ] Spawned child workflow IDs are generated inside spawn coordination from `DBOS.workflow_id` plus the handler-local spawn cursor.
-- [ ] `status`, `wait`, `continue`, and `close` still get their target child workflow IDs from command arguments and still validate Direct Child Authority Policy.
-- [ ] Child workflow allocation does not use `max(existing children) + 1` or any DBOS status/query result as the allocation cursor.
-- [ ] `existing_child_workflow_ids` is removed from the command execution path.
-- [ ] Coordination code exposes module-level DBOS workflow-control functions and command handling no longer requires `DBOSCoordinationAdapter` or `ChildCoordinator` construction.
-- [ ] Authority code no longer requires direct-child status query callback injection.
-- [ ] `MasAgent` status publication and first-observable publication call module-level coordination functions directly instead of routing through local pass-through wrappers.
-- [ ] Model query still runs through `query_model_step`.
-- [ ] Ordinary bash execution still runs through `execute_bash_step`.
-- [ ] Trajectory persistence still runs through DBOS step wrappers.
-- [ ] Spawn, wait, direct child status lookup, continuation send, close send, and parent-direction receive remain workflow-layer operations and are not moved into DBOS steps.
-- [ ] Non-standalone `mini-mas` shell compositions still return the existing model-visible correction and do not enter `execute_bash_step`.
-- [ ] Existing MAS command, authority, coordination, status-event, signal, runtime, and CLI behavior tests pass without weakening assertions.
+- [x] Each `MasAgent` instance owns one private `MasCommandHandler` instance.
+- [x] `MasCommandHandler` is not a module-level singleton and does not use global mutable state.
+- [x] `MasCommandHandler.execute(...)` accepts only the classified Standalone MAS Command and no longer accepts `spawn_index` or `existing_child_workflow_ids`.
+- [x] The agent action loop no longer passes current workflow callbacks, query callbacks, authority policy objects, child coordinator objects, continuation sender callbacks, or close sender callbacks into command execution.
+- [x] `MasCommandHandler` maintains a handler-local `next_spawn_index` cursor and uses it only for deterministic spawn allocation.
+- [x] Spawned child workflow IDs are generated inside spawn coordination from `DBOS.workflow_id` plus the handler-local spawn cursor.
+- [x] `status`, `wait`, `continue`, and `close` still get their target child workflow IDs from command arguments and still validate Direct Child Authority Policy.
+- [x] Child workflow allocation does not use `max(existing children) + 1` or any DBOS status/query result as the allocation cursor.
+- [x] `existing_child_workflow_ids` is removed from the command execution path.
+- [x] Coordination code exposes module-level DBOS workflow-control functions and command handling no longer requires `DBOSCoordinationAdapter` or `ChildCoordinator` construction.
+- [x] Authority code no longer requires direct-child status query callback injection.
+- [x] `MasAgent` status publication and first-observable publication call module-level coordination functions directly instead of routing through local pass-through wrappers.
+- [x] Model query still runs through `query_model_step`.
+- [x] Ordinary bash execution still runs through `execute_bash_step`.
+- [x] Trajectory persistence still runs through DBOS step wrappers.
+- [x] Spawn, wait, direct child status lookup, continuation send, close send, and parent-direction receive remain workflow-layer operations and are not moved into DBOS steps.
+- [x] Non-standalone `mini-mas` shell compositions still return the existing model-visible correction and do not enter `execute_bash_step`.
+- [x] Existing MAS command, authority, coordination, status-event, signal, runtime, and CLI behavior tests pass without weakening assertions.
 
 **Out of scope:**
 - Changing MAS command syntax or adding new MAS commands.

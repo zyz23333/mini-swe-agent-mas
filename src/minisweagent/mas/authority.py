@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from minisweagent.mas import coordination
 from minisweagent.mas.artifacts import validate_workflow_id
 
 from .status_events import root_id_for_workflow
-
-DirectChildStatusLookup = Callable[[str, str], Awaitable[dict[str, Any] | None]]
 
 
 @dataclass(frozen=True)
@@ -57,9 +55,6 @@ AuthorityResult = AuthorizedChild | AuthorityCommandError
 class DirectChildAuthorityPolicy:
     """Fixed MVP authority policy for explicit direct Child Agent Workflow targets."""
 
-    def __init__(self, *, query_direct_child_status: DirectChildStatusLookup) -> None:
-        self.query_direct_child_status = query_direct_child_status
-
     async def require_direct_child(self, parent_workflow_id: str, target_workflow_id: str) -> AuthorityResult:
         parent_workflow_id = validate_workflow_id(parent_workflow_id)
         target_workflow_id = validate_workflow_id(target_workflow_id)
@@ -69,7 +64,10 @@ class DirectChildAuthorityPolicy:
         if target_workflow_id == root_id_for_workflow(parent_workflow_id):
             return _cannot_target_root_workflow("coordinate")
 
-        snapshot = await self.query_direct_child_status(parent_workflow_id, target_workflow_id)
+        snapshot = await coordination.query_direct_child_status(
+            parent_workflow_id=parent_workflow_id,
+            child_workflow_id=target_workflow_id,
+        )
         if snapshot is None:
             return _workflow_not_direct_child(parent_workflow_id, target_workflow_id)
         return AuthorizedChild(snapshot=snapshot)
