@@ -172,8 +172,9 @@ def test_model_bash_and_trajectory_operations_are_registered_as_dbos_steps():
 
     assert "query_model_step" in dbos_module.registered_steps
     assert "execute_bash_step" in dbos_module.registered_steps
-    assert "save_root_trajectory_artifact_step" in dbos_module.registered_steps
-    assert "save_child_trajectory_artifact_step" in dbos_module.registered_steps
+    assert "save_trajectory_artifact_step" in dbos_module.registered_steps
+    assert "save_root_trajectory_artifact_step" not in dbos_module.registered_steps
+    assert "save_child_trajectory_artifact_step" not in dbos_module.registered_steps
 
 def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypatch, tmp_path):
     import minisweagent.mas.mas_agent as workflows

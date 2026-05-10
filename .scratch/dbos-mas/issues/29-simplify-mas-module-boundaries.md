@@ -1,6 +1,6 @@
 # Simplify MAS module boundaries
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 Type: AFK
 
@@ -20,22 +20,22 @@ The refactor should make the MAS implementation easier to read by reducing indir
 
 ## Acceptance criteria
 
-- [ ] `src/minisweagent/mas/remote_lifecycle.py` is removed or reduced to a compatibility shim with no behavior-owning logic.
-- [ ] `MasAgent` still handles a Child Agent Workflow submission by publishing `waiting_for_parent`, publishing the first parent-actionable observable event once, saving the trajectory, waiting for parent direction, continuing on a Continuation Signal, and closing neutrally on a Close Signal.
-- [ ] Continuation still becomes a normal user message in the existing child trajectory with the existing MAS continuation metadata.
-- [ ] Failed and limits-exceeded child terminal states still publish parent-observable events exactly as before.
-- [ ] The separate root and child trajectory artifact DBOS step wrappers are replaced by one trajectory persistence step wrapper.
-- [ ] Root and child Agent Workflows still save the same trajectory artifact paths and return the same artifact metadata.
-- [ ] Model query still runs through `query_model_step`.
-- [ ] Ordinary bash execution still runs through `execute_bash_step`.
-- [ ] Trajectory persistence still runs through a DBOS step.
-- [ ] DBOS workflow-control operations such as spawn, wait, status lookup, continuation send, close send, first-observable wait, and parent-direction receive remain in async workflow-layer code and are not moved into DBOS steps.
-- [ ] MAS command classification still rejects non-standalone `mini-mas` shell compositions before ordinary bash execution.
-- [ ] Standalone MAS Command execution still supports the existing `status`, `spawn`, `wait`, `continue`, and `close` behavior.
-- [ ] Direct Child Authority Policy behavior is preserved: a Parent Agent Workflow can observe, wait for, continue, and close only direct Child Agent Workflows, and `continue`/`close` require `waiting_for_parent`.
-- [ ] Command success and error results keep the existing model-visible `output`, `returncode`, `exception_info`, and `extra` shape.
-- [ ] The command consolidation does not introduce a registry, plugin system, generic backend abstraction, or new command fallback path.
-- [ ] Existing MAS command, authority, coordination, status-event, parent-direction, runtime, CLI, and workflow tests pass without weakening assertions.
+- [x] `src/minisweagent/mas/remote_lifecycle.py` is removed or reduced to a compatibility shim with no behavior-owning logic.
+- [x] `MasAgent` still handles a Child Agent Workflow submission by publishing `waiting_for_parent`, publishing the first parent-actionable observable event once, saving the trajectory, waiting for parent direction, continuing on a Continuation Signal, and closing neutrally on a Close Signal.
+- [x] Continuation still becomes a normal user message in the existing child trajectory with the existing MAS continuation metadata.
+- [x] Failed and limits-exceeded child terminal states still publish parent-observable events exactly as before.
+- [x] The separate root and child trajectory artifact DBOS step wrappers are replaced by one trajectory persistence step wrapper.
+- [x] Root and child Agent Workflows still save the same trajectory artifact paths and return the same artifact metadata.
+- [x] Model query still runs through `query_model_step`.
+- [x] Ordinary bash execution still runs through `execute_bash_step`.
+- [x] Trajectory persistence still runs through a DBOS step.
+- [x] DBOS workflow-control operations such as spawn, wait, status lookup, continuation send, close send, first-observable wait, and parent-direction receive remain in async workflow-layer code and are not moved into DBOS steps.
+- [x] MAS command classification still rejects non-standalone `mini-mas` shell compositions before ordinary bash execution.
+- [x] Standalone MAS Command execution still supports the existing `status`, `spawn`, `wait`, `continue`, and `close` behavior.
+- [x] Direct Child Authority Policy behavior is preserved: a Parent Agent Workflow can observe, wait for, continue, and close only direct Child Agent Workflows, and `continue`/`close` require `waiting_for_parent`.
+- [x] Command success and error results keep the existing model-visible `output`, `returncode`, `exception_info`, and `extra` shape.
+- [x] The command consolidation does not introduce a registry, plugin system, generic backend abstraction, or new command fallback path.
+- [x] Existing MAS command, authority, coordination, status-event, parent-direction, runtime, CLI, and workflow tests pass without weakening assertions.
 
 ## Blocked by
 
@@ -85,22 +85,22 @@ The implementation should remain behavior-compatible while becoming easier for a
 - Model-visible command results — must keep the existing `output`, `returncode`, `exception_info`, and `extra` shape for success and error cases.
 
 **Acceptance criteria:**
-- [ ] The Remote Interactive Agent lifecycle behavior is owned by `MasAgent` private methods or equivalent local Agent Workflow code, with no separate behavior-owning lifecycle module remaining.
-- [ ] A Child Agent Workflow submission still publishes `waiting_for_parent`, publishes the first parent-actionable observable event exactly once, saves the trajectory, waits for parent direction, resumes on a Continuation Signal, and closes neutrally on a Close Signal.
-- [ ] Continuation still becomes a normal user message in the existing child trajectory with the existing MAS continuation metadata.
-- [ ] Failed and limits-exceeded child terminal states still publish parent-observable events exactly as before.
-- [ ] Root and child trajectory artifact persistence use one DBOS step wrapper that accepts both `root_workflow_id` and `workflow_id`.
-- [ ] Root and child Agent Workflows still save the same trajectory artifact paths and return the same artifact metadata as before.
-- [ ] Model query still runs through `query_model_step`.
-- [ ] Ordinary bash execution still runs through `execute_bash_step`.
-- [ ] Trajectory persistence still runs through a DBOS step.
-- [ ] DBOS workflow-control operations such as spawn, wait, status lookup, continuation send, close send, first-observable wait, and parent-direction receive remain in async workflow-layer code and are not moved into DBOS steps.
-- [ ] MAS command classification still rejects non-standalone `mini-mas` shell compositions before ordinary bash execution.
-- [ ] Standalone MAS Command execution still supports the existing `status`, `spawn`, `wait`, `continue`, and `close` behavior.
-- [ ] Direct Child Authority Policy behavior is preserved: a Parent Agent Workflow can observe, wait for, continue, and close only direct Child Agent Workflows, and `continue`/`close` require `waiting_for_parent`.
-- [ ] Command success and error results keep the existing model-visible `output`, `returncode`, `exception_info`, and `extra` shape.
-- [ ] The command consolidation does not introduce a registry, plugin system, generic backend abstraction, or new command fallback path.
-- [ ] Existing MAS command, authority, coordination, status-event, parent-direction, runtime, CLI, and workflow tests pass without weakening assertions.
+- [x] The Remote Interactive Agent lifecycle behavior is owned by `MasAgent` private methods or equivalent local Agent Workflow code, with no separate behavior-owning lifecycle module remaining.
+- [x] A Child Agent Workflow submission still publishes `waiting_for_parent`, publishes the first parent-actionable observable event exactly once, saves the trajectory, waits for parent direction, resumes on a Continuation Signal, and closes neutrally on a Close Signal.
+- [x] Continuation still becomes a normal user message in the existing child trajectory with the existing MAS continuation metadata.
+- [x] Failed and limits-exceeded child terminal states still publish parent-observable events exactly as before.
+- [x] Root and child trajectory artifact persistence use one DBOS step wrapper that accepts both `root_workflow_id` and `workflow_id`.
+- [x] Root and child Agent Workflows still save the same trajectory artifact paths and return the same artifact metadata as before.
+- [x] Model query still runs through `query_model_step`.
+- [x] Ordinary bash execution still runs through `execute_bash_step`.
+- [x] Trajectory persistence still runs through a DBOS step.
+- [x] DBOS workflow-control operations such as spawn, wait, status lookup, continuation send, close send, first-observable wait, and parent-direction receive remain in async workflow-layer code and are not moved into DBOS steps.
+- [x] MAS command classification still rejects non-standalone `mini-mas` shell compositions before ordinary bash execution.
+- [x] Standalone MAS Command execution still supports the existing `status`, `spawn`, `wait`, `continue`, and `close` behavior.
+- [x] Direct Child Authority Policy behavior is preserved: a Parent Agent Workflow can observe, wait for, continue, and close only direct Child Agent Workflows, and `continue`/`close` require `waiting_for_parent`.
+- [x] Command success and error results keep the existing model-visible `output`, `returncode`, `exception_info`, and `extra` shape.
+- [x] The command consolidation does not introduce a registry, plugin system, generic backend abstraction, or new command fallback path.
+- [x] Existing MAS command, authority, coordination, status-event, parent-direction, runtime, CLI, and workflow tests pass without weakening assertions.
 
 **Out of scope:**
 - Changing MAS command syntax.
@@ -109,3 +109,20 @@ The implementation should remain behavior-compatible while becoming easier for a
 - Introducing broader authority scopes, Authority Grants, subtree-wide authority, Root Agent Workflow tree-wide authority, or external operator authority.
 - Moving model calls, ordinary bash execution, or trajectory persistence out of DBOS steps.
 - Adding Workspace Isolation, Operation Ledger behavior, cancellation, retries, or new DBOS behavior.
+
+> *This was generated by AI during execution.*
+>
+> Completed the behavior-preserving MAS module-boundary simplification.
+>
+> - Removed `src/minisweagent/mas/remote_lifecycle.py`; submitted-child waiting, First Observable Event publication, trajectory save, parent-direction receive, Continuation Signal resume, and neutral Close Signal handling are now straightforward private methods on `MasAgent`.
+> - Replaced `save_root_trajectory_artifact_step` and `save_child_trajectory_artifact_step` with a single `save_trajectory_artifact_step(root_workflow_id, workflow_id, ...)` DBOS step. Root and child workflows still save through the same artifact path helper and return the same metadata shape.
+> - Consolidated MAS command classification, subcommand parsing, dispatch, direct-child authority checks, and model-visible result formatting into `src/minisweagent/mas/commands.py`; removed `command_dispatch.py` and `command_results.py`.
+> - Preserved DBOS workflow-control boundaries: spawn, wait, status lookup, continuation send, close send, first-observable wait, and parent-direction receive remain in async workflow-layer coordination code, not DBOS steps.
+>
+> Verification:
+> - `uv run pytest tests/mas/test_remote_lifecycle.py tests/mas/test_mas_agent_workflows.py::test_model_bash_and_trajectory_operations_are_registered_as_dbos_steps tests/mas/test_command_dispatch.py tests/mas/test_command_results.py -q` passed after first failing for the expected old module boundaries.
+> - `uv run pytest tests/mas -q` passed: 107 passed.
+> - `uv run ruff check src/minisweagent/mas tests/mas` passed.
+> - `uv run pytest tests -q` passed: 626 passed, 33 skipped, 1 warning.
+> - `uv run ruff check` passed.
+> - `make lint`, `make test-backend`, and `make test-frontend` were not run because this repository has no `Makefile`.

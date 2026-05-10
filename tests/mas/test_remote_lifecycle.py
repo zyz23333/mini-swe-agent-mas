@@ -1,5 +1,3 @@
-from unittest.mock import Mock
-
 from minisweagent.mas.signals import (
     continuation_user_message,
     is_close_signal,
@@ -8,19 +6,19 @@ from minisweagent.mas.signals import (
 )
 
 
-def test_remote_interactive_lifecycle_is_isolated_from_mas_agent_loop():
+def test_remote_interactive_lifecycle_behavior_is_owned_by_mas_agent():
     import minisweagent.mas.mas_agent as workflows
-    import minisweagent.mas.remote_lifecycle as remote_lifecycle
 
-    lifecycle = remote_lifecycle.RemoteInteractiveAgentLifecycle(
-        root_workflow_id="mas-0123456789abcdef",
-        workflow_id="mas-0123456789abcdef-c001",
-    )
+    try:
+        import minisweagent.mas.remote_lifecycle as remote_lifecycle
+    except ModuleNotFoundError:
+        remote_lifecycle = None
+
     agent = workflows.MasAgent(
         root_workflow_id="mas-0123456789abcdef",
         workflow_id="mas-0123456789abcdef-c001",
-        model=Mock(),
-        env=Mock(),
+        model=None,
+        env=None,
         step_limit=3,
     )
 
@@ -30,14 +28,31 @@ def test_remote_interactive_lifecycle_is_isolated_from_mas_agent_loop():
         content="continue",
     )
 
-    assert agent.remote_lifecycle.root_workflow_id == "mas-0123456789abcdef"
-    assert agent.remote_lifecycle.workflow_id == "mas-0123456789abcdef-c001"
+    assert not hasattr(agent, "remote_lifecycle")
+    assert callable(agent._should_wait_for_parent_after_submission)
+    assert callable(agent._wait_for_parent_after_submission)
+    assert callable(agent._close_after_parent_signal)
+    if remote_lifecycle is not None:
+        assert not hasattr(remote_lifecycle, "RemoteInteractiveAgentLifecycle")
     assert signal["target_workflow_id"] == "mas-0123456789abcdef-c001"
     assert is_continuation_signal({"signal_type": "mas_continuation"})
     assert is_close_signal({"signal_type": "mas_close"})
-    assert callable(lifecycle.wait_after_submission)
-    assert callable(lifecycle.close_after_parent_signal)
+
+    class MessageFormattingModel:
+        def format_message(self, *, role, content, extra):
+            return {"role": role, "content": content, "extra": extra}
+
     assert continuation_user_message(
-        Mock(format_message=Mock(return_value={"role": "user"})),
-        {"signal_type": "mas_continuation"},
-    ) == {"role": "user"}
+        MessageFormattingModel(),
+        {"signal_type": "mas_continuation", "content": "continue"},
+    ) == {
+        "role": "user",
+        "content": "continue",
+        "extra": {
+            "mas": {
+                "signal_type": "mas_continuation",
+                "source_workflow_id": "",
+                "target_workflow_id": "",
+            }
+        },
+    }

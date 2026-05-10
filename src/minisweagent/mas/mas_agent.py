@@ -14,10 +14,11 @@ from minisweagent.mas.artifacts import (
     validate_root_workflow_id,
     validate_workflow_id,
 )
-from minisweagent.mas.command_dispatch import MasCommandHandler
-from minisweagent.mas.commands import MasCommandClassification, MasCommandKind, classify_mas_command
-from minisweagent.mas.remote_lifecycle import (
-    RemoteInteractiveAgentLifecycle,
+from minisweagent.mas.commands import (
+    MasCommandClassification,
+    MasCommandHandler,
+    MasCommandKind,
+    classify_mas_command,
 )
 from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.signals import (
@@ -196,11 +197,6 @@ class MasAgent:
         self.n_calls = 0
         self.first_observable_published = False
         self.command_handler = MasCommandHandler()
-        self.remote_lifecycle = RemoteInteractiveAgentLifecycle(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
-            receive_parent_direction=_wait_for_parent_direction_signal,
-        )
 
     async def run(self, *, task: str = "", initial_messages: list[dict] | None = None) -> dict:
         """Run the MAS Agent Workflow until a terminal state or parent direction wait."""
@@ -221,7 +217,7 @@ class MasAgent:
             lifecycle_state = _lifecycle_state_for_terminal(result["terminal_state"])
             latest_error = _latest_error_for_terminal(result["terminal_state"], self.messages[-1])
 
-            if self.remote_lifecycle.should_wait_for_parent(result):
+            if self._should_wait_for_parent_after_submission(result):
                 waiting_result = await self._wait_for_parent_after_submission(result)
                 parent_direction_signal = waiting_result.get("parent_direction_signal")
                 if is_continuation_signal(parent_direction_signal):
@@ -336,18 +332,8 @@ class MasAgent:
         model_stats: dict | None = None,
         submission: str = "",
     ) -> dict[str, str]:
-        if self.workflow_id == self.root_workflow_id:
-            return await _maybe_await(
-                save_root_trajectory_artifact_step(
-                    self.root_workflow_id,
-                    status=status,
-                    messages=self.messages or None,
-                    model_stats=model_stats,
-                    submission=submission,
-                )
-            )
         return await _maybe_await(
-            save_child_trajectory_artifact_step(
+            save_trajectory_artifact_step(
                 self.root_workflow_id,
                 self.workflow_id,
                 status=status,
@@ -357,66 +343,49 @@ class MasAgent:
             )
         )
 
+    def _should_wait_for_parent_after_submission(self, result: dict[str, Any]) -> bool:
+        return self.workflow_id != self.root_workflow_id and result["terminal_state"] == "Submitted"
+
     async def _wait_for_parent_after_submission(self, result: dict[str, Any]) -> dict[str, Any]:
-        return await self.remote_lifecycle.wait_after_submission(
-            result,
-            publish_waiting_status=lambda lifecycle_state: self._publish_status(
-                lifecycle_state,
-                latest_submission=result["submission"],
-            ),
-            publish_first_observable=lambda lifecycle_state: _publish_first_observable_event_once(
-                self,
-                root_workflow_id=self.root_workflow_id,
-                workflow_id=self.workflow_id,
-                lifecycle_state=lifecycle_state,
-                latest_submission=result["submission"],
-            ),
-            save_trajectory=lambda status: self._save_trajectory(
-                status=status,
-                model_stats=result["model_stats"],
-                submission=result["submission"],
-            ),
+        waiting_result = {
+            **result,
+            "status": "waiting_for_parent",
+            "terminal_state": "waiting_for_parent",
+            "latest_submission": result["submission"],
+        }
+        await self._publish_status("waiting_for_parent", latest_submission=result["submission"])
+        await _publish_first_observable_event_once(
+            self,
+            root_workflow_id=self.root_workflow_id,
+            workflow_id=self.workflow_id,
+            lifecycle_state="waiting_for_parent",
+            latest_submission=result["submission"],
         )
+        await self._save_trajectory(
+            status="waiting_for_parent",
+            model_stats=result["model_stats"],
+            submission=result["submission"],
+        )
+        waiting_result["parent_direction_signal"] = await _wait_for_parent_direction_signal()
+        return waiting_result
 
     async def _close_after_parent_signal(self, waiting_result: dict[str, Any], submitted_result: dict[str, Any]) -> dict:
-        return await self.remote_lifecycle.close_after_parent_signal(
-            waiting_result,
-            publish_closed_status=lambda lifecycle_state: self._publish_status(
-                lifecycle_state,
-                latest_submission=submitted_result["submission"],
-            ),
-            save_trajectory=lambda status: self._save_trajectory(
-                status=status,
-                model_stats=submitted_result["model_stats"],
-                submission=submitted_result["submission"],
-            ),
+        closed_result = {
+            **waiting_result,
+            "status": "closed",
+            "terminal_state": "closed",
+        }
+        await self._publish_status("closed", latest_submission=submitted_result["submission"])
+        await self._save_trajectory(
+            status="closed",
+            model_stats=submitted_result["model_stats"],
+            submission=submitted_result["submission"],
         )
+        return closed_result
 
 
 @_dbos.DBOS.step()
-async def save_root_trajectory_artifact_step(
-    root_workflow_id: str,
-    *,
-    status: str = "started",
-    messages: list[dict] | None = None,
-    model_stats: dict | None = None,
-    submission: str = "",
-) -> dict[str, str]:
-    """Persist the Root Agent Workflow trajectory through a DBOS step."""
-    await asyncio.to_thread(
-        save_trajectory_artifact,
-        root_workflow_id=root_workflow_id,
-        workflow_id=root_workflow_id,
-        status=status,
-        messages=messages,
-        model_stats=model_stats,
-        submission=submission,
-    )
-    return make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=root_workflow_id)
-
-
-@_dbos.DBOS.step()
-async def save_child_trajectory_artifact_step(
+async def save_trajectory_artifact_step(
     root_workflow_id: str,
     workflow_id: str,
     *,
@@ -425,7 +394,7 @@ async def save_child_trajectory_artifact_step(
     model_stats: dict | None = None,
     submission: str = "",
 ) -> dict[str, str]:
-    """Persist a Child Agent Workflow trajectory through a DBOS step."""
+    """Persist any Agent Workflow trajectory through one DBOS checkpointed step."""
     await asyncio.to_thread(
         save_trajectory_artifact,
         root_workflow_id=root_workflow_id,

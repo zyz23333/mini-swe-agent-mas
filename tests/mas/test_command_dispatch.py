@@ -3,8 +3,7 @@ from unittest.mock import Mock
 
 
 def test_mas_command_handler_accepts_classified_standalone_command():
-    from minisweagent.mas.command_dispatch import MasCommandHandler
-    from minisweagent.mas.commands import classify_mas_command
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
 
     handler = MasCommandHandler()
 
@@ -22,9 +21,8 @@ def test_mas_command_handler_accepts_classified_standalone_command():
     }
 
 def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(monkeypatch):
-    import minisweagent.mas.command_dispatch as command_dispatch
-    from minisweagent.mas.command_dispatch import MasCommandHandler
-    from minisweagent.mas.commands import classify_mas_command
+    import minisweagent.mas.commands as commands
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
     from minisweagent.mas.coordination import ChildWaitResult, SpawnChildrenResult
 
     calls = []
@@ -74,9 +72,9 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(m
             wait_mode="all",
         )
 
-    monkeypatch.setattr(command_dispatch.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
-    monkeypatch.setattr(command_dispatch.coordination, "spawn_children", spawn_children)
-    monkeypatch.setattr(command_dispatch.coordination, "wait_for_children", wait_for_children)
+    monkeypatch.setattr(commands.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.coordination, "spawn_children", spawn_children)
+    monkeypatch.setattr(commands.coordination, "wait_for_children", wait_for_children)
     handler = MasCommandHandler()
 
     result = asyncio.run(
@@ -119,9 +117,8 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(m
     assert "workflow_id: mas-0123456789abcdef-c003" in second_result["output"]
 
 def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypatch):
-    import minisweagent.mas.command_dispatch as command_dispatch
-    from minisweagent.mas.command_dispatch import MasCommandHandler
-    from minisweagent.mas.commands import classify_mas_command
+    import minisweagent.mas.commands as commands
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
     from minisweagent.mas.coordination import ChildWaitResult
 
     calls = []
@@ -164,9 +161,9 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
             calls.append(("waiting", parent_workflow_id, target_workflow_id, command_name))
             return child_snapshot
 
-    monkeypatch.setattr(command_dispatch.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
-    monkeypatch.setattr(command_dispatch.coordination, "wait_for_children", wait_for_children)
-    monkeypatch.setattr(command_dispatch.coordination, "send_parent_direction", send_parent_direction)
+    monkeypatch.setattr(commands.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.coordination, "wait_for_children", wait_for_children)
+    monkeypatch.setattr(commands.coordination, "send_parent_direction", send_parent_direction)
 
     handler = MasCommandHandler(authority=RecordingAuthorityPolicy())
 
@@ -189,9 +186,8 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
     assert calls[5][0] == "send"
 
 def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
-    import minisweagent.mas.command_dispatch as command_dispatch
-    from minisweagent.mas.command_dispatch import MasCommandHandler
-    from minisweagent.mas.commands import classify_mas_command
+    import minisweagent.mas.commands as commands
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
     from minisweagent.mas.coordination import ChildWaitResult
 
     calls = []
@@ -238,9 +234,9 @@ def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
     async def forbidden_direct_statuses(parent_workflow_id):
         raise AssertionError("handler should use authority policy for no-target status")
 
-    monkeypatch.setattr(command_dispatch.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
-    monkeypatch.setattr(command_dispatch.coordination, "query_direct_child_statuses", forbidden_direct_statuses)
-    monkeypatch.setattr(command_dispatch.coordination, "wait_for_children", wait_for_children)
+    monkeypatch.setattr(commands.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.coordination, "query_direct_child_statuses", forbidden_direct_statuses)
+    monkeypatch.setattr(commands.coordination, "wait_for_children", wait_for_children)
 
     handler = MasCommandHandler(authority=ListingAuthorityPolicy())
 
@@ -263,7 +259,7 @@ def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
     ]
 
 def test_each_mas_agent_owns_private_command_handler():
-    from minisweagent.mas.command_dispatch import MasCommandHandler
+    from minisweagent.mas.commands import MasCommandHandler
     from minisweagent.mas.mas_agent import MasAgent
 
     first_agent = MasAgent(
@@ -291,7 +287,7 @@ def test_mas_command_handler_execute_signature_has_no_caller_context_dependencie
     import inspect
 
     from minisweagent.mas.authority import DirectChildAuthorityPolicy
-    from minisweagent.mas.command_dispatch import MasCommandHandler
+    from minisweagent.mas.commands import MasCommandHandler
 
     assert list(inspect.signature(MasCommandHandler.execute).parameters) == ["self", "classification"]
 
@@ -304,3 +300,9 @@ def test_mas_command_handler_execute_signature_has_no_caller_context_dependencie
     assert "send_close_signal" not in constructor_parameters
     handler = MasCommandHandler()
     assert isinstance(handler.authority, DirectChildAuthorityPolicy)
+
+def test_mas_command_behavior_is_consolidated_in_commands_module():
+    import minisweagent.mas.commands as commands
+
+    assert commands.MasCommandHandler.__module__ == "minisweagent.mas.commands"
+    assert commands.MasCommandResultFormatter.__module__ == "minisweagent.mas.commands"

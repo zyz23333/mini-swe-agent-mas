@@ -5,7 +5,7 @@ from .helpers import _child_metadata
 
 
 def test_mas_command_result_formatter_owns_success_and_error_shapes():
-    from minisweagent.mas.command_results import MasCommandResultFormatter
+    from minisweagent.mas.commands import MasCommandResultFormatter
     from minisweagent.mas.coordination import ChildWaitResult
 
     formatter = MasCommandResultFormatter()
