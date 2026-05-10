@@ -21,8 +21,12 @@ An **Agent** that delegates work to one or more **Child Agents**.
 _Avoid_: Master agent, orchestrator process
 
 **Root Agent**:
-The top-level **Agent** for a MAS run.
-_Avoid_: Main process, root process
+The top-level **Parent Agent** through which the **External MAS CLI** submits user-requested **Agent Interactions**.
+_Avoid_: Operator Agent, CLI Parent Agent, main process, root process
+
+**Interactive Root Agent**:
+A **Root Agent** that receives commands from the **External MAS CLI** and remains available as the parent authority context for its direct **Child Agents**.
+_Avoid_: ordinary root agent, terminal superuser, session process
 
 **Child Agent**:
 An **Agent** started by a **Parent Agent** to work on a delegated task.
@@ -33,12 +37,20 @@ An **Agent** recursively started below a **Root Agent**.
 _Avoid_: Nested process, recursive worker
 
 **Agent Tree**:
-The recursive parent-child structure formed by **Agents** in one MAS run.
+The recursive parent-child structure formed by **Agents** below one **Root Agent**.
 _Avoid_: Process tree
 
 **Agent ID**:
-A readable identifier that encodes an **Agent** position in its **Agent Tree**, such as `mas-a7f3c9d4e8b11234-c001-c002`.
-_Avoid_: Workflow Tree ID, random UUID, path
+A durable opaque identifier for one **Agent**.
+_Avoid_: Workflow Tree ID, path, tree position
+
+**Agent Metadata**:
+Self-describing identity and artifact information for one **Agent**.
+_Avoid_: Root index, role flags, mode flags
+
+**Spawn Index**:
+A Parent-Agent-local ordinal describing the order in which a **Child Agent** was spawned.
+_Avoid_: Agent ID segment, authority scope, global sequence
 
 **MAS Command**:
 A bash command beginning with `mini-mas` that an agent emits to request a MAS-governed **Agent Interaction**.
@@ -56,17 +68,25 @@ _Avoid_: Shell plugin, subprocess hook
 The real `mini-mas` command used outside an **Agent** to submit or inspect multi-agent work.
 _Avoid_: Internal mini-mas
 
+**Resume**:
+An **External MAS CLI** action that re-enters an existing **Interactive Root Agent**.
+_Avoid_: Attach, open, shell, connect
+
 **Remote Interactive Agent**:
 A **Child Agent** whose post-submission continuation is controlled by its **Parent Agent** instead of a local terminal user.
 _Avoid_: TTY agent, long-running worker
 
-**Interactive Root Agent**:
-A **Root Agent** whose next action is supplied by an external terminal user through DBOS messages instead of by a model query.
-_Avoid_: External shell controller, terminal superuser
-
 **Continuation Signal**:
 A parent-to-child message that asks a **Remote Interactive Agent** to continue working from its existing trajectory.
 _Avoid_: New task command, resume event
+
+**Root Command Signal**:
+An external-to-Root message carrying one bash-shaped command for an **Interactive Root Agent** to execute.
+_Avoid_: Parent direction signal, direct CLI execution
+
+**Root Command Result**:
+A command-id-scoped DBOS event containing the result of one **Root Command Signal**.
+_Avoid_: Reply signal, terminal stdout buffer
 
 **Close Signal**:
 A parent-to-child message that tells a **Remote Interactive Agent** that no further work is requested.
@@ -76,17 +96,21 @@ _Avoid_: Accept signal, abort signal
 A lightweight DBOS event that exposes a **Child Agent** lifecycle state to its parent.
 _Avoid_: Full telemetry, trajectory event
 
+**Waiting for Command**:
+An **Interactive Root Agent** lifecycle state meaning the Agent is idle and available for future **Resume**.
+_Avoid_: Closed, finished, waiting for parent
+
 **First Observable Event**:
 A lightweight DBOS event set by a **Child Agent** when it first reaches a parent-actionable state.
 _Avoid_: Child result, workflow result, parent message
 
 **Trajectory Artifact**:
-A JSON file containing the message history and run metadata for an **Agent**.
+A JSON file containing the message history and metadata for one **Agent**.
 _Avoid_: DBOS event log, mini-mas history
 
-**Run Directory**:
-The artifact directory scoped to one **Root Agent**.
-_Avoid_: Global history directory, log folder
+**Agent Artifact Directory**:
+The artifact directory scoped to one **Agent**.
+_Avoid_: Run Directory, root-scoped history directory, global history directory
 
 **Detached Spawn**:
 A **MAS Command** that starts one or more **Child Agents** from repeated task arguments and immediately returns their identifiers.
@@ -138,23 +162,54 @@ _Avoid_: Special case, bypass
 - The current MVP uses the **Direct Child Authority Policy** and does not include broader **Authority Grants**.
 - The **Root Agent** does not have special tree-wide **Authority** under the current **Direct Child Authority Policy**.
 - Future **Authority Models** may add broader **Authority Scopes** such as subtree-wide, tree-wide, or peer-to-peer governance.
-- A **Root Agent** owns one **Agent Tree**.
-- A **Descendant Agent** belongs to the same **Run Directory** as its **Root Agent**.
-- **Agent IDs** use the form `mas-<16hex>` for roots and append `-cNNN` segments for descendants.
+- A **Root Agent** owns one **Agent Tree** but does not have special tree-wide **Authority** beyond the current **Authority Model**.
+- A **Root Agent** is identified by having no **Parent Agent**, not by an `is_root` flag, a global root, or an index entry.
+- **Agent Artifacts** are scoped to individual **Agents**, not to **Root Agents** or runs.
+- **Agent IDs** use the `mas-<random-hex>` shape and do not encode root identity, parent identity, sibling order, or tree position.
+- **Agent Metadata** records stable Agent identity and artifact fields such as Agent ID, optional Parent Agent ID, optional Spawn Index, Agent Artifact Directory, and Trajectory Artifact path.
+- A **Spawn Index** may help display or audit sibling creation order, but it is not part of the **Agent ID** and does not grant **Authority**.
 - A **Standalone MAS Command** issued inside an **Agent** is handled through **MAS Command Interception**.
-- An **External MAS CLI** command is used outside an **Agent** and does not itself imply a parent-child relationship.
+- An **External MAS CLI** command is used outside an **Agent** and enters MAS governance through a **Root Agent**.
+- Every **External MAS CLI** entrypoint creates or addresses an **Interactive Root Agent**; there is no separate non-interactive Root Agent mode for CLI-submitted work.
+- `mini-mas` without a subcommand opens an **Interactive Root Agent** for terminal-driven commands.
+- `mini-mas` without a subcommand prints the new Root Agent metadata once before entering the command prompt.
+- `mini-mas spawn "task"` is a one-shot convenience form that creates an **Interactive Root Agent**, submits the initial spawn command through it, and returns the spawned **Child Agent** metadata.
+- One-shot `mini-mas spawn "task A" "task B"` creates one **Interactive Root Agent** and multiple direct **Child Agents** under it.
+- One-shot `mini-mas spawn` supports the same Detached Spawn and Waited Spawn options as workflow-layer `mini-mas spawn`.
+- One-shot `mini-mas spawn` output emphasizes the spawned **Child Agent** metadata and includes the Root Agent ID for later **Resume**, but does not show Root Agent artifact paths by default.
+- External `mini-mas status` discovers **Interactive Root Agents** by querying root workflows, not by reading an Agent-maintained index.
+- External `mini-mas status` lists **Interactive Root Agents** only and does not include Child Agent counts or Child Agent status.
+- External `mini-mas status` lists all parentless **Interactive Root Agents** in the first version rather than filtering to only active or resumable roots.
+- External `mini-mas status` does not include latest commands or history summaries; durable command history is read from **Trajectory Artifacts**.
+- `mini-mas resume <root-agent-id>` re-enters an existing **Interactive Root Agent**.
+- `mini-mas resume <root-agent-id>` prints the Root Agent metadata once before entering the command prompt.
+- `mini-mas resume <root-agent-id>` is allowed only when the **Interactive Root Agent** is **Waiting for Command** in the first version.
+- The implementation may distinguish **Interactive Root Agents** from other root workflows by workflow type/name instead of storing an interaction-mode flag in **Agent Metadata**.
 - Naked external/operator `status`, `wait`, `continue`, and `close` commands are not maintained as MAS governance authority paths in the current design.
 - A **Remote Interactive Agent** waits for either a **Continuation Signal** or a **Close Signal** after producing a submission.
+- An **Interactive Root Agent** remains available after one-shot spawn so later external commands can enter through the same parent authority context.
 - An **Interactive Root Agent** receives terminal user commands as agent actions and still follows the current **Authority Model**.
+- Detaching from an **Interactive Root Agent** terminal does not close the **Root Agent**; the **Root Agent** remains in **Waiting for Command** and can be resumed later.
+- An **Interactive Root Agent** supports at most one active terminal attachment in the first version.
+- A one-shot external command such as `mini-mas spawn` occupies the **Interactive Root Agent** attachment while its submitted command is running, then detaches after returning.
+- An **Interactive Root Agent** is `running` while executing ordinary bash or detached MAS commands, and `waiting_for_child` while executing `mini-mas wait` or `mini-mas spawn --wait`.
+- The **External MAS CLI** sends user commands to an **Interactive Root Agent** through **Root Command Signals**; the CLI does not execute the Root Agent's actions directly.
+- An **Interactive Root Agent** publishes each **Root Command Result** as a command-id-scoped event that the **External MAS CLI** waits on.
+- **Root Command Results** use the existing MAS Agent command result shape unless a future CLI protocol design introduces a narrower schema.
+- Explicit **Root Agent** closure and cleanup are deferred; the first version supports detach and resume, not `close-root`.
+- Terminal input inside an **Interactive Root Agent** follows the existing bash-shaped human command flow: standalone `mini-mas ...` commands are intercepted as **MAS Commands**, while ordinary bash commands execute as bash actions.
+- Terminal input inside an **Interactive Root Agent** does not add prefix-free MAS shorthand; MAS interactions use full standalone `mini-mas ...` commands.
+- Ordinary bash actions entered in an **Interactive Root Agent** are recorded in that Root Agent's **Trajectory Artifact**.
+- Interactive Root terminal history is not stored in a separate prompt-history file and does not reuse the existing `mini` prompt history; the Root Agent's **Trajectory Artifact** is the durable command history.
 - A **Close Signal** ends a **Remote Interactive Agent** without judging whether the child output was accepted or rejected.
 - A **Child Status Event** reports coarse lifecycle states such as `running`, `waiting_for_parent`, `closed`, `failed`, and `limits_exceeded`.
 - A **First Observable Event** is set when a **Child Agent** first reaches `waiting_for_parent`, `failed`, or `limits_exceeded`.
 - The MVP exposes lightweight child events such as `status`, `latest_submission`, and `latest_error`; full trajectory data remains outside DBOS events.
-- **Trajectory Artifacts** live under `.mini-mas/runs/<root-workflow-id>/trajectories/<workflow-id>.traj.json`.
-- `mini-mas status` and `mini-mas wait` return the exact **Trajectory Artifact** path and **Run Directory** for full history inspection.
+- **Trajectory Artifacts** live under **Agent Artifact Directories** keyed by **Agent ID**.
+- `mini-mas status` and `mini-mas wait` return the exact **Trajectory Artifact** path and **Agent Artifact Directory** for full history inspection.
 - Workflow-layer `mini-mas status`, `mini-mas wait`, `mini-mas continue`, and `mini-mas close` derive the current **Parent Agent** from `DBOS.workflow_id`.
 - Direct child scope is resolved from DBOS workflow metadata where `parent_workflow_id == DBOS.workflow_id`.
-- `root_workflow_id` is derived for artifact paths and display; it is not a status, wait, or control scope input.
+- Artifact paths are derived from **Agent IDs**, not from **Root Agents**, ancestor paths, or run identifiers.
 - `mini-mas status` without an **Agent ID** reports the current **Parent Agent**'s direct **Child Agents**, not the parent itself and not deeper descendants.
 - `mini-mas status <agent-id>` inspects one direct **Child Agent** and respects **Delegated Non-Transitive Authority**.
 - `mini-mas wait <agent-id>` waits for one direct **Child Agent** and respects **Delegated Non-Transitive Authority**.
@@ -190,17 +245,23 @@ _Avoid_: Special case, bypass
 > **Dev:** "Does `mini-mas spawn --wait` wait for child workflows to finish?"
 > **Domain expert:** "No. It waits for First Observable Events, so a child can submit and then keep waiting for a Continuation Signal or Close Signal."
 
+> **Dev:** "Does external one-shot `mini-mas spawn --wait` have different wait semantics?"
+> **Domain expert:** "No. It submits the same Waited Spawn through an Interactive Root Agent and keeps that Root Agent resumable afterward."
+
 > **Dev:** "If `mini-mas spawn --wait --timeout 30` times out, are the children stopped?"
 > **Domain expert:** "No. The timeout only ends the parent's current wait action; the started Child Agents keep running."
 
 > **Dev:** "How does one command start several children?"
 > **Domain expert:** "Use repeated task arguments, such as `mini-mas spawn \"inspect api\" \"write tests\"`; the command returns one Agent ID per child."
 
+> **Dev:** "Does external one-shot multi-spawn create multiple Root Agents?"
+> **Domain expert:** "No. It creates one Interactive Root Agent and multiple direct Child Agents under it."
+
 > **Dev:** "Can an agent write `mini-mas spawn ... && echo done`?"
 > **Domain expert:** "Not for the MVP. A MAS Command must be standalone to receive in-process interception."
 
 > **Dev:** "Where should a parent agent search for child history?"
-> **Domain expert:** "Use the exact Trajectory Artifact path returned by status or wait, scoped to the current Run Directory."
+> **Domain expert:** "Use the exact Trajectory Artifact path returned by status or wait; artifacts are scoped to Agents, not to Root Agents or runs."
 
 > **Dev:** "Can a parent agent directly continue a grandchild agent?"
 > **Domain expert:** "No. Under Delegated Non-Transitive Authority, the child agent of my child agent is not my child agent."
@@ -210,6 +271,78 @@ _Avoid_: Special case, bypass
 
 > **Dev:** "Does opening the MAS terminal give the user tree-wide control?"
 > **Domain expert:** "No. In the Interactive Root Agent model, terminal commands enter through the root agent, and the root agent follows the same Authority Model as any other Parent Agent."
+
+> **Dev:** "Is `mini-mas spawn \"task\"` a different Root Agent type from `mini-mas`?"
+> **Domain expert:** "No. Both enter through an Interactive Root Agent; one-shot spawn only submits the first spawn command automatically."
+
+> **Dev:** "What should plain `mini-mas` show before the first prompt?"
+> **Domain expert:** "It prints the new Root Agent metadata once, matching the resume banner."
+
+> **Dev:** "Inside an Interactive Root Agent, should the user type `status` or `mini-mas status`?"
+> **Domain expert:** "Use full standalone `mini-mas ...` commands; prefix-free shorthand is not part of the first version."
+
+> **Dev:** "Can an Interactive Root Agent run ordinary bash commands?"
+> **Domain expert:** "Yes. It follows the existing human command flow: standalone `mini-mas ...` is intercepted by MAS, and ordinary bash is executed as bash."
+
+> **Dev:** "Where is ordinary bash history from an Interactive Root Agent stored?"
+> **Domain expert:** "In the Root Agent's Trajectory Artifact, just like other human-entered actions and observations."
+
+> **Dev:** "Does the Interactive Root terminal keep a separate readline-style history file?"
+> **Domain expert:** "No. It does not reuse or create prompt-history files; durable command history lives in the Root Agent's Trajectory Artifact."
+
+> **Dev:** "How does external `mini-mas status` find roots?"
+> **Domain expert:** "It queries workflows with no Parent Agent and the Interactive Root Agent workflow type; Root is structural, not a metadata flag."
+
+> **Dev:** "Does external `mini-mas status` show child status?"
+> **Domain expert:** "No. It only lists resumable Interactive Root Agents; enter one with `resume` and run status there for direct children."
+
+> **Dev:** "Does external `mini-mas status` hide failed Root Agents?"
+> **Domain expert:** "No. The first version lists all parentless Interactive Root Agents and shows their lifecycle state."
+
+> **Dev:** "Does external `mini-mas status` summarize recent Root Agent commands?"
+> **Domain expert:** "No. It stays a Root Agent discovery view; command history lives in Trajectory Artifacts."
+
+> **Dev:** "How does a user get back to a Root Agent created by one-shot spawn?"
+> **Domain expert:** "Use `mini-mas resume <root-agent-id>` to re-enter that Interactive Root Agent."
+
+> **Dev:** "What should `resume` show before the prompt?"
+> **Domain expert:** "It prints the Root Agent metadata once, then enters the command prompt."
+
+> **Dev:** "Can a failed or currently-running Root Agent be resumed?"
+> **Domain expert:** "No. The first version only resumes Root Agents that are Waiting for Command."
+
+> **Dev:** "What state is a Root Agent in while running ordinary bash?"
+> **Domain expert:** "`running`; `waiting_for_command` means idle and resumable, while `waiting_for_child` is reserved for MAS waits."
+
+> **Dev:** "Does exiting the terminal close the Interactive Root Agent?"
+> **Domain expert:** "No. Exiting detaches from the terminal; the Root Agent remains Waiting for Command until resumed."
+
+> **Dev:** "Can two terminals resume the same Root Agent at once?"
+> **Domain expert:** "No. The first version supports at most one active terminal attachment per Interactive Root Agent."
+
+> **Dev:** "Can a user resume a Root Agent while one-shot spawn is still waiting?"
+> **Domain expert:** "No. One-shot spawn occupies the Root Agent attachment until its submitted command returns or times out."
+
+> **Dev:** "When a user types a command after resume, who executes it?"
+> **Domain expert:** "The CLI sends a Root Command Signal, and the Interactive Root Agent executes the bash-shaped action flow itself."
+
+> **Dev:** "How does the CLI receive the result of a Root command?"
+> **Domain expert:** "It waits for the command-id-scoped Root Command Result event published by the Interactive Root Agent."
+
+> **Dev:** "Does the Root Command Result define a new CLI payload schema?"
+> **Domain expert:** "No. It follows the existing MAS Agent command result shape until a future protocol design needs more detail."
+
+> **Dev:** "Can users close a Root Agent in the first version?"
+> **Domain expert:** "No. Root closure and cleanup are deferred; `close` remains a parent-to-child command."
+
+> **Dev:** "Does one-shot spawn print the Root Agent artifact path?"
+> **Domain expert:** "No. It prints the spawned Child Agent artifact path and the Root Agent ID needed for resume."
+
+> **Dev:** "How do we tell which sibling was spawned first if Agent IDs are random?"
+> **Domain expert:** "Use Spawn Index metadata for display or audit; do not encode sibling order in the Agent ID."
+
+> **Dev:** "Does the Root Agent ID determine where child artifacts are stored?"
+> **Domain expert:** "No. Root identifies the CLI entry Agent; each Agent owns its own artifact directory."
 
 ## Flagged Ambiguities
 
@@ -222,3 +355,5 @@ _Avoid_: Special case, bypass
 - "role" can sound like a fixed RBAC role. Resolved: use **Authority Model**, **Authority**, **Authority Scope**, and **Authority Grant** for MAS governance permissions.
 - "explicit Agent ID" can sound like a scope override. Resolved: explicit IDs in workflow-layer commands identify a target only; authority still comes from `DBOS.workflow_id` and DBOS `parent_workflow_id` metadata.
 - "external CLI" can sound like operator superuser access. Resolved: naked external/operator query and control paths are not maintained in the current design; future terminal control should enter through an **Interactive Root Agent**.
+- "root" can sound like artifact scope or tree-wide authority. Resolved: **Root Agent** is the top-level **Parent Agent** for CLI-submitted work, while artifacts are scoped per **Agent** and authority remains governed by the **Authority Model**.
+- "Agent metadata" can sound like a place for query flags. Resolved: root discovery uses workflow parent structure and workflow type; **Agent Metadata** stays limited to identity and artifact description.

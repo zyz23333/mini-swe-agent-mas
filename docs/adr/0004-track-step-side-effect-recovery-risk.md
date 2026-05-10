@@ -9,3 +9,7 @@ DBOS MAS must treat model calls and bash execution as external side effects whos
 **Candidate Mitigation**
 
 An Operation Ledger is a candidate mitigation for model and bash operations. It would give each logical operation a stable operation identifier and record whether that operation was started or completed before deciding whether recovery should reuse a recorded result, retry, or fail closed. The exact storage, schema, and recovery policy are intentionally left undecided.
+
+**Spawn Recovery Remains Undecided**
+
+Parent-local Spawn Index metadata should be stable enough for display and audit, but replay after a crash could duplicate child creation or assign later indexes unless spawn operations become ledgered. The current design records Spawn Index as metadata and intentionally defers exactly-once spawn recovery semantics to the broader recovery design.
