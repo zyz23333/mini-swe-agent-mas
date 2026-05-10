@@ -17,8 +17,8 @@ from .helpers import (
 )
 
 
-def test_coordination_module_owns_status_first_observable_wait_and_messages(monkeypatch):
-    import minisweagent.mas.coordination as coordination
+def test_agent_interactions_module_owns_status_first_observable_wait_and_messages(monkeypatch):
+    import minisweagent.mas.agent_interactions as agent_interactions
 
     dbos_api = Mock()
     published = []
@@ -58,33 +58,33 @@ def test_coordination_module_owns_status_first_observable_wait_and_messages(monk
     dbos_api.recv = Mock(side_effect=AssertionError("Adapter must use async message receive"))
     dbos_api.send = Mock(side_effect=AssertionError("Adapter must use async message send"))
 
-    monkeypatch.setattr(coordination._dbos, "DBOS", dbos_api)
+    monkeypatch.setattr(agent_interactions._dbos, "DBOS", dbos_api)
 
-    assert coordination.current_workflow_id() == "mas-0123456789abcdef"
+    assert agent_interactions.current_workflow_id() == "mas-0123456789abcdef"
     asyncio.run(
-        coordination.publish_status(
+        agent_interactions.publish_status(
             root_workflow_id="mas-0123456789abcdef",
             workflow_id="mas-0123456789abcdef",
             lifecycle_state="waiting_for_child",
         )
     )
     asyncio.run(
-        coordination.publish_first_observable(
+        agent_interactions.publish_first_observable(
             root_workflow_id="mas-0123456789abcdef",
             workflow_id="mas-0123456789abcdef-c001",
             lifecycle_state="waiting_for_parent",
         )
     )
     ready, still_running, timed_out = asyncio.run(
-        coordination.wait_for_first_observable_events(
+        agent_interactions.wait_for_first_observable_events(
             child_workflow_ids=["mas-0123456789abcdef-c001"],
             wait_all=False,
             timeout_seconds=0.25,
         )
     )
-    signal = asyncio.run(coordination.receive_parent_direction(topic=PARENT_DIRECTION_TOPIC, timeout_seconds=3))
+    signal = asyncio.run(agent_interactions.receive_parent_direction(topic=PARENT_DIRECTION_TOPIC, timeout_seconds=3))
     asyncio.run(
-        coordination.send_parent_direction(
+        agent_interactions.send_parent_direction(
             target_workflow_id="mas-0123456789abcdef-c001",
             signal={"type": "close"},
             topic=PARENT_DIRECTION_TOPIC,

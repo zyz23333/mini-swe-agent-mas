@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from minisweagent.mas import coordination
+from minisweagent.mas import agent_interactions
 from minisweagent.mas.artifacts import validate_workflow_id
-from minisweagent.mas.authority import AuthorityCommandError, CoordinationAuthorityPolicy, DirectChildAuthorityPolicy
-from minisweagent.mas.coordination import ChildWaitResult
+from minisweagent.mas.authority import AuthorityCommandError, AuthorityPolicy, DirectChildAuthorityPolicy
+from minisweagent.mas.agent_interactions import ChildWaitResult
 from minisweagent.mas.signals import PARENT_DIRECTION_TOPIC, make_close_signal, make_continuation_signal
 
 from .status_events import format_direct_child_statuses, format_specific_status, root_id_for_workflow
@@ -372,7 +372,7 @@ class MasCommandHandler:
     def __init__(
         self,
         *,
-        authority: CoordinationAuthorityPolicy | None = None,
+        authority: AuthorityPolicy | None = None,
         result_formatter: MasCommandResultFormatter | None = None,
     ) -> None:
         self.next_spawn_index = 1
@@ -439,7 +439,7 @@ class MasCommandHandler:
                 exception_info=str(exc),
                 mas_command_error="invalid_spawn_arguments",
             )
-        spawn_result = await coordination.spawn_children(
+        spawn_result = await agent_interactions.spawn_children(
             root_workflow_id=root_workflow_id,
             parent_workflow_id=current_workflow_id,
             first_spawn_index=self.next_spawn_index,
@@ -448,7 +448,7 @@ class MasCommandHandler:
         children = spawn_result.children
         self.next_spawn_index += len(children)
         if request.wait:
-            wait_result = await coordination.wait_for_spawned_children(
+            wait_result = await agent_interactions.wait_for_spawned_children(
                 parent_workflow_id=current_workflow_id,
                 children=children,
                 wait_all=request.wait_all,
@@ -493,7 +493,7 @@ class MasCommandHandler:
             return self.result_formatter.no_child_workflows(mas_command=classification.arguments)
         wait_all = request.wait_all or request.workflow_id is not None
         wait_mode = "one" if request.workflow_id is not None else ("all" if wait_all else "any")
-        wait_result = await coordination.wait_for_children(
+        wait_result = await agent_interactions.wait_for_children(
             parent_workflow_id=current_workflow_id,
             children=children,
             wait_all=wait_all,
@@ -532,7 +532,7 @@ class MasCommandHandler:
             target_workflow_id=request.workflow_id,
             content=request.content,
         )
-        await coordination.send_parent_direction(
+        await agent_interactions.send_parent_direction(
             target_workflow_id=request.workflow_id,
             signal=signal,
             topic=PARENT_DIRECTION_TOPIC,
@@ -570,7 +570,7 @@ class MasCommandHandler:
             source_workflow_id=current_workflow_id,
             target_workflow_id=request.workflow_id,
         )
-        await coordination.send_parent_direction(
+        await agent_interactions.send_parent_direction(
             target_workflow_id=request.workflow_id,
             signal=signal,
             topic=PARENT_DIRECTION_TOPIC,
@@ -583,7 +583,7 @@ class MasCommandHandler:
         )
 
     def _validated_context(self, command_name: str) -> str | None:
-        workflow_id = coordination.current_workflow_id()
+        workflow_id = agent_interactions.current_workflow_id()
         if workflow_id is None:
             return None
         try:
@@ -699,7 +699,7 @@ def _authority_result_error(result: Any) -> dict[str, Any] | None:
 def _authority_result_snapshot(result: Any) -> dict[str, Any]:
     if isinstance(result, dict):
         return result
-    raise TypeError(f"Unsupported Coordination Authority Policy result: {type(result)!r}")
+    raise TypeError(f"Unsupported Authority Policy result: {type(result)!r}")
 
 
 def _child_metadata_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:

@@ -23,7 +23,7 @@ def test_mas_command_handler_accepts_classified_standalone_command():
 def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(monkeypatch):
     import minisweagent.mas.commands as commands
     from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
-    from minisweagent.mas.coordination import ChildWaitResult, SpawnChildrenResult
+    from minisweagent.mas.agent_interactions import ChildWaitResult, SpawnChildrenResult
 
     calls = []
 
@@ -72,9 +72,9 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(m
             wait_mode="all",
         )
 
-    monkeypatch.setattr(commands.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
-    monkeypatch.setattr(commands.coordination, "spawn_children", spawn_children)
-    monkeypatch.setattr(commands.coordination, "wait_for_children", wait_for_children)
+    monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.agent_interactions, "spawn_children", spawn_children)
+    monkeypatch.setattr(commands.agent_interactions, "wait_for_children", wait_for_children)
     handler = MasCommandHandler()
 
     result = asyncio.run(
@@ -119,7 +119,7 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_coordination_functions(m
 def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypatch):
     import minisweagent.mas.commands as commands
     from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
-    from minisweagent.mas.coordination import ChildWaitResult
+    from minisweagent.mas.agent_interactions import ChildWaitResult
 
     calls = []
     child_snapshot = {
@@ -161,9 +161,9 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
             calls.append(("waiting", parent_workflow_id, target_workflow_id, command_name))
             return child_snapshot
 
-    monkeypatch.setattr(commands.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
-    monkeypatch.setattr(commands.coordination, "wait_for_children", wait_for_children)
-    monkeypatch.setattr(commands.coordination, "send_parent_direction", send_parent_direction)
+    monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.agent_interactions, "wait_for_children", wait_for_children)
+    monkeypatch.setattr(commands.agent_interactions, "send_parent_direction", send_parent_direction)
 
     handler = MasCommandHandler(authority=RecordingAuthorityPolicy())
 
@@ -188,7 +188,7 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
 def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
     import minisweagent.mas.commands as commands
     from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
-    from minisweagent.mas.coordination import ChildWaitResult
+    from minisweagent.mas.agent_interactions import ChildWaitResult
 
     calls = []
     child_snapshot = {
@@ -234,9 +234,9 @@ def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
     async def forbidden_direct_statuses(parent_workflow_id):
         raise AssertionError("handler should use authority policy for no-target status")
 
-    monkeypatch.setattr(commands.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
-    monkeypatch.setattr(commands.coordination, "query_direct_child_statuses", forbidden_direct_statuses)
-    monkeypatch.setattr(commands.coordination, "wait_for_children", wait_for_children)
+    monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.agent_interactions, "query_direct_child_statuses", forbidden_direct_statuses)
+    monkeypatch.setattr(commands.agent_interactions, "wait_for_children", wait_for_children)
 
     handler = MasCommandHandler(authority=ListingAuthorityPolicy())
 

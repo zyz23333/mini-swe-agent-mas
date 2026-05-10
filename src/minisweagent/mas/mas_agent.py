@@ -7,7 +7,7 @@ from inspect import isawaitable
 from typing import Any
 
 from minisweagent.exceptions import InterruptAgentFlow
-from minisweagent.mas import coordination
+from minisweagent.mas import agent_interactions
 from minisweagent.mas.artifacts import (
     make_artifact_metadata,
     save_trajectory_artifact,
@@ -32,7 +32,7 @@ from minisweagent.mas.signals import (
 from .status_events import LifecycleState
 
 _dbos = load_dbos()
-coordination._dbos = _dbos
+agent_interactions._dbos = _dbos
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
 
 
@@ -41,7 +41,7 @@ async def _maybe_await(value):
 
 
 def _current_agent_workflow_id() -> str | None:
-    return coordination.current_workflow_id()
+    return agent_interactions.current_workflow_id()
 
 
 async def _publish_first_observable_event_once(
@@ -56,7 +56,7 @@ async def _publish_first_observable_event_once(
     if agent.first_observable_published:
         return None
     agent.first_observable_published = True
-    return await coordination.publish_first_observable(
+    return await agent_interactions.publish_first_observable(
         root_workflow_id=root_workflow_id,
         workflow_id=workflow_id,
         lifecycle_state=lifecycle_state,
@@ -68,7 +68,7 @@ async def _publish_first_observable_event_once(
 async def _wait_for_parent_direction_signal() -> dict | str:
     """Keep the child workflow waiting until the parent sends an actual direction signal."""
     while True:
-        signal = await coordination.receive_parent_direction(
+        signal = await agent_interactions.receive_parent_direction(
             topic=PARENT_DIRECTION_TOPIC,
             timeout_seconds=PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
         )
@@ -317,7 +317,7 @@ class MasAgent:
         latest_submission: str = "",
         latest_error: str = "",
     ) -> None:
-        await coordination.publish_status(
+        await agent_interactions.publish_status(
             root_workflow_id=self.root_workflow_id,
             workflow_id=self.workflow_id,
             lifecycle_state=lifecycle_state,

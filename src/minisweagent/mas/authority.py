@@ -1,11 +1,11 @@
-"""Direct Child Authority Policy for workflow-layer MAS coordination."""
+"""Direct Child Authority Policy for workflow-layer MAS Governance."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from minisweagent.mas import coordination
+from minisweagent.mas import agent_interactions
 from minisweagent.mas.artifacts import validate_workflow_id
 
 from .status_events import root_id_for_workflow
@@ -32,7 +32,7 @@ class AuthorityCommandError:
 AuthorityResult = dict[str, Any] | AuthorityCommandError
 
 
-class CoordinationAuthorityPolicy(Protocol):
+class AuthorityPolicy(Protocol):
     """Narrow authority strategy contract used by MAS command dispatch."""
 
     async def list_observable_children(self, *, parent_workflow_id: str) -> list[dict[str, Any]]:
@@ -61,11 +61,11 @@ class CoordinationAuthorityPolicy(Protocol):
 
 
 class DirectChildAuthorityPolicy:
-    """Fixed MVP authority policy for direct Child Agent Workflow coordination."""
+    """Fixed MVP authority policy for direct Child Agent Interactions."""
 
     async def list_observable_children(self, *, parent_workflow_id: str) -> list[dict[str, Any]]:
         parent_workflow_id = validate_workflow_id(parent_workflow_id)
-        return await coordination.query_direct_child_statuses(parent_workflow_id)
+        return await agent_interactions.query_direct_child_statuses(parent_workflow_id)
 
     async def require_observable_child(
         self,
@@ -82,7 +82,7 @@ class DirectChildAuthorityPolicy:
         if target_workflow_id == root_id_for_workflow(parent_workflow_id):
             return _cannot_target_root_workflow(command_name)
 
-        snapshot = await coordination.query_direct_child_status(
+        snapshot = await agent_interactions.query_direct_child_status(
             parent_workflow_id=parent_workflow_id,
             child_workflow_id=target_workflow_id,
         )

@@ -13,7 +13,7 @@ from .helpers import (
 )
 
 
-def test_direct_child_authority_policy_uses_coordination_lookup(monkeypatch):
+def test_direct_child_authority_policy_uses_agent_interaction_lookup(monkeypatch):
     import minisweagent.mas.authority as authority
     from minisweagent.mas.authority import DirectChildAuthorityPolicy
 
@@ -31,7 +31,7 @@ def test_direct_child_authority_policy_uses_coordination_lookup(monkeypatch):
             ),
         }
 
-    monkeypatch.setattr(authority.coordination, "query_direct_child_status", query_direct_child_status)
+    monkeypatch.setattr(authority.agent_interactions, "query_direct_child_status", query_direct_child_status)
 
     result = asyncio.run(
         DirectChildAuthorityPolicy().require_observable_child(
@@ -73,7 +73,7 @@ def test_direct_child_authority_policy_success_and_rejection_paths(monkeypatch):
         assert parent_workflow_id == "mas-0123456789abcdef"
         return snapshots.get(child_workflow_id)
 
-    monkeypatch.setattr(authority.coordination, "query_direct_child_status", query_direct_child_status)
+    monkeypatch.setattr(authority.agent_interactions, "query_direct_child_status", query_direct_child_status)
     policy = DirectChildAuthorityPolicy()
 
     authorized = asyncio.run(

@@ -1,4 +1,4 @@
-"""MAS-specific DBOS workflow-control coordination adapter."""
+"""DBOS-backed Agent Interaction primitives for MAS."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def _has_active_dbos_runtime(dbos_api: Any) -> bool:
 
 @dataclass(frozen=True)
 class SpawnChildrenResult:
-    """Structured Child Coordination result for detached child startup."""
+    """Structured Agent Interaction result for detached child startup."""
 
     children: list[dict[str, str]]
 
@@ -55,7 +55,7 @@ class SpawnChildrenResult:
 
 @dataclass(frozen=True)
 class ChildWaitResult:
-    """Structured Child Coordination result for First Observable Event waits."""
+    """Structured Agent Interaction result for First Observable Event waits."""
 
     children: list[dict[str, str]]
     ready_snapshots: list[dict[str, Any]]
