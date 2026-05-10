@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "keep-it-simple": {
+      "source": "yanko-belov/code-craft",
+      "sourceType": "github",
+      "skillPath": "skills/kiss/SKILL.md",
+      "computedHash": "5e357cc91aa289191c2506e31d951c7aa1c63f98e8ec366c340cca9264056c05"
+    }
+  }
+}
