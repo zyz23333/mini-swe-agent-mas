@@ -96,14 +96,13 @@ Non-responsibilities:
 
 ### `authority.py`
 
-Owns Direct Child Authority Policy validation.
+Owns the narrow Coordination Authority Policy contract and its default Direct Child Authority Policy implementation.
 
 Responsibilities:
 
-- Implement only the fixed MVP Direct Child Authority Policy.
-- Derive the current Parent Agent Workflow identity from DBOS workflow context through the coordination adapter.
+- Expose a narrow strategy contract for authority decisions: list observable children, require an observable target child, and require a waiting target child.
+- Implement only the fixed MVP Direct Child Authority Policy as the default policy.
 - Validate direct-child scope from DBOS workflow metadata where `parent_workflow_id == DBOS.workflow_id`.
-- Provide focused helpers such as `require_direct_child` and `require_waiting_direct_child`.
 - Return the authorized child status snapshot or a structured command error.
 - Reject the current Agent Workflow, the Root Agent Workflow, non-direct children, siblings, ancestors, descendants beyond one level, and workflows outside the direct child boundary.
 - Require `waiting_for_parent` for `continue` and `close`.
@@ -117,9 +116,9 @@ Non-responsibilities:
 - Do not accept caller-supplied current workflow IDs.
 - Do not use Workflow Tree ID prefixes for authorization.
 - Do not introduce external operator authority.
-- Do not become a pluggable authority framework.
+- Do not parse MAS command syntax, allocate child workflow IDs, enqueue child workflows, wait on events, send signals, or format command results.
 
-Future Coordination Authority Models are out of scope for this refactor map.
+Future non-default Coordination Authority Models are out of scope for this refactor map.
 
 ### `status_events.py`
 

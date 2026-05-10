@@ -31,16 +31,6 @@ def _snapshot_workflow_id(snapshot: dict[str, Any]) -> str:
     return str(snapshot.get("workflow_id", ""))
 
 
-def _child_metadata_from_status(snapshot: dict[str, Any], *, task: str = "") -> dict[str, str]:
-    return {
-        "task": task,
-        "root_workflow_id": str(snapshot["root_workflow_id"]),
-        "workflow_id": str(snapshot["workflow_id"]),
-        "run_directory": str(snapshot["run_directory"]),
-        "trajectory_artifact_path": str(snapshot["trajectory_artifact_path"]),
-    }
-
-
 def _is_missing_dbos_runtime_error(exc: Exception) -> bool:
     return "No DBOS was created yet" in str(exc)
 
@@ -171,12 +161,6 @@ async def query_direct_child_status(
         if _has_active_dbos_runtime(_dbos.DBOS) or not _is_missing_dbos_runtime_error(exc):
             raise
         return None
-
-
-async def direct_child_metadata(*, parent_workflow_id: str) -> list[dict[str, str]]:
-    """Return direct child artifact metadata from latest status snapshots."""
-    snapshots = await query_direct_child_statuses(parent_workflow_id)
-    return sorted((_child_metadata_from_status(snapshot) for snapshot in snapshots), key=lambda child: child["workflow_id"])
 
 
 async def wait_for_first_observable_event(

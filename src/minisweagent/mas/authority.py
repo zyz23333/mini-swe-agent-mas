@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from minisweagent.mas import coordination
 from minisweagent.mas.artifacts import validate_workflow_id
@@ -29,40 +29,58 @@ class AuthorityCommandError:
         }
 
 
-@dataclass(frozen=True)
-class AuthorizedChild:
-    """Direct child snapshot authorized for a parent workflow command."""
-
-    snapshot: dict[str, Any]
-
-    @property
-    def workflow_id(self) -> str:
-        return str(self.snapshot["workflow_id"])
-
-    def metadata(self) -> dict[str, str]:
-        return {
-            "task": "",
-            "root_workflow_id": str(self.snapshot["root_workflow_id"]),
-            "workflow_id": str(self.snapshot["workflow_id"]),
-            "run_directory": str(self.snapshot["run_directory"]),
-            "trajectory_artifact_path": str(self.snapshot["trajectory_artifact_path"]),
-        }
+AuthorityResult = dict[str, Any] | AuthorityCommandError
 
 
-AuthorityResult = AuthorizedChild | AuthorityCommandError
+class CoordinationAuthorityPolicy(Protocol):
+    """Narrow authority strategy contract used by MAS command dispatch."""
+
+    async def list_observable_children(self, *, parent_workflow_id: str) -> list[dict[str, Any]]:
+        """List child snapshots visible to the current parent workflow."""
+        ...
+
+    async def require_observable_child(
+        self,
+        *,
+        parent_workflow_id: str,
+        target_workflow_id: str,
+        command_name: str,
+    ) -> AuthorityResult:
+        """Authorize observing or waiting for a targeted child workflow."""
+        ...
+
+    async def require_waiting_child(
+        self,
+        *,
+        parent_workflow_id: str,
+        target_workflow_id: str,
+        command_name: str,
+    ) -> AuthorityResult:
+        """Authorize sending parent-direction control to a waiting child workflow."""
+        ...
 
 
 class DirectChildAuthorityPolicy:
-    """Fixed MVP authority policy for explicit direct Child Agent Workflow targets."""
+    """Fixed MVP authority policy for direct Child Agent Workflow coordination."""
 
-    async def require_direct_child(self, parent_workflow_id: str, target_workflow_id: str) -> AuthorityResult:
+    async def list_observable_children(self, *, parent_workflow_id: str) -> list[dict[str, Any]]:
+        parent_workflow_id = validate_workflow_id(parent_workflow_id)
+        return await coordination.query_direct_child_statuses(parent_workflow_id)
+
+    async def require_observable_child(
+        self,
+        *,
+        parent_workflow_id: str,
+        target_workflow_id: str,
+        command_name: str,
+    ) -> AuthorityResult:
         parent_workflow_id = validate_workflow_id(parent_workflow_id)
         target_workflow_id = validate_workflow_id(target_workflow_id)
 
         if target_workflow_id == parent_workflow_id:
-            return _cannot_target_current_workflow("coordinate")
+            return _cannot_target_current_workflow(command_name)
         if target_workflow_id == root_id_for_workflow(parent_workflow_id):
-            return _cannot_target_root_workflow("coordinate")
+            return _cannot_target_root_workflow(command_name)
 
         snapshot = await coordination.query_direct_child_status(
             parent_workflow_id=parent_workflow_id,
@@ -70,18 +88,23 @@ class DirectChildAuthorityPolicy:
         )
         if snapshot is None:
             return _workflow_not_direct_child(parent_workflow_id, target_workflow_id)
-        return AuthorizedChild(snapshot=snapshot)
+        return snapshot
 
-    async def require_waiting_direct_child(
+    async def require_waiting_child(
         self,
+        *,
         parent_workflow_id: str,
         target_workflow_id: str,
         command_name: str,
     ) -> AuthorityResult:
-        direct_child = await self.require_direct_child(parent_workflow_id, target_workflow_id)
+        direct_child = await self.require_observable_child(
+            parent_workflow_id=parent_workflow_id,
+            target_workflow_id=target_workflow_id,
+            command_name=command_name,
+        )
         if isinstance(direct_child, AuthorityCommandError):
-            return _retarget_current_or_root_error(direct_child, command_name)
-        if direct_child.snapshot.get("lifecycle_state") != "waiting_for_parent":
+            return direct_child
+        if direct_child.get("lifecycle_state") != "waiting_for_parent":
             return AuthorityCommandError(
                 output=f"Workflow is not waiting for parent direction: {target_workflow_id}\n",
                 returncode=1,
@@ -116,11 +139,3 @@ def _workflow_not_direct_child(parent_workflow_id: str, target_workflow_id: str)
         exception_info="workflow_not_direct_child",
         extra={"mas_command_error": "workflow_not_direct_child"},
     )
-
-
-def _retarget_current_or_root_error(error: AuthorityCommandError, command_name: str) -> AuthorityCommandError:
-    if error.exception_info == "cannot_coordinate_current_workflow":
-        return _cannot_target_current_workflow(command_name)
-    if error.exception_info == "cannot_coordinate_root_workflow":
-        return _cannot_target_root_workflow(command_name)
-    return error

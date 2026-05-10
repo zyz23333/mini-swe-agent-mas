@@ -965,10 +965,6 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
         ),
     }
 
-    async def query_direct_child_status(*, parent_workflow_id, child_workflow_id):
-        calls.append(("direct_status_lookup", parent_workflow_id, child_workflow_id))
-        return child_snapshot
-
     async def wait_for_children(*, parent_workflow_id, children, wait_all, timeout_seconds, wait_mode):
         assert parent_workflow_id == "mas-0123456789abcdef"
         assert [child["workflow_id"] for child in children] == ["mas-0123456789abcdef-c001"]
@@ -986,12 +982,23 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
     async def send_parent_direction(*, target_workflow_id, signal, topic):
         calls.append(("send", target_workflow_id, signal["type"], topic))
 
+    class RecordingAuthorityPolicy:
+        async def list_observable_children(self, *, parent_workflow_id):
+            raise AssertionError("target commands should not list children")
+
+        async def require_observable_child(self, *, parent_workflow_id, target_workflow_id, command_name):
+            calls.append(("observable", parent_workflow_id, target_workflow_id, command_name))
+            return child_snapshot
+
+        async def require_waiting_child(self, *, parent_workflow_id, target_workflow_id, command_name):
+            calls.append(("waiting", parent_workflow_id, target_workflow_id, command_name))
+            return child_snapshot
+
     monkeypatch.setattr(command_dispatch.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
-    monkeypatch.setattr(command_dispatch.coordination, "query_direct_child_status", query_direct_child_status)
     monkeypatch.setattr(command_dispatch.coordination, "wait_for_children", wait_for_children)
     monkeypatch.setattr(command_dispatch.coordination, "send_parent_direction", send_parent_direction)
 
-    handler = MasCommandHandler()
+    handler = MasCommandHandler(authority=RecordingAuthorityPolicy())
 
     for command in [
         "mini-mas status mas-0123456789abcdef-c001",
@@ -1003,13 +1010,88 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
         assert result["returncode"] == 0
 
     assert calls[:3] == [
-        ("direct_status_lookup", "mas-0123456789abcdef", "mas-0123456789abcdef-c001"),
-        ("direct_status_lookup", "mas-0123456789abcdef", "mas-0123456789abcdef-c001"),
-        ("direct_status_lookup", "mas-0123456789abcdef", "mas-0123456789abcdef-c001"),
+        ("observable", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "status"),
+        ("observable", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "wait"),
+        ("waiting", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "continue"),
     ]
     assert calls[3][0] == "send"
-    assert calls[4] == ("direct_status_lookup", "mas-0123456789abcdef", "mas-0123456789abcdef-c001")
+    assert calls[4] == ("waiting", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "close")
     assert calls[5][0] == "send"
+
+
+def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
+    import minisweagent.mas.command_dispatch as command_dispatch
+    from minisweagent.mas.command_dispatch import MasCommandHandler
+    from minisweagent.mas.commands import classify_mas_command
+    from minisweagent.mas.coordination import ChildWaitResult
+
+    calls = []
+    child_snapshot = {
+        "root_workflow_id": "mas-0123456789abcdef",
+        "workflow_id": "mas-0123456789abcdef-c001",
+        "lifecycle_state": "waiting_for_parent",
+        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "trajectory_artifact_path": (
+            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+        ),
+    }
+
+    class ListingAuthorityPolicy:
+        async def list_observable_children(self, *, parent_workflow_id):
+            calls.append(("list", parent_workflow_id))
+            return [child_snapshot]
+
+        async def require_observable_child(self, *, parent_workflow_id, target_workflow_id, command_name):
+            raise AssertionError("no-target commands should list children")
+
+        async def require_waiting_child(self, *, parent_workflow_id, target_workflow_id, command_name):
+            raise AssertionError("no-target commands should list children")
+
+    async def wait_for_children(*, parent_workflow_id, children, wait_all, timeout_seconds, wait_mode):
+        calls.append(
+            (
+                "wait_children",
+                parent_workflow_id,
+                tuple(child["workflow_id"] for child in children),
+                wait_all,
+                timeout_seconds,
+                wait_mode,
+            )
+        )
+        return ChildWaitResult(
+            children=list(children),
+            ready_snapshots=[child_snapshot],
+            still_running_ids=[],
+            timed_out=False,
+            wait_mode=wait_mode,
+        )
+
+    async def forbidden_direct_statuses(parent_workflow_id):
+        raise AssertionError("handler should use authority policy for no-target status")
+
+    monkeypatch.setattr(command_dispatch.coordination, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(command_dispatch.coordination, "query_direct_child_statuses", forbidden_direct_statuses)
+    monkeypatch.setattr(command_dispatch.coordination, "wait_for_children", wait_for_children)
+
+    handler = MasCommandHandler(authority=ListingAuthorityPolicy())
+
+    status_result = asyncio.run(handler.execute(classify_mas_command("mini-mas status")))
+    wait_result = asyncio.run(handler.execute(classify_mas_command("mini-mas wait --all")))
+
+    assert status_result["returncode"] == 0
+    assert wait_result["returncode"] == 0
+    assert calls == [
+        ("list", "mas-0123456789abcdef"),
+        ("list", "mas-0123456789abcdef"),
+        (
+            "wait_children",
+            "mas-0123456789abcdef",
+            ("mas-0123456789abcdef-c001",),
+            True,
+            None,
+            "all",
+        ),
+    ]
 
 
 def test_each_mas_agent_owns_private_command_handler():
@@ -1041,6 +1123,7 @@ def test_each_mas_agent_owns_private_command_handler():
 def test_mas_command_handler_execute_signature_has_no_caller_context_dependencies():
     import inspect
 
+    from minisweagent.mas.authority import DirectChildAuthorityPolicy
     from minisweagent.mas.command_dispatch import MasCommandHandler
 
     assert list(inspect.signature(MasCommandHandler.execute).parameters) == ["self", "classification"]
@@ -1052,11 +1135,13 @@ def test_mas_command_handler_execute_signature_has_no_caller_context_dependencie
     assert "child_coordinator" not in constructor_parameters
     assert "send_continuation_signal" not in constructor_parameters
     assert "send_close_signal" not in constructor_parameters
+    handler = MasCommandHandler()
+    assert isinstance(handler.authority, DirectChildAuthorityPolicy)
 
 
 def test_direct_child_authority_policy_uses_coordination_lookup(monkeypatch):
     import minisweagent.mas.authority as authority
-    from minisweagent.mas.authority import AuthorizedChild, DirectChildAuthorityPolicy
+    from minisweagent.mas.authority import DirectChildAuthorityPolicy
 
     calls = []
 
@@ -1075,18 +1160,20 @@ def test_direct_child_authority_policy_uses_coordination_lookup(monkeypatch):
     monkeypatch.setattr(authority.coordination, "query_direct_child_status", query_direct_child_status)
 
     result = asyncio.run(
-        DirectChildAuthorityPolicy().require_direct_child(
-            "mas-0123456789abcdef", "mas-0123456789abcdef-c001"
+        DirectChildAuthorityPolicy().require_observable_child(
+            parent_workflow_id="mas-0123456789abcdef",
+            target_workflow_id="mas-0123456789abcdef-c001",
+            command_name="status",
         )
     )
 
-    assert isinstance(result, AuthorizedChild)
+    assert result["workflow_id"] == "mas-0123456789abcdef-c001"
     assert calls == [("mas-0123456789abcdef", "mas-0123456789abcdef-c001")]
 
 
 def test_direct_child_authority_policy_success_and_rejection_paths(monkeypatch):
     import minisweagent.mas.authority as authority
-    from minisweagent.mas.authority import AuthorityCommandError, AuthorizedChild, DirectChildAuthorityPolicy
+    from minisweagent.mas.authority import AuthorityCommandError, DirectChildAuthorityPolicy
 
     snapshots = {
         "mas-0123456789abcdef-c001": {
@@ -1117,18 +1204,29 @@ def test_direct_child_authority_policy_success_and_rejection_paths(monkeypatch):
     policy = DirectChildAuthorityPolicy()
 
     authorized = asyncio.run(
-        policy.require_direct_child("mas-0123456789abcdef", "mas-0123456789abcdef-c001")
+        policy.require_observable_child(
+            parent_workflow_id="mas-0123456789abcdef",
+            target_workflow_id="mas-0123456789abcdef-c001",
+            command_name="status",
+        )
     )
     not_direct = asyncio.run(
-        policy.require_direct_child("mas-0123456789abcdef", "mas-0123456789abcdef-c001-c001")
+        policy.require_observable_child(
+            parent_workflow_id="mas-0123456789abcdef",
+            target_workflow_id="mas-0123456789abcdef-c001-c001",
+            command_name="status",
+        )
     )
     not_waiting = asyncio.run(
-        policy.require_waiting_direct_child("mas-0123456789abcdef", "mas-0123456789abcdef-c002", "continue")
+        policy.require_waiting_child(
+            parent_workflow_id="mas-0123456789abcdef",
+            target_workflow_id="mas-0123456789abcdef-c002",
+            command_name="continue",
+        )
     )
 
-    assert isinstance(authorized, AuthorizedChild)
-    assert authorized.workflow_id == "mas-0123456789abcdef-c001"
-    assert authorized.metadata()["trajectory_artifact_path"].endswith("mas-0123456789abcdef-c001.traj.json")
+    assert authorized["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert authorized["trajectory_artifact_path"].endswith("mas-0123456789abcdef-c001.traj.json")
     assert isinstance(not_direct, AuthorityCommandError)
     assert not_direct.exception_info == "workflow_not_direct_child"
     assert isinstance(not_waiting, AuthorityCommandError)

@@ -7,7 +7,7 @@ from typing import Any
 
 from minisweagent.mas import coordination
 from minisweagent.mas.artifacts import validate_workflow_id
-from minisweagent.mas.authority import AuthorityCommandError, AuthorizedChild, DirectChildAuthorityPolicy
+from minisweagent.mas.authority import AuthorityCommandError, CoordinationAuthorityPolicy, DirectChildAuthorityPolicy
 from minisweagent.mas.command_results import MasCommandResultFormatter
 from minisweagent.mas.commands import MasCommandClassification, MasCommandKind
 from minisweagent.mas.signals import PARENT_DIRECTION_TOPIC, make_close_signal, make_continuation_signal
@@ -154,11 +154,9 @@ def _authority_result_error(result: Any) -> dict[str, Any] | None:
 
 
 def _authority_result_snapshot(result: Any) -> dict[str, Any]:
-    if isinstance(result, AuthorizedChild):
-        return result.snapshot
     if isinstance(result, dict):
         return result
-    raise TypeError(f"Unsupported Direct Child Authority Policy result: {type(result)!r}")
+    raise TypeError(f"Unsupported Coordination Authority Policy result: {type(result)!r}")
 
 
 def _child_metadata_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
@@ -177,10 +175,11 @@ class MasCommandHandler:
     def __init__(
         self,
         *,
+        authority: CoordinationAuthorityPolicy | None = None,
         result_formatter: MasCommandResultFormatter | None = None,
     ) -> None:
         self.next_spawn_index = 1
-        self.authority_policy = DirectChildAuthorityPolicy()
+        self.authority = authority or DirectChildAuthorityPolicy()
         self.result_formatter = result_formatter or MasCommandResultFormatter()
 
     async def execute(self, classification: MasCommandClassification) -> dict[str, Any]:
@@ -206,7 +205,7 @@ class MasCommandHandler:
         if current_workflow_id is None:
             return self.result_formatter.missing_agent_workflow_context("status")
         if len(classification.arguments) == 1:
-            snapshots = await coordination.query_direct_child_statuses(current_workflow_id)
+            snapshots = await self.authority.list_observable_children(parent_workflow_id=current_workflow_id)
             return self.result_formatter.direct_child_statuses(
                 mas_command=classification.arguments,
                 snapshots=snapshots,
@@ -214,7 +213,11 @@ class MasCommandHandler:
             )
         if len(classification.arguments) == 2:
             target_workflow_id = classification.arguments[1]
-            authority_result = await self.authority_policy.require_direct_child(current_workflow_id, target_workflow_id)
+            authority_result = await self.authority.require_observable_child(
+                parent_workflow_id=current_workflow_id,
+                target_workflow_id=target_workflow_id,
+                command_name="status",
+            )
             error = _authority_result_error(authority_result)
             if error is not None:
                 return self.result_formatter.authority_error(error, mas_command=classification.arguments)
@@ -275,15 +278,20 @@ class MasCommandHandler:
                 output=f"{exc}\n",
                 exception_info=str(exc),
                 mas_command_error="invalid_wait_arguments",
-            )
+        )
         if request.workflow_id is not None:
-            authority_result = await self.authority_policy.require_direct_child(current_workflow_id, request.workflow_id)
+            authority_result = await self.authority.require_observable_child(
+                parent_workflow_id=current_workflow_id,
+                target_workflow_id=request.workflow_id,
+                command_name="wait",
+            )
             error = _authority_result_error(authority_result)
             if error is not None:
                 return self.result_formatter.authority_error(error, mas_command=classification.arguments)
             children = [_child_metadata_from_snapshot(_authority_result_snapshot(authority_result))]
         else:
-            children = await coordination.direct_child_metadata(parent_workflow_id=current_workflow_id)
+            snapshots = await self.authority.list_observable_children(parent_workflow_id=current_workflow_id)
+            children = [_child_metadata_from_snapshot(snapshot) for snapshot in snapshots]
         if not children:
             return self.result_formatter.no_child_workflows(mas_command=classification.arguments)
         wait_all = request.wait_all or request.workflow_id is not None
@@ -313,10 +321,10 @@ class MasCommandHandler:
                 exception_info=str(exc),
                 mas_command_error="invalid_continue_arguments",
             )
-        authority_result = await self.authority_policy.require_waiting_direct_child(
-            current_workflow_id,
-            request.workflow_id,
-            "continue",
+        authority_result = await self.authority.require_waiting_child(
+            parent_workflow_id=current_workflow_id,
+            target_workflow_id=request.workflow_id,
+            command_name="continue",
         )
         error = _authority_result_error(authority_result)
         if error is not None:
@@ -352,10 +360,10 @@ class MasCommandHandler:
                 exception_info=str(exc),
                 mas_command_error="invalid_close_arguments",
             )
-        authority_result = await self.authority_policy.require_waiting_direct_child(
-            current_workflow_id,
-            request.workflow_id,
-            "close",
+        authority_result = await self.authority.require_waiting_child(
+            parent_workflow_id=current_workflow_id,
+            target_workflow_id=request.workflow_id,
+            command_name="close",
         )
         error = _authority_result_error(authority_result)
         if error is not None:
