@@ -1,8 +1,8 @@
 # Handle MAS Commands at the Workflow Layer
 
-MAS commands are handled at the DBOS workflow layer, while ordinary model calls, bash execution, and trajectory persistence are wrapped as DBOS steps. This keeps `DBOS.enqueue_workflow`, `DBOS.recv`, and related workflow-control operations out of step functions and preserves a clear boundary between MAS coordination and ordinary shell execution.
+MAS commands are handled at the DBOS workflow layer, while ordinary model calls, bash execution, and trajectory persistence are wrapped as DBOS steps. This keeps `DBOS.enqueue_workflow`, `DBOS.recv`, and related workflow-control operations out of step functions and preserves a clear boundary between MAS-governed Agent Interactions and ordinary shell execution.
 
-MAS preserves mini-swe-agent's existing action parsing contract: model adapters continue to parse every model action into a bash-shaped `{"command": ...}` action, and model adapters continue to format observations from execution outputs. MAS does not add a separate `mini-mas` model tool, does not modify model-side action parsers, and does not put workflow coordination inside the environment implementation.
+MAS preserves mini-swe-agent's existing action parsing contract: model adapters continue to parse every model action into a bash-shaped `{"command": ...}` action, and model adapters continue to format observations from execution outputs. MAS does not add a separate `mini-mas` model tool, does not modify model-side action parsers, and does not put MAS Governance behavior inside the environment implementation.
 
 **Consequences**
 
