@@ -177,6 +177,175 @@ def test_mini_mas_command_cli_sends_root_command_and_prints_result(monkeypatch):
     )
 
 
+def test_mini_mas_spawn_creates_root_sends_preserved_spawn_command_and_prints_child_metadata(monkeypatch):
+    one_shot_spawn = Mock(
+        return_value={
+            "kind": "one_shot_spawn",
+            "root_agent_id": "mas-1111111111111111",
+            "command": "mini-mas spawn 'task A'",
+            "result": {
+                "output": (
+                    "Detached spawn started\n"
+                    "child_count: 1\n"
+                    "task: task A\n"
+                    "agent_id: mas-2222222222222222\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json\n"
+                ),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {
+                    "children": [
+                        {
+                            "task": "task A",
+                            "agent_id": "mas-2222222222222222",
+                            "parent_agent_id": "mas-1111111111111111",
+                            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+                            "trajectory_artifact_path": (
+                                ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
+                            ),
+                        }
+                    ],
+                },
+            },
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.one_shot_spawn_through_interactive_root", one_shot_spawn)
+
+    cli_result = CliRunner().invoke(app, ["spawn", "task A"])
+
+    assert cli_result.exit_code == 0
+    assert "root_agent_id: mas-1111111111111111" in cli_result.stdout
+    assert "agent_id: mas-2222222222222222" in cli_result.stdout
+    assert "parent_agent_id: mas-1111111111111111" in cli_result.stdout
+    assert "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222" in cli_result.stdout
+    assert (
+        "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
+        in cli_result.stdout
+    )
+    assert ".mini-mas/agents/mas-1111111111111111" not in cli_result.stdout
+    one_shot_spawn.assert_called_once_with(
+        spawn_arguments=["task A"],
+        result_timeout_seconds=60,
+        system_database_url=None,
+    )
+
+
+def test_mini_mas_multi_spawn_prints_one_root_id_and_each_child(monkeypatch):
+    one_shot_spawn = Mock(
+        return_value={
+            "kind": "one_shot_spawn",
+            "root_agent_id": "mas-1111111111111111",
+            "command": "mini-mas spawn 'task A' 'task B'",
+            "result": {
+                "output": (
+                    "Detached spawn started\n"
+                    "child_count: 2\n"
+                    "task: task A\n"
+                    "agent_id: mas-2222222222222222\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json\n"
+                    "\n"
+                    "task: task B\n"
+                    "agent_id: mas-3333333333333333\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
+                ),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {"child_agent_ids": ["mas-2222222222222222", "mas-3333333333333333"]},
+            },
+            "returncode": 0,
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.one_shot_spawn_through_interactive_root", one_shot_spawn)
+
+    cli_result = CliRunner().invoke(app, ["spawn", "task A", "task B"])
+
+    assert cli_result.exit_code == 0
+    assert cli_result.stdout.count("root_agent_id: mas-1111111111111111") == 1
+    assert "agent_id: mas-2222222222222222" in cli_result.stdout
+    assert "agent_id: mas-3333333333333333" in cli_result.stdout
+    assert cli_result.stdout.count("parent_agent_id: mas-1111111111111111") == 2
+    one_shot_spawn.assert_called_once_with(
+        spawn_arguments=["task A", "task B"],
+        result_timeout_seconds=60,
+        system_database_url=None,
+    )
+
+
+def test_mini_mas_spawn_timeout_reports_resumable_root_without_canceling_children(monkeypatch):
+    one_shot_spawn = Mock(
+        return_value={
+            "kind": "one_shot_spawn_result_timeout",
+            "root_agent_id": "mas-1111111111111111",
+            "command": "mini-mas spawn 'task A'",
+            "output": (
+                "Timed out waiting for Root Command Result. The spawn command may still be running.\n"
+                "root_agent_id: mas-1111111111111111\n"
+                "Use mini-mas status to inspect Root Agents, then resume this Root Agent with "
+                "mini-mas resume mas-1111111111111111.\n"
+            ),
+            "returncode": 1,
+            "exception_info": "root_command_result_timeout",
+            "extra": {"mas_command_error": "root_command_result_timeout"},
+            "result": {
+                "output": "Timed out waiting for Root Command Result.\n",
+                "returncode": 1,
+                "exception_info": "root_command_result_timeout",
+                "extra": {"mas_command_error": "root_command_result_timeout"},
+            },
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.one_shot_spawn_through_interactive_root", one_shot_spawn)
+
+    cli_result = CliRunner().invoke(app, ["spawn", "--result-timeout", "0.01", "task A"])
+
+    assert cli_result.exit_code == 1
+    assert "may still be running" in cli_result.stdout
+    assert "root_agent_id: mas-1111111111111111" in cli_result.stdout
+    assert "mini-mas status" in cli_result.stdout
+    assert "mini-mas resume mas-1111111111111111" in cli_result.stdout
+    assert "cancel" not in cli_result.stdout.lower()
+    assert "mark" not in cli_result.stdout.lower()
+    one_shot_spawn.assert_called_once_with(
+        spawn_arguments=["task A"],
+        result_timeout_seconds=0.01,
+        system_database_url=None,
+    )
+
+
+def test_mini_mas_spawn_timeout_without_wait_remains_invalid_through_root_command(monkeypatch):
+    one_shot_spawn = Mock(
+        return_value={
+            "kind": "one_shot_spawn",
+            "root_agent_id": "mas-1111111111111111",
+            "command": "mini-mas spawn --timeout 1 task",
+            "result": {
+                "output": "mini-mas spawn --timeout requires --wait because Detached Spawn has no wait phase\n",
+                "returncode": 2,
+                "exception_info": "invalid_mas_command",
+                "extra": {"mas_command_error": "invalid_mas_command"},
+            },
+            "returncode": 2,
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.one_shot_spawn_through_interactive_root", one_shot_spawn)
+
+    cli_result = CliRunner().invoke(app, ["spawn", "--timeout", "1", "task"])
+
+    assert cli_result.exit_code == 2
+    assert "Detached Spawn has no wait phase" in cli_result.stdout
+    one_shot_spawn.assert_called_once_with(
+        spawn_arguments=["--timeout", "1", "task"],
+        result_timeout_seconds=60,
+        system_database_url=None,
+    )
+
+
 def test_mini_mas_resume_prints_metadata_once_and_sends_each_input_line(monkeypatch):
     prepare_resume = Mock(
         return_value={

@@ -12,6 +12,7 @@ from minisweagent.mas.runtime import (
     continue_agent_workflow,
     discover_interactive_root_agents,
     get_agent_workflow_status,
+    one_shot_spawn_through_interactive_root,
     prepare_resume_root_agent,
     send_root_command,
     start_interactive_root_agent_workflow,
@@ -139,6 +140,45 @@ def command(
     if command_result.get("returncode", 0) != 0:
         raise typer.Exit(code=command_result["returncode"])
     return result_event
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help="Create an Interactive Root Agent and spawn Child Agents through it.",
+)
+def spawn(
+    ctx: typer.Context,
+    result_timeout_seconds: Annotated[
+        float,
+        typer.Option("--result-timeout", help="Maximum seconds to wait for the Root Command Result."),
+    ] = 60,
+    system_database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--system-database-url",
+            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
+            show_default=False,
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    result = dict(
+        one_shot_spawn_through_interactive_root(
+            spawn_arguments=list(ctx.args),
+            result_timeout_seconds=result_timeout_seconds,
+            system_database_url=system_database_url,
+        )
+    )
+    if result["kind"] == "one_shot_spawn_result_timeout":
+        console.print(result["output"], end="")
+        raise typer.Exit(code=result["returncode"])
+
+    console.print(f"root_agent_id: {result['root_agent_id']}")
+    console.print()
+    command_result = result["result"]
+    console.print(command_result.get("output", ""), end="")
+    if command_result.get("returncode", 0) != 0:
+        raise typer.Exit(code=command_result["returncode"])
+    return result
 
 
 @app.command(help="Resume an existing Interactive Root Agent terminal.")

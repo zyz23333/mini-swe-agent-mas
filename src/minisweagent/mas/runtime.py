@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import shlex
 from collections.abc import Mapping
 from typing import Any
 
@@ -220,6 +221,66 @@ def send_root_command(
             system_database_url=system_database_url,
         )
     )
+
+
+def make_standalone_spawn_command(spawn_arguments: list[str]) -> str:
+    """Preserve an external spawn invocation as one standalone MAS command."""
+    return " ".join(["mini-mas", "spawn", *(shlex.quote(argument) for argument in spawn_arguments)])
+
+
+def _format_one_shot_spawn_result_timeout(
+    *,
+    root_agent_id: str,
+    command: str,
+    result_event: Mapping[str, Any],
+) -> dict[str, Any]:
+    command_result = result_event["result"]
+    return {
+        "kind": "one_shot_spawn_result_timeout",
+        "root_agent_id": root_agent_id,
+        "command": command,
+        "output": (
+            "Timed out waiting for Root Command Result. The spawn command may still be running.\n"
+            f"root_agent_id: {root_agent_id}\n"
+            "Use mini-mas status to inspect Root Agents, then resume this Root Agent with "
+            f"mini-mas resume {root_agent_id}.\n"
+        ),
+        "returncode": command_result.get("returncode", 1),
+        "exception_info": command_result.get("exception_info", "root_command_result_timeout"),
+        "extra": command_result.get("extra", {"mas_command_error": "root_command_result_timeout"}),
+        "result": command_result,
+    }
+
+
+def one_shot_spawn_through_interactive_root(
+    *,
+    spawn_arguments: list[str],
+    result_timeout_seconds: float = 60,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Create an Interactive Root Agent and submit external spawn through its Root command loop."""
+    root_result = start_interactive_root_agent_workflow(system_database_url=system_database_url)
+    root_agent_id = str(root_result["agent_id"])
+    command = make_standalone_spawn_command(spawn_arguments)
+    result_event = send_root_command(
+        root_agent_id=root_agent_id,
+        command=command,
+        result_timeout_seconds=result_timeout_seconds,
+        system_database_url=system_database_url,
+    )
+    if result_event.get("kind") == "root_command_result_timeout":
+        return _format_one_shot_spawn_result_timeout(
+            root_agent_id=root_agent_id,
+            command=command,
+            result_event=result_event,
+        )
+    return {
+        "kind": "one_shot_spawn",
+        "root_agent_id": root_agent_id,
+        "command": command,
+        "result": result_event["result"],
+        "returncode": result_event["result"].get("returncode", 0),
+    }
 
 
 def _resume_invalid_agent_id_result(*, root_agent_id: str, error: ValueError) -> dict[str, Any]:

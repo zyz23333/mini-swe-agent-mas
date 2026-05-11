@@ -1,5 +1,5 @@
 import inspect
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -9,6 +9,8 @@ from minisweagent.mas.runtime import (
     continue_agent_workflow,
     discover_interactive_root_agents,
     get_agent_workflow_status,
+    make_standalone_spawn_command,
+    one_shot_spawn_through_interactive_root,
     prepare_resume_root_agent,
     send_root_command,
     start_interactive_root_agent_workflow,
@@ -219,6 +221,187 @@ def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result
             "extra": {},
         },
     }
+
+
+def test_one_shot_spawn_creates_interactive_root_then_sends_standalone_spawn_command(monkeypatch):
+    start_root = Mock(
+        return_value={
+            "agent_id": "mas-1111111111111111",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+    )
+    send_command = Mock(
+        return_value={
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": "mas-1111111111111111",
+            "command": "mini-mas spawn 'task A'",
+            "result": {
+                "output": "Detached spawn started\n",
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {
+                    "child_agent_id": "mas-2222222222222222",
+                    "parent_agent_id": "mas-1111111111111111",
+                },
+            },
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.runtime.start_interactive_root_agent_workflow", start_root)
+    monkeypatch.setattr("minisweagent.mas.runtime.send_root_command", send_command)
+
+    result = one_shot_spawn_through_interactive_root(
+        spawn_arguments=["task A"],
+        result_timeout_seconds=7,
+        system_database_url="postgres://db",
+    )
+
+    start_root.assert_called_once_with(system_database_url="postgres://db")
+    send_command.assert_called_once_with(
+        root_agent_id="mas-1111111111111111",
+        command="mini-mas spawn 'task A'",
+        result_timeout_seconds=7,
+        system_database_url="postgres://db",
+    )
+    assert result["kind"] == "one_shot_spawn"
+    assert result["root_agent_id"] == "mas-1111111111111111"
+    assert result["command"] == "mini-mas spawn 'task A'"
+    assert result["returncode"] == 0
+    assert result["result"]["extra"]["parent_agent_id"] == "mas-1111111111111111"
+
+
+def test_one_shot_spawn_uses_root_command_signal_result_flow():
+    sent = []
+    handle = AsyncMockHandle("mas-1111111111111111")
+
+    async def start_workflow_async(*_args, **_kwargs):
+        return handle
+
+    async def send_async(destination_id, message, topic=None):
+        sent.append((destination_id, message, topic))
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        if key == "mini_mas_status":
+            return {
+                "agent_id": workflow_id,
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+            }
+        assert key == "mini_mas_root_command_result:cmd-1111111111111111"
+        return {
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": workflow_id,
+            "command": "mini-mas spawn 'task A'",
+            "result": {
+                "output": (
+                    "Detached spawn started\n"
+                    "child_count: 1\n"
+                    "task: task A\n"
+                    "agent_id: mas-2222222222222222\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json\n"
+                ),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {
+                    "child_agent_id": "mas-2222222222222222",
+                    "parent_agent_id": "mas-1111111111111111",
+                },
+            },
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.send_async = Mock(side_effect=send_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        patch("minisweagent.mas.runtime.make_agent_id", return_value="mas-1111111111111111"),
+        patch("minisweagent.mas.runtime.make_command_id", return_value="cmd-1111111111111111"),
+    ):
+        result = one_shot_spawn_through_interactive_root(spawn_arguments=["task A"], result_timeout_seconds=5)
+
+    from minisweagent.mas.signals import ROOT_COMMAND_TOPIC
+
+    workflow_func = dbos_module.DBOS.start_workflow_async.call_args.args[0]
+    assert workflow_func.__name__ == "interactive_root_agent_workflow"
+    assert dbos_module.DBOS.get_event_async.call_args_list[0] == call("mas-1111111111111111", "mini_mas_status", 60)
+    assert sent == [
+        (
+            "mas-1111111111111111",
+            {
+                "kind": "root_command",
+                "command_id": "cmd-1111111111111111",
+                "root_agent_id": "mas-1111111111111111",
+                "command": "mini-mas spawn 'task A'",
+                "source": "external_cli",
+            },
+            ROOT_COMMAND_TOPIC,
+        )
+    ]
+    assert result["root_agent_id"] == "mas-1111111111111111"
+    assert result["result"]["extra"]["child_agent_id"] == "mas-2222222222222222"
+    assert result["result"]["extra"]["parent_agent_id"] == "mas-1111111111111111"
+
+
+def test_standalone_spawn_command_preserves_external_multi_spawn_arguments():
+    assert make_standalone_spawn_command(["--wait", "--all", "--timeout", "0.5", "task A", "task B"]) == (
+        "mini-mas spawn --wait --all --timeout 0.5 'task A' 'task B'"
+    )
+
+
+def test_one_shot_spawn_result_timeout_reports_resumable_root_without_cleanup(monkeypatch):
+    start_root = Mock(
+        return_value={
+            "agent_id": "mas-1111111111111111",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+    )
+    send_command = Mock(
+        return_value={
+            "kind": "root_command_result_timeout",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": "mas-1111111111111111",
+            "command": "mini-mas spawn 'task A'",
+            "result": {
+                "output": "Timed out waiting for Root Command Result.\n",
+                "returncode": 1,
+                "exception_info": "root_command_result_timeout",
+                "extra": {"mas_command_error": "root_command_result_timeout"},
+            },
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.runtime.start_interactive_root_agent_workflow", start_root)
+    monkeypatch.setattr("minisweagent.mas.runtime.send_root_command", send_command)
+
+    result = one_shot_spawn_through_interactive_root(
+        spawn_arguments=["task A"],
+        result_timeout_seconds=0.01,
+    )
+
+    start_root.assert_called_once_with(system_database_url=None)
+    send_command.assert_called_once_with(
+        root_agent_id="mas-1111111111111111",
+        command="mini-mas spawn 'task A'",
+        result_timeout_seconds=0.01,
+        system_database_url=None,
+    )
+    assert result["kind"] == "one_shot_spawn_result_timeout"
+    assert result["returncode"] == 1
+    assert "may still be running" in result["output"]
+    assert "root_agent_id: mas-1111111111111111" in result["output"]
+    assert "mini-mas status" in result["output"]
+    assert "mini-mas resume mas-1111111111111111" in result["output"]
+    assert "cancel" not in result["output"].lower()
+    assert "failed" not in result["output"].lower()
 
 
 def test_resume_preparation_validates_agent_id_before_querying_dbos():
