@@ -16,22 +16,71 @@ Security = Correctness > Minimal Changes > Readability > Consistency
 - Stay cautious and work from the original requirements and problem statement.
 - When you hit a blocker (unclear motivation, invalid prerequisite assumptions, insufficient information, or conflicts in the proposed approach), stop immediately and report it; do not continue based on guesswork.
 
-## Development and Modification
+## Guidelines
 
-- Before execution, assess task complexity and briefly explain your approach. For complex tasks, first sort out the fundamental goals and constraints, confirm the plan, and only then start implementation.
-- When proposing a modification or refactoring plan:
-  - Make a solution decision:
-    - If the issue is a structural defect (such as architectural coupling, duplicated code, or accumulated technical debt) -> choose a root-cause solution.
-    - If the issue is a localized defect (such as missing boundary handling or incorrect condition checks in specific cases) -> make the minimum necessary. change
-    - When a root-cause fix has a large change surface or involves interface changes, you must pause and ask for confirmation.
-    - Do not expand the scope on your own (for example, by adding extra fallbacks). If you discover security, data, or performance risks, report them separately after completing the main request.
-  - Perform a static logic check on the plan: walk through entry -> core logic -> boundary/exception paths -> exit, and confirm that the data flow is intact.
-- When maintaining the project/code, keep the architecture clear and readable. Do not change the established directory structure or architectural layering without explanation.
-- Prefer existing project dependencies or the standard library. Do not introduce new third-party dependencies without approval; if one is truly needed, explain why and get confirmation first.
-- Logging strategy: log key areas such as inputs, branch decisions, and exceptions; do not log inside loops or other high-frequency call paths.
-- Error handling strategy: handle recoverable errors nearby and log them; for unrecoverable errors, fail fast and raise them upward. Do not swallow errors silently.
-- If you find that canonical documentation is clearly outdated, update it after the implementation.
-- For high-risk operations such as deleting files, pushing to remote, or changing environments/CI/DB, verify the syntax and obtain a second confirmation before proceeding; do not execute them on your own.
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
 ## Commit Guidelines
 
