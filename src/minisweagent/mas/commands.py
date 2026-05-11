@@ -128,6 +128,18 @@ class SpawnCommandRequest:
     wait_all: bool = False
     timeout_seconds: float | None = None
 
+    def mas_command(self) -> list[str]:
+        """Return the canonical MAS command arguments represented by this request."""
+        command = ["spawn"]
+        if self.wait:
+            command.append("--wait")
+        if self.wait_all:
+            command.append("--all")
+        if self.timeout_seconds is not None:
+            command.extend(["--timeout", _format_timeout_seconds(self.timeout_seconds)])
+        command.extend(self.tasks)
+        return command
+
 
 @dataclass(frozen=True)
 class WaitCommandRequest:
@@ -450,12 +462,12 @@ class MasCommandHandler:
                 timeout_seconds=request.timeout_seconds,
             )
             return self.result_formatter.spawn_waited(
-                mas_command=["spawn", *request.tasks],
+                mas_command=request.mas_command(),
                 children=children,
                 wait_result=wait_result,
             )
         return self.result_formatter.detached_spawn(
-            mas_command=["spawn", *request.tasks],
+            mas_command=request.mas_command(),
             children=children,
         )
 
@@ -595,6 +607,10 @@ def _parse_timeout_seconds(raw_timeout: str) -> float:
     if timeout_seconds < 0:
         raise ValueError("Spawn timeout must be non-negative")
     return timeout_seconds
+
+
+def _format_timeout_seconds(timeout_seconds: float) -> str:
+    return f"{timeout_seconds:g}"
 
 
 def _parse_spawn_arguments(arguments: list[str]) -> SpawnCommandRequest:

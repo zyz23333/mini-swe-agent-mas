@@ -103,6 +103,7 @@ def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypa
         ),
     ]
     assert result["extra"]["waited"] is True
+    assert result["extra"]["mas_command"] == ["spawn", "--wait", "--all", "--timeout", "0.5", "task A", "task B"]
     assert result["extra"]["wait_mode"] == "all"
     assert result["extra"]["timed_out"] is True
     assert result["extra"]["child_agent_ids"] == ["mas-1111111111111111", "mas-2222222222222222"]

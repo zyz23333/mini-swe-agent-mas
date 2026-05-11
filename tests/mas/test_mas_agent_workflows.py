@@ -1,3 +1,4 @@
+import asyncio
 import importlib
 import inspect
 import json
@@ -18,6 +19,7 @@ from .helpers import (
     _mock_dbos_module,
     _mock_recording_dbos_module,
     _observation_text,
+    _recording_child_queue,
 )
 
 
@@ -341,6 +343,88 @@ def test_interactive_root_agent_routes_standalone_mas_commands_and_rejects_compo
     composed_result = events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-composed"]["result"]
     assert composed_result["returncode"] == 2
     assert "mini-mas must be issued as a standalone command" in composed_result["output"]
+
+
+def test_interactive_root_agent_waited_spawn_result_uses_existing_waited_shape_and_lifecycle(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX, ROOT_COMMAND_TOPIC
+
+    published = []
+    child_queue = _recording_child_queue()
+    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+    monkeypatch.setattr(workflows.agent_interactions, "make_agent_id", lambda: "mas-1111111111111111")
+    monkeypatch.setattr(workflows._dbos.DBOS, "asyncio_wait", Mock(wraps=asyncio.wait))
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        assert topic == ROOT_COMMAND_TOPIC
+        return {
+            "kind": "root_command",
+            "command_id": "cmd-waited-spawn",
+            "root_agent_id": "mas-0123456789abcdef",
+            "command": 'mini-mas spawn --wait --timeout 0.01 "task A"',
+            "source": "external_cli",
+        }
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        assert workflow_id == "mas-1111111111111111"
+        assert key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY
+        assert timeout_seconds == 0.01
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "get_event_async", Mock(side_effect=get_event_async))
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    result = _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        step_limit=0,
+        max_commands=1,
+    )
+
+    assert result["lifecycle_state"] == "waiting_for_command"
+    env.execute.assert_not_called()
+    assert [call["args"][0] for call in child_queue.enqueued] == ["mas-1111111111111111"]
+
+    events_by_key = {key: value for key, value in published if key.startswith(ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX)}
+    event = events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-waited-spawn"]
+    assert event["command"] == 'mini-mas spawn --wait --timeout 0.01 "task A"'
+    command_result = event["result"]
+    assert command_result["returncode"] == 0
+    assert "Waited spawn timed out" in command_result["output"]
+    assert "wait_mode: any" in command_result["output"]
+    assert "ready_child_count: 0" in command_result["output"]
+    assert "still_running_child_agent_ids: mas-1111111111111111" in command_result["output"]
+
+    extra = command_result["extra"]
+    assert extra["waited"] is True
+    assert extra["wait_mode"] == "any"
+    assert extra["timed_out"] is True
+    assert extra["ready_children"] == []
+    assert extra["still_running_child_agent_ids"] == ["mas-1111111111111111"]
+
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in status_events] == [
+        "waiting_for_command",
+        "running",
+        "waiting_for_child",
+        "running",
+        "waiting_for_command",
+    ]
 
 
 def test_interactive_root_agent_publishes_result_and_stays_alive_after_recoverable_command_error(

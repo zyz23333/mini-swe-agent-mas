@@ -285,6 +285,73 @@ def test_mini_mas_multi_spawn_prints_one_root_id_and_each_child(monkeypatch):
     )
 
 
+def test_mini_mas_spawn_wait_options_are_preserved_as_mas_wait_options(monkeypatch):
+    one_shot_spawn = Mock(
+        return_value={
+            "kind": "one_shot_spawn",
+            "root_agent_id": "mas-1111111111111111",
+            "command": "mini-mas spawn --wait --all --timeout 0.5 'task A' 'task B'",
+            "result": {
+                "output": (
+                    "Waited spawn timed out\n"
+                    "wait_mode: all\n"
+                    "child_count: 2\n"
+                    "ready_child_count: 1\n"
+                    "still_running_child_agent_ids: mas-3333333333333333\n"
+                    "\n"
+                    "started_children:\n"
+                    "task: task A\n"
+                    "agent_id: mas-2222222222222222\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json\n"
+                    "\n"
+                    "task: task B\n"
+                    "agent_id: mas-3333333333333333\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
+                    "\n"
+                    "ready_children:\n"
+                    "ready_agent_id: mas-2222222222222222\n"
+                    "lifecycle_state: waiting_for_parent\n"
+                    "latest_submission: ready\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json\n"
+                ),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {
+                    "waited": True,
+                    "wait_mode": "all",
+                    "timed_out": True,
+                    "ready_children": [{"agent_id": "mas-2222222222222222"}],
+                    "still_running_child_agent_ids": ["mas-3333333333333333"],
+                },
+            },
+            "returncode": 0,
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.one_shot_spawn_through_interactive_root", one_shot_spawn)
+
+    cli_result = CliRunner().invoke(
+        app,
+        ["spawn", "--result-timeout", "7", "--wait", "--all", "--timeout", "0.5", "task A", "task B"],
+    )
+
+    assert cli_result.exit_code == 0
+    assert "root_agent_id: mas-1111111111111111" in cli_result.stdout
+    assert "Waited spawn timed out" in cli_result.stdout
+    assert "wait_mode: all" in cli_result.stdout
+    assert "ready_agent_id: mas-2222222222222222" in cli_result.stdout
+    assert "still_running_child_agent_ids: mas-3333333333333333" in cli_result.stdout
+    one_shot_spawn.assert_called_once_with(
+        spawn_arguments=["--wait", "--all", "--timeout", "0.5", "task A", "task B"],
+        result_timeout_seconds=7,
+        system_database_url=None,
+    )
+
+
 def test_mini_mas_spawn_timeout_reports_resumable_root_without_canceling_children(monkeypatch):
     one_shot_spawn = Mock(
         return_value={
