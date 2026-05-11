@@ -11,17 +11,43 @@ from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
     get_agent_workflow_status,
+    start_interactive_root_agent_workflow,
     start_root_agent_workflow,
     wait_for_agent_workflow,
 )
 
-app = typer.Typer(rich_markup_mode="rich", help="Run DBOS-backed mini-SWE-agent MAS commands.")
+app = typer.Typer(
+    rich_markup_mode="rich",
+    help="Run DBOS-backed mini-SWE-agent MAS commands.",
+    invoke_without_command=True,
+)
 console = Console(highlight=False, soft_wrap=True)
 
 
 @app.callback()
-def main() -> None:
+def main(
+    ctx: typer.Context,
+    system_database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--system-database-url",
+            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
+            show_default=False,
+        ),
+    ] = None,
+) -> None:
     """External MAS CLI entrypoint."""
+    if ctx.invoked_subcommand is not None:
+        return
+    result = dict(start_interactive_root_agent_workflow(system_database_url=system_database_url))
+    _print_root_metadata_banner(result)
+
+
+def _print_root_metadata_banner(result: dict[str, Any]) -> None:
+    console.print(f"agent_id: {result['agent_id']}")
+    console.print(f"lifecycle_state: {result['lifecycle_state']}")
+    console.print(f"agent_artifact_directory: {result['agent_artifact_directory']}")
+    console.print(f"trajectory_artifact_path: {result['trajectory_artifact_path']}")
 
 
 @app.command(help="Start a minimal Root Agent through DBOS.")

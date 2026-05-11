@@ -10,8 +10,17 @@ from minisweagent.mas.artifacts import make_artifact_metadata, validate_agent_id
 
 STATUS_EVENT_KEY = "mini_mas_status"
 FIRST_OBSERVABLE_EVENT_KEY = "mini_mas_first_observable"
-LifecycleState = Literal["running", "waiting_for_child", "waiting_for_parent", "closed", "failed", "limits_exceeded"]
+LifecycleState = Literal[
+    "waiting_for_command",
+    "running",
+    "waiting_for_child",
+    "waiting_for_parent",
+    "closed",
+    "failed",
+    "limits_exceeded",
+]
 LIFECYCLE_STATES: tuple[LifecycleState, ...] = (
+    "waiting_for_command",
     "running",
     "waiting_for_child",
     "waiting_for_parent",

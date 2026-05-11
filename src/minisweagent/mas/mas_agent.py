@@ -394,6 +394,70 @@ class MasAgent:
         return closed_result
 
 
+class MasInteractiveAgent:
+    """Interactive Root Agent lifecycle owner; DBOS decorators stay on module-level functions."""
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        model,
+        env,
+        step_limit: int,
+    ) -> None:
+        self.agent_id = validate_agent_id(agent_id)
+        self.workflow_id = self.agent_id
+        self.parent_agent_id = None
+        self.model = model
+        self.env = env
+        self.step_limit = step_limit
+        self.messages: list[dict] = []
+
+    async def run_until_idle(self) -> dict:
+        """Record the minimal idle Interactive Root Agent state."""
+        metadata = await self._save_trajectory(status="waiting_for_command")
+        await self._publish_status("waiting_for_command")
+        return {
+            "status": "waiting_for_command",
+            "terminal_state": "waiting_for_command",
+            "lifecycle_state": "waiting_for_command",
+            **metadata,
+        }
+
+    async def _publish_status(
+        self,
+        lifecycle_state: LifecycleState,
+        *,
+        latest_submission: str = "",
+        latest_error: str = "",
+    ) -> None:
+        await agent_interactions.publish_status(
+            agent_id=self.workflow_id,
+            parent_agent_id=self.parent_agent_id,
+            lifecycle_state=lifecycle_state,
+            latest_submission=latest_submission,
+            latest_error=latest_error,
+        )
+
+    async def _save_trajectory(
+        self,
+        *,
+        status: str,
+        model_stats: dict | None = None,
+        submission: str = "",
+    ) -> dict[str, str]:
+        return await _maybe_await(
+            save_trajectory_artifact_step(
+                self.agent_id,
+                self.parent_agent_id,
+                status=status,
+                messages=self.messages or None,
+                model_stats=model_stats,
+                submission=submission,
+            )
+        )
+
+
 @_dbos.DBOS.step()
 async def save_trajectory_artifact_step(
     agent_id: str,
@@ -466,6 +530,32 @@ async def _run_agent_workflow_with_context(
         step_limit=step_limit,
     )
     return await agent.run(task=task, initial_messages=initial_messages)
+
+
+@_dbos.DBOS.workflow()
+async def interactive_root_agent_workflow(
+    agent_id: str,
+    *,
+    model=None,
+    env=None,
+    step_limit: int = 0,
+) -> dict:
+    """Interactive Root Agent DBOS workflow for the minimal idle CLI path."""
+    agent_id = validate_agent_id(agent_id)
+    original_workflow_id = _current_agent_workflow_id()
+    if original_workflow_id is None:
+        _dbos.DBOS.workflow_id = agent_id
+    try:
+        agent = MasInteractiveAgent(
+            agent_id=agent_id,
+            model=model,
+            env=env,
+            step_limit=step_limit,
+        )
+        return await agent.run_until_idle()
+    finally:
+        if original_workflow_id is None:
+            _dbos.DBOS.workflow_id = original_workflow_id
 
 
 @_dbos.DBOS.workflow()

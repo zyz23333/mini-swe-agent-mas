@@ -11,6 +11,43 @@ from .helpers import (
 )
 
 
+def test_plain_mini_mas_creates_interactive_root_and_prints_metadata_banner():
+    handle = AsyncMockHandle(
+        "mas-2222222222222222",
+        {
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+        },
+    )
+
+    async def start_workflow_async(*_args, **_kwargs):
+        return handle
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        patch("minisweagent.mas.runtime.make_agent_id", return_value="mas-2222222222222222"),
+    ):
+        cli_result = CliRunner().invoke(app, [])
+
+    assert cli_result.exit_code == 0
+    assert "agent_id: mas-2222222222222222" in cli_result.stdout
+    assert "lifecycle_state: waiting_for_command" in cli_result.stdout
+    assert "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222" in cli_result.stdout
+    assert (
+        "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
+        in cli_result.stdout
+    )
+
+    workflow_func = dbos_module.DBOS.start_workflow_async.call_args.args[0]
+    assert workflow_func.__name__ == "interactive_root_agent_workflow"
+    assert dbos_module.DBOS.start_workflow_async.call_args.args[1] == "mas-2222222222222222"
+
+
 def test_mini_mas_run_cli_outputs_artifact_locations():
     handle = AsyncMockHandle(
         "mas-2222222222222222",

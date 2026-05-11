@@ -47,6 +47,13 @@ def _format_run_result(*, agent_id: str, result: Any | None, wait: bool) -> dict
     return data
 
 
+def _format_interactive_root_result(*, agent_id: str, result: Mapping[str, Any] | None) -> dict[str, Any]:
+    data: dict[str, Any] = make_artifact_metadata(agent_id=agent_id)
+    if result is not None and result.get("lifecycle_state"):
+        data["lifecycle_state"] = result["lifecycle_state"]
+    return data
+
+
 def _unsupported_external_agent_interaction_result(*, workflow_id: str) -> dict[str, Any]:
     """Return the shared unsupported result for naked external Agent Interaction commands."""
     return {
@@ -94,6 +101,43 @@ def start_root_agent_workflow(
         _start_root_agent_workflow_async(
             workflow_id=workflow_id,
             wait=wait,
+            system_database_url=system_database_url,
+        )
+    )
+
+
+async def _start_interactive_root_agent_workflow_async(
+    *,
+    workflow_id: str | None = None,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Async implementation for starting the minimal Interactive Root Agent."""
+    dbos_module = load_dbos()
+
+    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+
+    from minisweagent.mas.mas_agent import interactive_root_agent_workflow
+
+    dbos_module.DBOS.launch()
+
+    assigned_workflow_id = validate_agent_id(workflow_id or make_agent_id())
+    with dbos_module.SetWorkflowID(assigned_workflow_id):
+        handle = await dbos_module.DBOS.start_workflow_async(interactive_root_agent_workflow, assigned_workflow_id)
+
+    started_workflow_id = _handle_workflow_id(handle)
+    result = await handle.get_result()
+    return _format_interactive_root_result(agent_id=started_workflow_id, result=result)
+
+
+def start_interactive_root_agent_workflow(
+    *,
+    workflow_id: str | None = None,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Initialize DBOS and start the minimal Interactive Root Agent path."""
+    return asyncio.run(
+        _start_interactive_root_agent_workflow_async(
+            workflow_id=workflow_id,
             system_database_url=system_database_url,
         )
     )

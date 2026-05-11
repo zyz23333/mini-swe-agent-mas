@@ -42,6 +42,62 @@ def test_root_agent_workflow_writes_trajectory_artifact(tmp_path, monkeypatch):
     assert "workflow_id" not in artifact["info"]
     assert artifact["info"]["agent_artifact_directory"] == ".mini-mas/agents/mas-0123456789abcdef"
 
+
+def test_interactive_root_agent_workflow_publishes_waiting_for_command_and_writes_artifact(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+
+    result = _call_root_agent_workflow(workflows.interactive_root_agent_workflow, "mas-0123456789abcdef")
+
+    assert result == {
+        "agent_id": "mas-0123456789abcdef",
+        "status": "waiting_for_command",
+        "terminal_state": "waiting_for_command",
+        "lifecycle_state": "waiting_for_command",
+        "agent_artifact_directory": ".mini-mas/agents/mas-0123456789abcdef",
+        "trajectory_artifact_path": ".mini-mas/agents/mas-0123456789abcdef/trajectory.traj.json",
+    }
+    assert published == [
+        (
+            mas_status_events.STATUS_EVENT_KEY,
+            {
+                "agent_id": "mas-0123456789abcdef",
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-0123456789abcdef",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-0123456789abcdef/trajectory.traj.json",
+            },
+        )
+    ]
+
+    trajectory_path = tmp_path / result["trajectory_artifact_path"]
+    artifact = json.loads(trajectory_path.read_text())
+    assert artifact["info"]["agent_id"] == "mas-0123456789abcdef"
+    assert artifact["info"]["exit_status"] == "waiting_for_command"
+    assert artifact["info"]["agent_artifact_directory"] == ".mini-mas/agents/mas-0123456789abcdef"
+    assert artifact["info"]["trajectory_artifact_path"] == result["trajectory_artifact_path"]
+    assert "parent_agent_id" not in artifact["info"]
+    assert "is_root" not in artifact["info"]
+    assert "interaction_mode" not in artifact["info"]
+
+
+def test_waiting_for_command_lifecycle_is_owned_by_mas_interactive_agent():
+    import minisweagent.mas.mas_agent as workflows
+
+    assert hasattr(workflows, "MasInteractiveAgent")
+    assert not issubclass(workflows.MasInteractiveAgent, workflows.MasAgent)
+    assert not hasattr(workflows.MasAgent, "record_waiting_for_command")
+    assert callable(workflows.MasInteractiveAgent.run_until_idle)
+
+
 def test_child_agent_workflow_writes_artifact_under_root_agent_artifact_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
