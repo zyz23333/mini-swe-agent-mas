@@ -277,6 +277,80 @@ def _parent_workflow_id(workflow_status: Any) -> str | None:
     return str(parent_workflow_id) if parent_workflow_id else None
 
 
+def _root_discovery_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = normalize_agent_snapshot(dict(snapshot))
+    return {
+        "agent_id": metadata["agent_id"],
+        "lifecycle_state": metadata["lifecycle_state"],
+        "agent_artifact_directory": metadata["agent_artifact_directory"],
+        "trajectory_artifact_path": metadata["trajectory_artifact_path"],
+    }
+
+
+def _format_root_discovery(snapshots: list[Mapping[str, Any]]) -> str:
+    lines = ["Interactive Root Agents"]
+    if not snapshots:
+        lines.append("No Interactive Root Agents found.")
+        return "\n".join(lines) + "\n"
+
+    for index, snapshot in enumerate(snapshots):
+        if index:
+            lines.append("")
+        lines.extend(
+            [
+                f"agent_id: {snapshot['agent_id']}",
+                f"lifecycle_state: {snapshot['lifecycle_state']}",
+                f"agent_artifact_directory: {snapshot['agent_artifact_directory']}",
+                f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
+            ]
+        )
+    return "\n".join(lines) + "\n"
+
+
+async def _discover_interactive_root_agents_async(
+    *,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Async implementation for external Interactive Root Agent discovery."""
+    dbos_module = load_dbos()
+    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+    dbos_module.DBOS.launch()
+
+    workflow_statuses = await dbos_module.DBOS.list_workflows_async(
+        name="interactive_root_agent_workflow",
+        has_parent=False,
+        load_input=False,
+        load_output=False,
+    )
+
+    snapshots: list[dict[str, Any]] = []
+    for workflow_status in workflow_statuses:
+        if _parent_workflow_id(workflow_status) is not None or not _is_interactive_root_workflow(workflow_status):
+            continue
+        workflow_id = validate_agent_id(str(getattr(workflow_status, "workflow_id", "")))
+        snapshot = await dbos_module.DBOS.get_event_async(workflow_id, STATUS_EVENT_KEY, 1)
+        if not isinstance(snapshot, Mapping):
+            msg = f"Missing lifecycle status event for Interactive Root Agent: {workflow_id}"
+            raise RuntimeError(msg)
+        snapshots.append(_root_discovery_snapshot(snapshot))
+
+    snapshots = sorted(snapshots, key=lambda snapshot: snapshot["agent_id"])
+    return {
+        "kind": "interactive_root_discovery",
+        "roots": snapshots,
+        "output": _format_root_discovery(snapshots),
+        "returncode": 0,
+    }
+
+
+def discover_interactive_root_agents(
+    *,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Initialize DBOS and list parentless Interactive Root Agent workflows."""
+    return asyncio.run(_discover_interactive_root_agents_async(system_database_url=system_database_url))
+
+
 async def _prepare_resume_root_agent_async(
     *,
     root_agent_id: str,

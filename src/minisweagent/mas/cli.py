@@ -10,6 +10,7 @@ from rich.console import Console
 from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
+    discover_interactive_root_agents,
     get_agent_workflow_status,
     prepare_resume_root_agent,
     send_root_command,
@@ -86,9 +87,9 @@ def run(
     return result
 
 
-@app.command(help="Inspect a Root Agent or one descendant Agent without waiting for completion.")
+@app.command(help="List Interactive Root Agents, or keep the legacy external Agent status error for an explicit ID.")
 def status(
-    workflow_id: Annotated[str, typer.Argument(help="Root or descendant Agent ID to inspect.")],
+    workflow_id: Annotated[str | None, typer.Argument(help="Legacy Root or descendant Agent ID to inspect.")] = None,
     system_database_url: Annotated[
         str | None,
         typer.Option(
@@ -98,6 +99,11 @@ def status(
         ),
     ] = None,
 ) -> dict[str, Any]:
+    if workflow_id is None:
+        result = dict(discover_interactive_root_agents(system_database_url=system_database_url))
+        console.print(result["output"], end="")
+        return result
+
     result = dict(get_agent_workflow_status(workflow_id=workflow_id, system_database_url=system_database_url))
     console.print(result["output"], end="")
     raise typer.Exit(code=result["returncode"])

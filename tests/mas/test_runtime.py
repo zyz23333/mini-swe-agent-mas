@@ -7,6 +7,7 @@ from minisweagent.mas.cli import run
 from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
+    discover_interactive_root_agents,
     get_agent_workflow_status,
     prepare_resume_root_agent,
     send_root_command,
@@ -347,10 +348,146 @@ def test_resume_preparation_returns_metadata_for_waiting_interactive_root():
     }
 
 
+def test_external_status_discovers_parentless_interactive_root_agents_only():
+    statuses = [
+        _workflow_status_record("mas-1111111111111111"),
+        _workflow_status_record("mas-2222222222222222", parent_workflow_id="mas-9999999999999999"),
+        _workflow_status_record("mas-3333333333333333"),
+    ]
+    statuses[0].name = "interactive_root_agent_workflow"
+    statuses[1].name = "interactive_root_agent_workflow"
+    statuses[2].name = "root_agent_workflow"
+    snapshots = {
+        "mas-1111111111111111": {
+            "agent_id": "mas-1111111111111111",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        },
+    }
+
+    async def list_workflows_async(**kwargs):
+        assert kwargs == {
+            "name": "interactive_root_agent_workflow",
+            "has_parent": False,
+            "load_input": False,
+            "load_output": False,
+        }
+        return statuses
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return snapshots[workflow_id]
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        result = discover_interactive_root_agents()
+
+    dbos_module.DBOS.assert_called_once_with(
+        config={
+            "name": "mini-swe-agent-mas",
+            "system_database_url": None,
+        }
+    )
+    dbos_module.DBOS.launch.assert_called_once_with()
+    dbos_module.DBOS.get_event_async.assert_called_once_with("mas-1111111111111111", "mini_mas_status", 1)
+    assert result["kind"] == "interactive_root_discovery"
+    assert result["returncode"] == 0
+    assert result["roots"] == [
+        {
+            "agent_id": "mas-1111111111111111",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+    ]
+    assert "Interactive Root Agents" in result["output"]
+    assert "agent_id: mas-1111111111111111" in result["output"]
+    assert "lifecycle_state: waiting_for_command" in result["output"]
+    assert "mas-2222222222222222" not in result["output"]
+    assert "mas-3333333333333333" not in result["output"]
+    assert "Child Agent" not in result["output"]
+    assert "latest_" not in result["output"]
+
+
+def test_external_status_lists_non_resumable_root_agents_with_lifecycle_state():
+    running_status = _workflow_status_record("mas-1111111111111111")
+    failed_status = _workflow_status_record("mas-2222222222222222")
+    running_status.name = "interactive_root_agent_workflow"
+    failed_status.name = "interactive_root_agent_workflow"
+
+    async def list_workflows_async(**_kwargs):
+        return [failed_status, running_status]
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": "failed" if workflow_id == "mas-2222222222222222" else "running",
+            "agent_artifact_directory": f".mini-mas/agents/{workflow_id}",
+            "trajectory_artifact_path": f".mini-mas/agents/{workflow_id}/trajectory.traj.json",
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        result = discover_interactive_root_agents()
+
+    assert "agent_id: mas-1111111111111111" in result["output"]
+    assert "lifecycle_state: running" in result["output"]
+    assert "agent_id: mas-2222222222222222" in result["output"]
+    assert "lifecycle_state: failed" in result["output"]
+
+
+def test_external_status_dbos_errors_propagate_visibly():
+    async def list_workflows_async(**_kwargs):
+        raise RuntimeError("dbos query failed")
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module), pytest.raises(
+        RuntimeError, match="dbos query failed"
+    ):
+        discover_interactive_root_agents()
+
+
+def test_external_status_dbos_configuration_errors_propagate_visibly():
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.side_effect = RuntimeError("dbos config failed")
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module), pytest.raises(
+        RuntimeError, match="dbos config failed"
+    ):
+        discover_interactive_root_agents()
+
+
+def test_external_status_snapshot_read_errors_propagate_visibly():
+    status = _workflow_status_record("mas-1111111111111111")
+    status.name = "interactive_root_agent_workflow"
+
+    async def list_workflows_async(**_kwargs):
+        return [status]
+
+    async def get_event_async(_workflow_id, _key, timeout_seconds=60):
+        raise RuntimeError("status event read failed")
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module), pytest.raises(
+        RuntimeError, match="status event read failed"
+    ):
+        discover_interactive_root_agents()
+
+
 @pytest.mark.parametrize(
     ("runtime_func", "kwargs"),
     [
-        (get_agent_workflow_status, {"workflow_id": "mas-2222222222222222"}),
         (wait_for_agent_workflow, {"workflow_id": "mas-2222222222222222", "timeout_seconds": 1.0}),
         (
             continue_agent_workflow,
@@ -379,3 +516,16 @@ def test_external_agent_interaction_runtimes_share_unsupported_response_without_
         "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
     }
     assert "unsupported until terminal commands are routed through an Interactive Root Agent" in result["output"]
+
+
+def test_external_status_with_agent_id_keeps_unsupported_external_agent_interaction_response():
+    dbos_module = _mock_dbos_module()
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        result = get_agent_workflow_status(workflow_id="mas-2222222222222222")
+
+    dbos_module.DBOS.assert_not_called()
+    dbos_module.DBOS.launch.assert_not_called()
+    assert result["kind"] == "unsupported"
+    assert result["agent_id"] == "mas-2222222222222222"
+    assert result["returncode"] == 2

@@ -78,7 +78,57 @@ def test_mini_mas_run_cli_outputs_artifact_locations():
         in cli_result.stdout
     )
 
-def test_mini_mas_status_cli_reports_external_agent_interaction_unsupported(monkeypatch):
+
+def test_mini_mas_status_cli_lists_interactive_root_agents(monkeypatch):
+    discover = Mock(
+        return_value={
+            "kind": "interactive_root_discovery",
+            "roots": [
+                {
+                    "agent_id": "mas-2222222222222222",
+                    "lifecycle_state": "waiting_for_command",
+                    "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+                    "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+                },
+                {
+                    "agent_id": "mas-3333333333333333",
+                    "lifecycle_state": "failed",
+                    "agent_artifact_directory": ".mini-mas/agents/mas-3333333333333333",
+                    "trajectory_artifact_path": ".mini-mas/agents/mas-3333333333333333/trajectory.traj.json",
+                },
+            ],
+            "output": (
+                "Interactive Root Agents\n"
+                "\n"
+                "agent_id: mas-2222222222222222\n"
+                "lifecycle_state: waiting_for_command\n"
+                "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222\n"
+                "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json\n"
+                "\n"
+                "agent_id: mas-3333333333333333\n"
+                "lifecycle_state: failed\n"
+                "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
+                "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
+            ),
+            "returncode": 0,
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.discover_interactive_root_agents", discover)
+
+    cli_result = CliRunner().invoke(app, ["status"])
+
+    assert cli_result.exit_code == 0
+    assert "Interactive Root Agents" in cli_result.stdout
+    assert "agent_id: mas-2222222222222222" in cli_result.stdout
+    assert "lifecycle_state: waiting_for_command" in cli_result.stdout
+    assert "agent_id: mas-3333333333333333" in cli_result.stdout
+    assert "lifecycle_state: failed" in cli_result.stdout
+    assert "Child Agent" not in cli_result.stdout
+    assert "latest_" not in cli_result.stdout
+    discover.assert_called_once_with(system_database_url=None)
+
+
+def test_mini_mas_status_cli_with_agent_id_keeps_external_agent_interaction_unsupported(monkeypatch):
     monkeypatch.setattr(
         "minisweagent.mas.cli.get_agent_workflow_status",
         Mock(

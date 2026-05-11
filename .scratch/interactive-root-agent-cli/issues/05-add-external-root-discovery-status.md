@@ -1,6 +1,6 @@
 # Add external Root discovery with mini-mas status
 
-Status: ready-for-agent
+Status: done
 
 ## Parent
 
@@ -13,15 +13,15 @@ Implement external `mini-mas status` as a discovery view for Interactive Root Ag
 
 ## Acceptance criteria
 
-- [ ] `mini-mas status` lists parentless Interactive Root Agent workflows.
-- [ ] Root discovery filters parentless workflows by Interactive Root Agent workflow type/name.
-- [ ] Parentless non-Interactive workflows are not shown in external `mini-mas status`.
-- [ ] Root discovery does not depend on a global root, Root Agent index, `is_root` flag, or interaction-mode flag.
-- [ ] The output includes Root Agent ID, lifecycle state, Agent Artifact Directory, and Trajectory Artifact path.
-- [ ] Failed or otherwise non-resumable Root Agents are still listed with their lifecycle state.
-- [ ] The output does not include Child Agent counts, Child Agent status, latest commands, or history summaries.
-- [ ] Workflow-layer `mini-mas status` inside an Agent remains the direct-child status command and is not conflated with external discovery.
-- [ ] DBOS query or configuration errors fail visibly and preserve the underlying error instead of returning an empty status list.
+- [x] `mini-mas status` lists parentless Interactive Root Agent workflows.
+- [x] Root discovery filters parentless workflows by Interactive Root Agent workflow type/name.
+- [x] Parentless non-Interactive workflows are not shown in external `mini-mas status`.
+- [x] Root discovery does not depend on a global root, Root Agent index, `is_root` flag, or interaction-mode flag.
+- [x] The output includes Root Agent ID, lifecycle state, Agent Artifact Directory, and Trajectory Artifact path.
+- [x] Failed or otherwise non-resumable Root Agents are still listed with their lifecycle state.
+- [x] The output does not include Child Agent counts, Child Agent status, latest commands, or history summaries.
+- [x] Workflow-layer `mini-mas status` inside an Agent remains the direct-child status command and is not conflated with external discovery.
+- [x] DBOS query or configuration errors fail visibly and preserve the underlying error instead of returning an empty status list.
 
 ## Blocked by
 
@@ -56,17 +56,17 @@ Implement external `mini-mas status` as a discovery view for Interactive Root Ag
 > - Workflow-layer `mini-mas status [agent-id]` command - should remain the Direct Child Agent status command inside an Agent context.
 >
 > **Acceptance criteria:**
-> - [ ] Running external `mini-mas status` lists parentless Interactive Root Agent workflows without requiring an Agent ID argument.
-> - [ ] Discovery filters parentless workflows by Interactive Root Agent workflow type/name.
-> - [ ] Parentless non-Interactive workflows are not shown.
-> - [ ] Child Agent workflows are not shown, even when their lifecycle status event is available.
-> - [ ] Discovery does not depend on a global root, Root Agent index, `is_root` field, interaction-mode field, run ID, or Agent ID parsing.
-> - [ ] Each displayed Root Agent includes Root Agent ID, lifecycle state, Agent Artifact Directory, and Trajectory Artifact path.
-> - [ ] Failed, closed, running, waiting-for-child, waiting-for-command, and other non-resumable Interactive Root Agents are still listed with their lifecycle state.
-> - [ ] Output does not include Child Agent counts, Child Agent status, latest commands, latest submissions, latest errors, or history summaries.
-> - [ ] Workflow-layer `mini-mas status` inside an Agent remains scoped to the current Parent Agent's direct Child Agents and keeps accepting its existing target/no-target workflow-layer forms.
-> - [ ] DBOS query, DBOS configuration, and status event read failures fail visibly and preserve the underlying error instead of returning an empty Root discovery list.
-> - [ ] Tests cover external status CLI output, parentless Interactive Root filtering, exclusion of non-Interactive and child workflows, non-resumable Root Agent listing, error propagation, and preservation of workflow-layer direct-child status behavior.
+> - [x] Running external `mini-mas status` lists parentless Interactive Root Agent workflows without requiring an Agent ID argument.
+> - [x] Discovery filters parentless workflows by Interactive Root Agent workflow type/name.
+> - [x] Parentless non-Interactive workflows are not shown.
+> - [x] Child Agent workflows are not shown, even when their lifecycle status event is available.
+> - [x] Discovery does not depend on a global root, Root Agent index, `is_root` field, interaction-mode field, run ID, or Agent ID parsing.
+> - [x] Each displayed Root Agent includes Root Agent ID, lifecycle state, Agent Artifact Directory, and Trajectory Artifact path.
+> - [x] Failed, closed, running, waiting-for-child, waiting-for-command, and other non-resumable Interactive Root Agents are still listed with their lifecycle state.
+> - [x] Output does not include Child Agent counts, Child Agent status, latest commands, latest submissions, latest errors, or history summaries.
+> - [x] Workflow-layer `mini-mas status` inside an Agent remains scoped to the current Parent Agent's direct Child Agents and keeps accepting its existing target/no-target workflow-layer forms.
+> - [x] DBOS query, DBOS configuration, and status event read failures fail visibly and preserve the underlying error instead of returning an empty Root discovery list.
+> - [x] Tests cover external status CLI output, parentless Interactive Root filtering, exclusion of non-Interactive and child workflows, non-resumable Root Agent listing, error propagation, and preservation of workflow-layer direct-child status behavior.
 >
 > **Out of scope:**
 > - Implementing `mini-mas resume`.
@@ -75,3 +75,15 @@ Implement external `mini-mas status` as a discovery view for Interactive Root Ag
 > - Showing Child Agent details, child counts, latest Root commands, latest submissions, latest errors, or trajectory summaries in external status.
 > - Adding a global root, Root Agent index, `is_root` flag, interaction-mode flag, run ID, root-scoped artifact paths, or Agent ID parsing.
 > - Changing Direct Child Authority or granting the Root Agent tree-wide Authority.
+
+> *This was generated by AI during execution.*
+>
+> Implemented external `mini-mas status` as an Interactive Root Agent discovery view. The CLI now accepts `mini-mas status` without an Agent ID, queries DBOS for parentless `interactive_root_agent_workflow` records, reads each Root Agent lifecycle snapshot, and prints only Root Agent ID, lifecycle state, Agent Artifact Directory, and Trajectory Artifact path. The discovery path re-checks DBOS parent metadata and workflow name before rendering, omits child/status/history details, preserves the existing explicit-ID external unsupported response, and leaves workflow-layer `mini-mas status` scoped to direct Child Agents.
+>
+> Verification:
+> - `uv run pytest tests/mas/test_runtime.py::test_external_status_discovers_parentless_interactive_root_agents_only tests/mas/test_runtime.py::test_external_status_lists_non_resumable_root_agents_with_lifecycle_state tests/mas/test_runtime.py::test_external_status_dbos_errors_propagate_visibly tests/mas/test_runtime.py::test_external_status_snapshot_read_errors_propagate_visibly tests/mas/test_cli.py::test_mini_mas_status_cli_lists_interactive_root_agents -q` -> passed
+> - `uv run pytest tests/mas/test_runtime.py::test_external_status_dbos_configuration_errors_propagate_visibly tests/mas/test_runtime.py::test_external_status_discovers_parentless_interactive_root_agents_only tests/mas/test_cli.py::test_mini_mas_status_cli_lists_interactive_root_agents -q` -> passed
+> - `uv run pytest tests/mas/test_agent_interactions.py::test_workflow_status_reports_current_tree_without_blocking tests/mas/test_agent_interactions.py::test_workflow_status_reports_specific_descendant_and_missing_workflow -q` -> passed
+> - `uv run pytest tests/mas -q` -> 141 passed
+> - `uv run ruff check src/minisweagent/mas tests/mas` -> passed
+> - `git diff --check` -> passed
