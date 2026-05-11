@@ -8,8 +8,6 @@ from typing import Any, Protocol
 from minisweagent.mas import agent_interactions
 from minisweagent.mas.artifacts import validate_agent_id
 
-from .status_events import root_id_for_workflow
-
 
 @dataclass(frozen=True)
 class AuthorityCommandError:
@@ -79,8 +77,6 @@ class DirectChildAuthorityPolicy:
 
         if target_workflow_id == parent_workflow_id:
             return _cannot_target_current_workflow(command_name)
-        if target_workflow_id == root_id_for_workflow(parent_workflow_id):
-            return _cannot_target_root_workflow(command_name)
 
         snapshot = await agent_interactions.query_direct_child_status(
             parent_workflow_id=parent_workflow_id,
@@ -121,16 +117,6 @@ def _cannot_target_current_workflow(command_name: str) -> AuthorityCommandError:
         exception_info=f"cannot_{command_name}_current_agent",
         extra={"mas_command_error": f"cannot_{command_name}_current_agent"},
     )
-
-
-def _cannot_target_root_workflow(command_name: str) -> AuthorityCommandError:
-    return AuthorityCommandError(
-        output=f"Cannot {command_name} the Root Agent.\n",
-        returncode=1,
-        exception_info=f"cannot_{command_name}_root_agent",
-        extra={"mas_command_error": f"cannot_{command_name}_root_agent"},
-    )
-
 
 def _agent_not_direct_child(parent_workflow_id: str, target_workflow_id: str) -> AuthorityCommandError:
     return AuthorityCommandError(

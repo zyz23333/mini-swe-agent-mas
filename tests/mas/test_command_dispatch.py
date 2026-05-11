@@ -20,28 +20,26 @@ def test_mas_command_handler_accepts_classified_standalone_command():
         "extra": {"mas_command_error": "missing_agent_context"},
     }
 
-def test_mas_command_handler_owns_spawn_cursor_and_uses_agent_interaction_functions(monkeypatch):
+def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypatch):
     import minisweagent.mas.commands as commands
     from minisweagent.mas.agent_interactions import ChildWaitResult, SpawnChildrenResult
     from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
 
     calls = []
 
-    async def spawn_children(*, root_workflow_id, parent_workflow_id, first_spawn_index, tasks):
-        calls.append(("spawn", root_workflow_id, parent_workflow_id, first_spawn_index, tuple(tasks)))
+    async def spawn_children(*, parent_workflow_id, tasks):
+        calls.append(("spawn", parent_workflow_id, tuple(tasks)))
+        child_ids = ["mas-1111111111111111", "mas-2222222222222222"] if len(tasks) > 1 else ["mas-3333333333333333"]
         return SpawnChildrenResult(
             children=[
                 {
                     "task": task,
-                    "root_workflow_id": root_workflow_id,
-                    "workflow_id": f"{parent_workflow_id}-c{first_spawn_index + offset:03d}",
-                    "run_directory": f".mini-mas/runs/{root_workflow_id}",
-                    "trajectory_artifact_path": (
-                        f".mini-mas/runs/{root_workflow_id}/trajectories/"
-                        f"{parent_workflow_id}-c{first_spawn_index + offset:03d}.traj.json"
-                    ),
+                    "agent_id": child_id,
+                    "parent_agent_id": parent_workflow_id,
+                    "agent_artifact_directory": f".mini-mas/agents/{child_id}",
+                    "trajectory_artifact_path": f".mini-mas/agents/{child_id}/trajectory.traj.json",
                 }
-                for offset, task in enumerate(tasks)
+                for task, child_id in zip(tasks, child_ids)
             ]
         )
 
@@ -50,7 +48,7 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_agent_interaction_functi
             (
                 "wait_children",
                 parent_workflow_id,
-                tuple(child["workflow_id"] for child in children),
+                tuple(child["agent_id"] for child in children),
                 wait_all,
                 timeout_seconds,
                 wait_mode,
@@ -60,14 +58,14 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_agent_interaction_functi
             children=list(children),
             ready_snapshots=[
                 {
-                    "workflow_id": children[0]["workflow_id"],
+                    "agent_id": children[0]["agent_id"],
                     "lifecycle_state": "waiting_for_parent",
                     "latest_submission": "ready",
-                    "run_directory": children[0]["run_directory"],
+                    "agent_artifact_directory": children[0]["agent_artifact_directory"],
                     "trajectory_artifact_path": children[0]["trajectory_artifact_path"],
                 }
             ],
-            still_running_ids=[children[1]["workflow_id"]],
+            still_running_ids=[children[1]["agent_id"]],
             timed_out=True,
             wait_mode="all",
         )
@@ -88,14 +86,12 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_agent_interaction_functi
         (
             "spawn",
             "mas-0123456789abcdef",
-            "mas-0123456789abcdef",
-            1,
             ("task A", "task B"),
         ),
         (
             "wait_children",
             "mas-0123456789abcdef",
-            ("mas-0123456789abcdef-c001", "mas-0123456789abcdef-c002"),
+            ("mas-1111111111111111", "mas-2222222222222222"),
             True,
             0.5,
             "all",
@@ -103,18 +99,15 @@ def test_mas_command_handler_owns_spawn_cursor_and_uses_agent_interaction_functi
         (
             "spawn",
             "mas-0123456789abcdef",
-            "mas-0123456789abcdef",
-            3,
             ("task C",),
         ),
     ]
-    assert handler.next_spawn_index == 4
     assert result["extra"]["waited"] is True
     assert result["extra"]["wait_mode"] == "all"
     assert result["extra"]["timed_out"] is True
-    assert result["extra"]["still_running_child_agent_ids"] == ["mas-0123456789abcdef-c002"]
+    assert result["extra"]["still_running_child_agent_ids"] == ["mas-2222222222222222"]
     assert "Waited spawn timed out" in result["output"]
-    assert "agent_id: mas-0123456789abcdef-c003" in second_result["output"]
+    assert "agent_id: mas-3333333333333333" in second_result["output"]
 
 def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypatch):
     import minisweagent.mas.commands as commands
@@ -123,25 +116,25 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
 
     calls = []
     child_snapshot = {
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": "mas-0123456789abcdef-c001",
+        "agent_id": "mas-1111111111111111",
+        "parent_agent_id": "mas-0123456789abcdef",
         "lifecycle_state": "waiting_for_parent",
-        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": (
-            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
         ),
     }
 
     async def wait_for_children(*, parent_workflow_id, children, wait_all, timeout_seconds, wait_mode):
         assert parent_workflow_id == "mas-0123456789abcdef"
-        assert [child["workflow_id"] for child in children] == ["mas-0123456789abcdef-c001"]
+        assert [child["agent_id"] for child in children] == ["mas-1111111111111111"]
         assert wait_all is True
         assert timeout_seconds is None
         assert wait_mode == "one"
         return ChildWaitResult(
             children=list(children),
             ready_snapshots=[],
-            still_running_ids=["mas-0123456789abcdef-c001"],
+            still_running_ids=["mas-1111111111111111"],
             timed_out=True,
             wait_mode=wait_mode,
         )
@@ -168,21 +161,21 @@ def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypa
     handler = MasCommandHandler(authority=RecordingAuthorityPolicy())
 
     for command in [
-        "mini-mas status mas-0123456789abcdef-c001",
-        "mini-mas wait mas-0123456789abcdef-c001",
-        'mini-mas continue mas-0123456789abcdef-c001 "go"',
-        "mini-mas close mas-0123456789abcdef-c001",
+        "mini-mas status mas-1111111111111111",
+        "mini-mas wait mas-1111111111111111",
+        'mini-mas continue mas-1111111111111111 "go"',
+        "mini-mas close mas-1111111111111111",
     ]:
         result = asyncio.run(handler.execute(classify_mas_command(command)))
         assert result["returncode"] == 0
 
     assert calls[:3] == [
-        ("observable", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "status"),
-        ("observable", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "wait"),
-        ("waiting", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "continue"),
+        ("observable", "mas-0123456789abcdef", "mas-1111111111111111", "status"),
+        ("observable", "mas-0123456789abcdef", "mas-1111111111111111", "wait"),
+        ("waiting", "mas-0123456789abcdef", "mas-1111111111111111", "continue"),
     ]
     assert calls[3][0] == "send"
-    assert calls[4] == ("waiting", "mas-0123456789abcdef", "mas-0123456789abcdef-c001", "close")
+    assert calls[4] == ("waiting", "mas-0123456789abcdef", "mas-1111111111111111", "close")
     assert calls[5][0] == "send"
 
 def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
@@ -192,12 +185,12 @@ def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
 
     calls = []
     child_snapshot = {
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": "mas-0123456789abcdef-c001",
+        "agent_id": "mas-1111111111111111",
+        "parent_agent_id": "mas-0123456789abcdef",
         "lifecycle_state": "waiting_for_parent",
-        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": (
-            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
         ),
     }
 
@@ -217,7 +210,7 @@ def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
             (
                 "wait_children",
                 parent_workflow_id,
-                tuple(child["workflow_id"] for child in children),
+                tuple(child["agent_id"] for child in children),
                 wait_all,
                 timeout_seconds,
                 wait_mode,
@@ -251,7 +244,7 @@ def test_no_target_status_and_wait_use_injected_authority_policy(monkeypatch):
         (
             "wait_children",
             "mas-0123456789abcdef",
-            ("mas-0123456789abcdef-c001",),
+            ("mas-1111111111111111",),
             True,
             None,
             "all",
@@ -263,15 +256,14 @@ def test_each_mas_agent_owns_private_command_handler():
     from minisweagent.mas.mas_agent import MasAgent
 
     first_agent = MasAgent(
-        root_workflow_id="mas-0123456789abcdef",
-        workflow_id="mas-0123456789abcdef",
+        agent_id="mas-0123456789abcdef",
         model=Mock(),
         env=Mock(),
         step_limit=1,
     )
     second_agent = MasAgent(
-        root_workflow_id="mas-0123456789abcdef",
-        workflow_id="mas-0123456789abcdef-c001",
+        agent_id="mas-1111111111111111",
+        parent_agent_id="mas-0123456789abcdef",
         model=Mock(),
         env=Mock(),
         step_limit=1,
@@ -280,8 +272,6 @@ def test_each_mas_agent_owns_private_command_handler():
     assert isinstance(first_agent.command_handler, MasCommandHandler)
     assert isinstance(second_agent.command_handler, MasCommandHandler)
     assert first_agent.command_handler is not second_agent.command_handler
-    assert first_agent.command_handler.next_spawn_index == 1
-    assert second_agent.command_handler.next_spawn_index == 1
 
 def test_mas_command_handler_execute_signature_has_no_caller_context_dependencies():
     import inspect

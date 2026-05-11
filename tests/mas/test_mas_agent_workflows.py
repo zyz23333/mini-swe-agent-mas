@@ -29,43 +29,44 @@ def test_root_agent_workflow_writes_trajectory_artifact(tmp_path, monkeypatch):
     result = _call_root_agent_workflow(workflows.root_agent_workflow, "mas-0123456789abcdef")
 
     assert result == {
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": "mas-0123456789abcdef",
+        "agent_id": "mas-0123456789abcdef",
         "status": "started",
         "terminal_state": "started",
-        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
-        "trajectory_artifact_path": ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef.traj.json",
+        "agent_artifact_directory": ".mini-mas/agents/mas-0123456789abcdef",
+        "trajectory_artifact_path": ".mini-mas/agents/mas-0123456789abcdef/trajectory.traj.json",
     }
     trajectory_path = tmp_path / result["trajectory_artifact_path"]
     assert trajectory_path.exists()
     artifact = json.loads(trajectory_path.read_text())
-    assert artifact["info"]["workflow_id"] == "mas-0123456789abcdef"
-    assert artifact["info"]["run_directory"] == ".mini-mas/runs/mas-0123456789abcdef"
+    assert artifact["info"]["agent_id"] == "mas-0123456789abcdef"
+    assert "workflow_id" not in artifact["info"]
+    assert artifact["info"]["agent_artifact_directory"] == ".mini-mas/agents/mas-0123456789abcdef"
 
-def test_child_agent_workflow_writes_artifact_under_root_run_directory(tmp_path, monkeypatch):
+def test_child_agent_workflow_writes_artifact_under_root_agent_artifact_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     import minisweagent.mas.mas_agent as workflows
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c001",
+        "mas-1111111111111111",
         "inspect api",
+        parent_agent_id="mas-0123456789abcdef",
     )
 
     assert result == {
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": "mas-0123456789abcdef-c001",
+        "agent_id": "mas-1111111111111111",
+        "parent_agent_id": "mas-0123456789abcdef",
         "status": "started",
         "terminal_state": "started",
-        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
-        "trajectory_artifact_path": ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json",
+        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+        "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
     }
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
-    assert artifact["info"]["root_workflow_id"] == "mas-0123456789abcdef"
-    assert artifact["info"]["workflow_id"] == "mas-0123456789abcdef-c001"
-    assert artifact["info"]["run_directory"] == ".mini-mas/runs/mas-0123456789abcdef"
+    assert artifact["info"]["parent_agent_id"] == "mas-0123456789abcdef"
+    assert artifact["info"]["agent_id"] == "mas-1111111111111111"
+    assert "workflow_id" not in artifact["info"]
+    assert artifact["info"]["agent_artifact_directory"] == ".mini-mas/agents/mas-1111111111111111"
 
 def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
     """The root workflow is defined inside the MAS subsystem boundary."""
@@ -94,21 +95,21 @@ def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
     run_calls = []
 
     class RecordingMasAgent:
-        def __init__(self, *, root_workflow_id, workflow_id, model, env, step_limit):
-            self.root_workflow_id = root_workflow_id
-            self.workflow_id = workflow_id
+        def __init__(self, *, agent_id, parent_agent_id=None, model, env, step_limit):
+            self.agent_id = agent_id
+            self.parent_agent_id = parent_agent_id
             self.model = model
             self.env = env
             self.step_limit = step_limit
             created_agents.append(self)
 
         async def run(self, *, task="", initial_messages=None):
-            run_calls.append((self.workflow_id, task, initial_messages))
+            run_calls.append((self.agent_id, task, initial_messages))
             return {
                 "status": "recorded",
                 "terminal_state": "recorded",
-                "root_workflow_id": self.root_workflow_id,
-                "workflow_id": self.workflow_id,
+                "agent_id": self.agent_id,
+                **({"parent_agent_id": self.parent_agent_id} if self.parent_agent_id else {}),
                 "task": task,
                 "initial_messages": initial_messages,
             }
@@ -128,8 +129,7 @@ def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
     assert result == {
         "status": "recorded",
         "terminal_state": "recorded",
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": "mas-0123456789abcdef",
+        "agent_id": "mas-0123456789abcdef",
         "task": "delegate through agent",
         "initial_messages": [{"role": "user", "content": "seed"}],
     }
@@ -143,20 +143,20 @@ def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
 
     child_result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c001",
+        "mas-1111111111111111",
         "child task",
+        parent_agent_id="mas-0123456789abcdef",
         model=Mock(),
         env=Mock(),
         step_limit=5,
     )
 
-    assert child_result["root_workflow_id"] == "mas-0123456789abcdef"
-    assert child_result["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert child_result["agent_id"] == "mas-1111111111111111"
+    assert child_result["parent_agent_id"] == "mas-0123456789abcdef"
     assert child_result["task"] == "child task"
     assert len(created_agents) == 2
     assert created_agents[1].step_limit == 5
-    assert run_calls[-1] == ("mas-0123456789abcdef-c001", "child task", None)
+    assert run_calls[-1] == ("mas-1111111111111111", "child task", None)
     assert not hasattr(mas_agent_class, "__dbos_class_info__")
     for method_name in ("run", "step", "query", "execute_actions", "add_messages", "get_template_vars"):
         assert callable(getattr(mas_agent_class, method_name))
@@ -216,7 +216,7 @@ def test_agent_workflow_publishes_running_submission_and_limits_status(monkeypat
 
     assert [event[0] for event in published] == ["mini_mas_status", "mini_mas_status"]
     assert published[0][1]["lifecycle_state"] == "running"
-    assert published[0][1]["workflow_id"] == "mas-0123456789abcdef"
+    assert published[0][1]["agent_id"] == "mas-0123456789abcdef"
     assert published[1][1]["lifecycle_state"] == "closed"
     assert published[1][1]["latest_submission"] == "done"
     assert "messages" not in published[1][1]
@@ -290,7 +290,7 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
     monkeypatch.chdir(tmp_path)
     published = []
     received = []
-    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-1111111111111111")
 
     async def set_event_async(key, value):
         published.append((key, value))
@@ -325,9 +325,9 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c001",
+        "mas-1111111111111111",
         "submit once",
+        parent_agent_id="mas-0123456789abcdef",
         model=model,
         env=env,
         step_limit=3,
@@ -339,11 +339,11 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
     status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
     assert [event["lifecycle_state"] for event in status_events] == ["running", "waiting_for_parent"]
     waiting_event = status_events[-1]
-    assert waiting_event["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert waiting_event["agent_id"] == "mas-1111111111111111"
     assert waiting_event["latest_submission"] == "child done"
     assert (
         waiting_event["trajectory_artifact_path"]
-        == ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+        == ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
     )
     first_observable_events = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert first_observable_events == [waiting_event]
@@ -359,7 +359,7 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
 
     monkeypatch.chdir(tmp_path)
     published = []
-    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-1111111111111111")
 
     async def set_event_async(key, value):
         published.append((key, value))
@@ -371,7 +371,7 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
             "type": "close",
             "signal_type": "mas_close",
             "source_workflow_id": "mas-0123456789abcdef",
-            "target_workflow_id": "mas-0123456789abcdef-c001",
+            "target_workflow_id": "mas-1111111111111111",
         }
 
     monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
@@ -395,9 +395,9 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c001",
+        "mas-1111111111111111",
         "submit once",
+        parent_agent_id="mas-0123456789abcdef",
         model=model,
         env=env,
         step_limit=3,
@@ -428,7 +428,7 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
 
     monkeypatch.chdir(tmp_path)
     published = []
-    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-1111111111111111")
 
     async def set_event_async(key, value):
         published.append((key, value))
@@ -457,9 +457,9 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
 
     _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c001",
+        "mas-1111111111111111",
         "fail",
+        parent_agent_id="mas-0123456789abcdef",
         model=model,
         env=env,
         step_limit=3,
@@ -468,12 +468,12 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
     first_observable = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert first_observable == [
         {
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef-c001",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "failed",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
             "latest_error": "model failed",
         }
@@ -493,16 +493,16 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
 
     _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c002",
+        "mas-2222222222222222",
         "hit limit",
+        parent_agent_id="mas-0123456789abcdef",
         model=model,
         env=env,
         step_limit=1,
     )
 
     first_observable = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
-    assert first_observable[-1]["workflow_id"] == "mas-0123456789abcdef-c002"
+    assert first_observable[-1]["agent_id"] == "mas-2222222222222222"
     assert first_observable[-1]["lifecycle_state"] == "limits_exceeded"
 
 def test_root_agent_workflow_runs_model_and_bash_path_and_saves_trajectory(tmp_path, monkeypatch):
@@ -620,7 +620,7 @@ def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(mon
     monkeypatch.chdir(tmp_path)
     published = []
     received = []
-    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-1111111111111111")
 
     async def set_event_async(key, value):
         published.append((key, value))
@@ -633,7 +633,7 @@ def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(mon
                 "signal_type": "mas_continuation",
                 "content": "please revise",
                 "source_workflow_id": "mas-0123456789abcdef",
-                "target_workflow_id": "mas-0123456789abcdef-c001",
+                "target_workflow_id": "mas-1111111111111111",
             }
         return {"type": "test_stop_waiting"}
 
@@ -672,9 +672,9 @@ def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(mon
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c001",
+        "mas-1111111111111111",
         "submit once",
+        parent_agent_id="mas-0123456789abcdef",
         model=model,
         env=env,
         step_limit=4,
@@ -713,7 +713,7 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
 
     monkeypatch.chdir(tmp_path)
     published = []
-    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef-c001")
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-1111111111111111")
 
     async def set_event_async(key, value):
         published.append((key, value))
@@ -726,7 +726,7 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
             "signal_type": "mas_continuation",
             "content": "try again",
             "source_workflow_id": "mas-0123456789abcdef",
-            "target_workflow_id": "mas-0123456789abcdef-c001",
+            "target_workflow_id": "mas-1111111111111111",
         }
 
     monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
@@ -758,9 +758,9 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
-        "mas-0123456789abcdef",
-        "mas-0123456789abcdef-c001",
+        "mas-1111111111111111",
         "submit once",
+        parent_agent_id="mas-0123456789abcdef",
         model=model,
         env=env,
         step_limit=4,

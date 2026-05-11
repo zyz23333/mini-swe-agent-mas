@@ -50,9 +50,8 @@ def run(
             system_database_url=system_database_url,
         )
     )
-    console.print(f"root_agent_id: {result['root_workflow_id']}")
-    console.print(f"agent_id: {result['workflow_id']}")
-    console.print(f"run_directory: {result['run_directory']}")
+    console.print(f"agent_id: {result['agent_id']}")
+    console.print(f"agent_artifact_directory: {result['agent_artifact_directory']}")
     console.print(f"trajectory_artifact_path: {result['trajectory_artifact_path']}")
     if "result" in result:
         console.print(f"result: {result['result']}")

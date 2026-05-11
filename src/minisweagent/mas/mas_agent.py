@@ -12,7 +12,6 @@ from minisweagent.mas.artifacts import (
     make_artifact_metadata,
     save_trajectory_artifact,
     validate_agent_id,
-    validate_root_agent_id,
 )
 from minisweagent.mas.commands import (
     MasCommandClassification,
@@ -47,8 +46,8 @@ def _current_agent_workflow_id() -> str | None:
 async def _publish_first_observable_event_once(
     agent: MasAgent,
     *,
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
+    parent_agent_id: str | None = None,
     lifecycle_state: LifecycleState,
     latest_submission: str = "",
     latest_error: str = "",
@@ -57,8 +56,8 @@ async def _publish_first_observable_event_once(
         return None
     agent.first_observable_published = True
     return await agent_interactions.publish_first_observable(
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
         lifecycle_state=lifecycle_state,
         latest_submission=latest_submission,
         latest_error=latest_error,
@@ -135,7 +134,7 @@ async def execute_agent_workflow_actions(
     return model.format_observation_messages(message, outputs, template_vars)
 
 
-def _terminal_result(*, root_workflow_id: str, workflow_id: str, terminal_message: dict, agent: MasAgent) -> dict:
+def _terminal_result(*, agent_id: str, parent_agent_id: str | None, terminal_message: dict, agent: MasAgent) -> dict:
     terminal_extra = terminal_message.get("extra", {})
     terminal_state = terminal_extra.get("exit_status", "unknown")
     submission = terminal_extra.get("submission", "")
@@ -143,7 +142,10 @@ def _terminal_result(*, root_workflow_id: str, workflow_id: str, terminal_messag
         "instance_cost": agent.cost,
         "api_calls": agent.n_calls,
     }
-    metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
+    metadata = make_artifact_metadata(
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
+    )
     return {
         "status": terminal_state,
         "terminal_state": terminal_state,
@@ -185,9 +187,18 @@ def _initial_messages(model, task: str) -> list[dict]:
 class MasAgent:
     """Plain per-workflow MAS agent loop; DBOS decorators stay on module-level functions."""
 
-    def __init__(self, *, root_workflow_id: str, workflow_id: str, model, env, step_limit: int) -> None:
-        self.root_workflow_id = root_workflow_id
-        self.workflow_id = workflow_id
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        parent_agent_id: str | None = None,
+        model,
+        env,
+        step_limit: int,
+    ) -> None:
+        self.agent_id = agent_id
+        self.workflow_id = agent_id
+        self.parent_agent_id = parent_agent_id
         self.model = model
         self.env = env
         self.step_limit = step_limit
@@ -209,8 +220,8 @@ class MasAgent:
             await self._publish_status("running")
             await self._run_until_terminal_message()
             result = _terminal_result(
-                root_workflow_id=self.root_workflow_id,
-                workflow_id=self.workflow_id,
+                agent_id=self.agent_id,
+                parent_agent_id=self.parent_agent_id,
                 terminal_message=self.messages[-1],
                 agent=self,
             )
@@ -233,11 +244,11 @@ class MasAgent:
                 latest_submission=result["submission"],
                 latest_error=latest_error,
             )
-            if self.workflow_id != self.root_workflow_id and lifecycle_state in {"failed", "limits_exceeded"}:
+            if self.parent_agent_id is not None and lifecycle_state in {"failed", "limits_exceeded"}:
                 await _publish_first_observable_event_once(
                     self,
-                    root_workflow_id=self.root_workflow_id,
-                    workflow_id=self.workflow_id,
+                    agent_id=self.agent_id,
+                    parent_agent_id=self.parent_agent_id,
                     lifecycle_state=lifecycle_state,
                     latest_submission=result["submission"],
                     latest_error=latest_error,
@@ -287,8 +298,7 @@ class MasAgent:
             "task": self.task,
             "n_model_calls": self.n_calls,
             "model_cost": self.cost,
-            "root_workflow_id": self.root_workflow_id,
-            "workflow_id": self.workflow_id,
+            "agent_id": self.agent_id,
         }
         data |= kwargs
         return data
@@ -318,8 +328,8 @@ class MasAgent:
         latest_error: str = "",
     ) -> None:
         await agent_interactions.publish_status(
-            root_workflow_id=self.root_workflow_id,
-            workflow_id=self.workflow_id,
+            agent_id=self.workflow_id,
+            parent_agent_id=self.parent_agent_id,
             lifecycle_state=lifecycle_state,
             latest_submission=latest_submission,
             latest_error=latest_error,
@@ -334,8 +344,8 @@ class MasAgent:
     ) -> dict[str, str]:
         return await _maybe_await(
             save_trajectory_artifact_step(
-                self.root_workflow_id,
-                self.workflow_id,
+                self.agent_id,
+                self.parent_agent_id,
                 status=status,
                 messages=self.messages or None,
                 model_stats=model_stats,
@@ -344,7 +354,7 @@ class MasAgent:
         )
 
     def _should_wait_for_parent_after_submission(self, result: dict[str, Any]) -> bool:
-        return self.workflow_id != self.root_workflow_id and result["terminal_state"] == "Submitted"
+        return self.parent_agent_id is not None and result["terminal_state"] == "Submitted"
 
     async def _wait_for_parent_after_submission(self, result: dict[str, Any]) -> dict[str, Any]:
         waiting_result = {
@@ -356,8 +366,8 @@ class MasAgent:
         await self._publish_status("waiting_for_parent", latest_submission=result["submission"])
         await _publish_first_observable_event_once(
             self,
-            root_workflow_id=self.root_workflow_id,
-            workflow_id=self.workflow_id,
+            agent_id=self.agent_id,
+            parent_agent_id=self.parent_agent_id,
             lifecycle_state="waiting_for_parent",
             latest_submission=result["submission"],
         )
@@ -386,8 +396,8 @@ class MasAgent:
 
 @_dbos.DBOS.step()
 async def save_trajectory_artifact_step(
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
+    parent_agent_id: str | None = None,
     *,
     status: str = "started",
     messages: list[dict] | None = None,
@@ -397,20 +407,23 @@ async def save_trajectory_artifact_step(
     """Persist any Agent trajectory through one DBOS checkpointed step."""
     await asyncio.to_thread(
         save_trajectory_artifact,
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
         status=status,
         messages=messages,
         model_stats=model_stats,
         submission=submission,
     )
-    return make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
+    return make_artifact_metadata(
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
+    )
 
 
 async def _run_agent_workflow(
     *,
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
+    parent_agent_id: str | None,
     model,
     env,
     task: str,
@@ -419,11 +432,11 @@ async def _run_agent_workflow(
 ) -> dict:
     original_workflow_id = _current_agent_workflow_id()
     if original_workflow_id is None:
-        _dbos.DBOS.workflow_id = workflow_id
+        _dbos.DBOS.workflow_id = agent_id
     try:
         return await _run_agent_workflow_with_context(
-            root_workflow_id=root_workflow_id,
-            workflow_id=workflow_id,
+            agent_id=agent_id,
+            parent_agent_id=parent_agent_id,
             model=model,
             env=env,
             task=task,
@@ -437,8 +450,8 @@ async def _run_agent_workflow(
 
 async def _run_agent_workflow_with_context(
     *,
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
+    parent_agent_id: str | None,
     model,
     env,
     task: str,
@@ -446,8 +459,8 @@ async def _run_agent_workflow_with_context(
     initial_messages: list[dict] | None,
 ) -> dict:
     agent = MasAgent(
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
         model=model,
         env=env,
         step_limit=step_limit,
@@ -457,7 +470,7 @@ async def _run_agent_workflow_with_context(
 
 @_dbos.DBOS.workflow()
 async def root_agent_workflow(
-    root_workflow_id: str,
+    agent_id: str,
     *,
     model=None,
     env=None,
@@ -466,10 +479,10 @@ async def root_agent_workflow(
     initial_messages: list[dict] | None = None,
 ) -> dict:
     """Root Agent DBOS workflow for the ordinary non-child-interaction MAS path."""
-    root_workflow_id = validate_root_agent_id(root_workflow_id)
+    agent_id = validate_agent_id(agent_id)
     return await _run_agent_workflow(
-        root_workflow_id=root_workflow_id,
-        workflow_id=root_workflow_id,
+        agent_id=agent_id,
+        parent_agent_id=None,
         model=model,
         env=env,
         task=task,
@@ -480,21 +493,21 @@ async def root_agent_workflow(
 
 @_dbos.DBOS.workflow()
 async def child_agent_workflow(
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
     task: str,
     *,
+    parent_agent_id: str,
     model=None,
     env=None,
     step_limit: int = 0,
     initial_messages: list[dict] | None = None,
 ) -> dict:
     """Child Agent DBOS workflow started by detached spawn through the child queue."""
-    root_workflow_id = validate_root_agent_id(root_workflow_id)
-    workflow_id = validate_agent_id(workflow_id)
+    agent_id = validate_agent_id(agent_id)
+    parent_agent_id = validate_agent_id(parent_agent_id)
     return await _run_agent_workflow(
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
         model=model,
         env=env,
         task=task,

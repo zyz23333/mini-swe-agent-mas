@@ -57,10 +57,10 @@ def _recording_child_queue():
 def _child_metadata(workflow_id: str, task: str = "task") -> dict[str, str]:
     return {
         "task": task,
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": workflow_id,
-        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
-        "trajectory_artifact_path": f".mini-mas/runs/mas-0123456789abcdef/trajectories/{workflow_id}.traj.json",
+        "agent_id": workflow_id,
+        "parent_agent_id": "mas-0123456789abcdef",
+        "agent_artifact_directory": f".mini-mas/agents/{workflow_id}",
+        "trajectory_artifact_path": f".mini-mas/agents/{workflow_id}/trajectory.traj.json",
     }
 
 def _workflow_status_record(workflow_id: str, parent_workflow_id: str | None = None) -> Mock:
@@ -94,7 +94,7 @@ def _mock_single_direct_child_status(monkeypatch, workflows, parent_workflow_id:
         monkeypatch,
         workflows,
         parent_workflow_id,
-        {snapshot["workflow_id"]: {"mini_mas_status": snapshot}},
+        {snapshot["agent_id"]: {"mini_mas_status": snapshot}},
     )
 
 class AsyncMockHandle:

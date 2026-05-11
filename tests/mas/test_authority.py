@@ -22,12 +22,12 @@ def test_direct_child_authority_policy_uses_agent_interaction_lookup(monkeypatch
     async def query_direct_child_status(*, parent_workflow_id, child_workflow_id):
         calls.append((parent_workflow_id, child_workflow_id))
         return {
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef-c001",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
         }
 
@@ -36,35 +36,35 @@ def test_direct_child_authority_policy_uses_agent_interaction_lookup(monkeypatch
     result = asyncio.run(
         DirectChildAuthorityPolicy().require_observable_child(
             parent_workflow_id="mas-0123456789abcdef",
-            target_workflow_id="mas-0123456789abcdef-c001",
+            target_workflow_id="mas-1111111111111111",
             command_name="status",
         )
     )
 
-    assert result["workflow_id"] == "mas-0123456789abcdef-c001"
-    assert calls == [("mas-0123456789abcdef", "mas-0123456789abcdef-c001")]
+    assert result["agent_id"] == "mas-1111111111111111"
+    assert calls == [("mas-0123456789abcdef", "mas-1111111111111111")]
 
 def test_direct_child_authority_policy_success_and_rejection_paths(monkeypatch):
     import minisweagent.mas.authority as authority
     from minisweagent.mas.authority import AuthorityCommandError, DirectChildAuthorityPolicy
 
     snapshots = {
-        "mas-0123456789abcdef-c001": {
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef-c001",
+        "mas-1111111111111111": {
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
         },
-        "mas-0123456789abcdef-c002": {
-            "root_workflow_id": "mas-0123456789abcdef",
-            "workflow_id": "mas-0123456789abcdef-c002",
+        "mas-2222222222222222": {
+            "agent_id": "mas-2222222222222222",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_child",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c002.traj.json"
+                ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
             ),
         },
     }
@@ -79,27 +79,27 @@ def test_direct_child_authority_policy_success_and_rejection_paths(monkeypatch):
     authorized = asyncio.run(
         policy.require_observable_child(
             parent_workflow_id="mas-0123456789abcdef",
-            target_workflow_id="mas-0123456789abcdef-c001",
+            target_workflow_id="mas-1111111111111111",
             command_name="status",
         )
     )
     not_direct = asyncio.run(
         policy.require_observable_child(
             parent_workflow_id="mas-0123456789abcdef",
-            target_workflow_id="mas-0123456789abcdef-c001-c001",
+            target_workflow_id="mas-3333333333333333",
             command_name="status",
         )
     )
     not_waiting = asyncio.run(
         policy.require_waiting_child(
             parent_workflow_id="mas-0123456789abcdef",
-            target_workflow_id="mas-0123456789abcdef-c002",
+            target_workflow_id="mas-2222222222222222",
             command_name="continue",
         )
     )
 
-    assert authorized["workflow_id"] == "mas-0123456789abcdef-c001"
-    assert authorized["trajectory_artifact_path"].endswith("mas-0123456789abcdef-c001.traj.json")
+    assert authorized["agent_id"] == "mas-1111111111111111"
+    assert authorized["trajectory_artifact_path"] == ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
     assert isinstance(not_direct, AuthorityCommandError)
     assert not_direct.exception_info == "agent_not_direct_child"
     assert isinstance(not_waiting, AuthorityCommandError)
@@ -114,12 +114,12 @@ def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(
         workflows,
         "mas-0123456789abcdef",
         {
-            "workflow_id": "mas-0123456789abcdef-c001",
-            "root_workflow_id": "mas-0123456789abcdef",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "running",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
         },
     )
@@ -131,7 +131,7 @@ def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(
 
     status_result = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("bad status", [{"command": "mini-mas status mas-0123456789abcdef-c001-c001"}]),
+            message=make_output("bad status", [{"command": "mini-mas status mas-3333333333333333"}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={},
@@ -139,7 +139,7 @@ def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(
     )
     wait_result = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("bad wait", [{"command": "mini-mas wait mas-0123456789abcdef-c001-c001"}]),
+            message=make_output("bad wait", [{"command": "mini-mas wait mas-3333333333333333"}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={},
@@ -151,5 +151,5 @@ def test_root_cannot_status_or_wait_for_grandchild_through_transitive_authority(
         assert "<returncode>1</returncode>" in text
         assert (
             "Agent is not a direct Child Agent of mas-0123456789abcdef: "
-            "mas-0123456789abcdef-c001-c001"
+            "mas-3333333333333333"
         ) in text

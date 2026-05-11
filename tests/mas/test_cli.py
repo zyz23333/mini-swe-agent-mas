@@ -15,11 +15,10 @@ def test_mini_mas_run_cli_outputs_artifact_locations():
     handle = AsyncMockHandle(
         "mas-2222222222222222",
         {
-            "root_workflow_id": "mas-2222222222222222",
-            "workflow_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
             "status": "started",
-            "run_directory": ".mini-mas/runs/mas-2222222222222222",
-            "trajectory_artifact_path": ".mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
         },
     )
 
@@ -33,11 +32,10 @@ def test_mini_mas_run_cli_outputs_artifact_locations():
         cli_result = CliRunner().invoke(app, ["run", "--workflow-id", "mas-2222222222222222"])
 
     assert cli_result.exit_code == 0
-    assert "root_agent_id: mas-2222222222222222" in cli_result.stdout
     assert "agent_id: mas-2222222222222222" in cli_result.stdout
-    assert "run_directory: .mini-mas/runs/mas-2222222222222222" in cli_result.stdout
+    assert "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222" in cli_result.stdout
     assert (
-        "trajectory_artifact_path: .mini-mas/runs/mas-2222222222222222/trajectories/mas-2222222222222222.traj.json"
+        "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
         in cli_result.stdout
     )
 
@@ -66,7 +64,7 @@ def test_mini_mas_status_cli_does_not_support_missing_descendant_lookup(monkeypa
         Mock(
             return_value={
                 "kind": "unsupported",
-                "workflow_id": "mas-2222222222222222-c999",
+                "workflow_id": "mas-9999999999999999",
                 "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
                 "returncode": 2,
                 "exception_info": "external_agent_interaction_unsupported",
@@ -75,7 +73,7 @@ def test_mini_mas_status_cli_does_not_support_missing_descendant_lookup(monkeypa
         ),
     )
 
-    cli_result = CliRunner().invoke(app, ["status", "mas-2222222222222222-c999"])
+    cli_result = CliRunner().invoke(app, ["status", "mas-9999999999999999"])
 
     assert cli_result.exit_code == 2
     assert "unsupported" in cli_result.stdout
@@ -85,7 +83,7 @@ def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
         "minisweagent.mas.cli.wait_for_agent_workflow",
         Mock(
             return_value={
-                "workflow_id": "mas-2222222222222222-c001",
+                "workflow_id": "mas-3333333333333333",
                 "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
                 "returncode": 2,
                 "exception_info": "external_agent_interaction_unsupported",
@@ -94,7 +92,7 @@ def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
         ),
     )
 
-    cli_result = CliRunner().invoke(app, ["wait", "mas-2222222222222222-c001", "--timeout", "0.01"])
+    cli_result = CliRunner().invoke(app, ["wait", "mas-3333333333333333", "--timeout", "0.01"])
 
     assert cli_result.exit_code == 2
     assert "unsupported" in cli_result.stdout
@@ -104,7 +102,7 @@ def test_mini_mas_wait_cli_outputs_closed_event_neutrally(monkeypatch):
         "minisweagent.mas.cli.wait_for_agent_workflow",
         Mock(
             return_value={
-                "workflow_id": "mas-2222222222222222-c001",
+                "workflow_id": "mas-3333333333333333",
                 "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
                 "returncode": 2,
                 "exception_info": "external_agent_interaction_unsupported",
@@ -113,7 +111,7 @@ def test_mini_mas_wait_cli_outputs_closed_event_neutrally(monkeypatch):
         ),
     )
 
-    cli_result = CliRunner().invoke(app, ["wait", "mas-2222222222222222-c001"])
+    cli_result = CliRunner().invoke(app, ["wait", "mas-3333333333333333"])
 
     assert cli_result.exit_code == 2
     assert "unsupported" in cli_result.stdout
@@ -130,12 +128,11 @@ def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
                 "ok": True,
                 "output": (
                     "Continuation signal sent\n"
-                    "agent_id: mas-2222222222222222-c001\n"
+                    "agent_id: mas-3333333333333333\n"
                     "lifecycle_state: waiting_for_parent\n"
                     "message: go on\n"
-                    "run_directory: .mini-mas/runs/mas-2222222222222222\n"
-                    "trajectory_artifact_path: .mini-mas/runs/mas-2222222222222222/trajectories/"
-                    "mas-2222222222222222-c001.traj.json\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
                 ),
                 "returncode": 0,
                 "exception_info": "",
@@ -144,11 +141,11 @@ def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
         ),
     )
 
-    cli_result = CliRunner().invoke(app, ["continue", "mas-2222222222222222-c001", "go on"])
+    cli_result = CliRunner().invoke(app, ["continue", "mas-3333333333333333", "go on"])
 
     assert cli_result.exit_code == 0
     assert "Continuation signal sent" in cli_result.stdout
-    assert "agent_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "agent_id: mas-3333333333333333" in cli_result.stdout
     assert "message: go on" in cli_result.stdout
 
 def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
@@ -159,12 +156,11 @@ def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
                 "ok": True,
                 "output": (
                     "Close signal sent\n"
-                    "agent_id: mas-2222222222222222-c001\n"
+                    "agent_id: mas-3333333333333333\n"
                     "lifecycle_state: waiting_for_parent\n"
                     "latest_submission: ready\n"
-                    "run_directory: .mini-mas/runs/mas-2222222222222222\n"
-                    "trajectory_artifact_path: .mini-mas/runs/mas-2222222222222222/trajectories/"
-                    "mas-2222222222222222-c001.traj.json\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
                 ),
                 "returncode": 0,
                 "exception_info": "",
@@ -173,11 +169,11 @@ def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
         ),
     )
 
-    cli_result = CliRunner().invoke(app, ["close", "mas-2222222222222222-c001"])
+    cli_result = CliRunner().invoke(app, ["close", "mas-3333333333333333"])
 
     assert cli_result.exit_code == 0
     assert "Close signal sent" in cli_result.stdout
-    assert "agent_id: mas-2222222222222222-c001" in cli_result.stdout
+    assert "agent_id: mas-3333333333333333" in cli_result.stdout
     assert "latest_submission: ready" in cli_result.stdout
     assert "accepted" not in cli_result.stdout.lower()
     assert "rejected" not in cli_result.stdout.lower()

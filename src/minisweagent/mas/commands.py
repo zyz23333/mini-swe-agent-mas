@@ -13,7 +13,7 @@ from minisweagent.mas.artifacts import validate_agent_id
 from minisweagent.mas.authority import AuthorityCommandError, AuthorityPolicy, DirectChildAuthorityPolicy
 from minisweagent.mas.signals import PARENT_DIRECTION_TOPIC, make_close_signal, make_continuation_signal
 
-from .status_events import format_direct_child_statuses, format_specific_status, root_id_for_workflow
+from .status_events import format_direct_child_statuses, format_specific_status, normalize_agent_snapshot
 
 MAS_COMMAND_NAME = "mini-mas"
 STANDALONE_CORRECTION = "mini-mas must be issued as a standalone command, not inside shell composition."
@@ -352,7 +352,7 @@ class MasCommandResultFormatter:
         output: str,
         extra: dict[str, Any],
     ) -> dict[str, Any]:
-        child_agent_ids = [child["workflow_id"] for child in children]
+        child_agent_ids = [child["agent_id"] for child in children]
         result_extra: dict[str, Any] = {
             "mas_command": mas_command,
             "spawned_child_count": len(children),
@@ -360,7 +360,7 @@ class MasCommandResultFormatter:
             "children": children,
         }
         if len(children) == 1:
-            result_extra["child_agent_id"] = children[0]["workflow_id"]
+            result_extra["child_agent_id"] = children[0]["agent_id"]
             result_extra.update({key: value for key, value in children[0].items() if key != "task"})
         result_extra.update(extra)
         return self.success(output=output, extra=result_extra)
@@ -375,7 +375,6 @@ class MasCommandHandler:
         authority: AuthorityPolicy | None = None,
         result_formatter: MasCommandResultFormatter | None = None,
     ) -> None:
-        self.next_spawn_index = 1
         self.authority = authority or DirectChildAuthorityPolicy()
         self.result_formatter = result_formatter or MasCommandResultFormatter()
 
@@ -430,7 +429,6 @@ class MasCommandHandler:
         current_workflow_id = self._validated_context("spawn")
         if current_workflow_id is None:
             return self.result_formatter.missing_agent_context("spawn")
-        root_workflow_id = root_id_for_workflow(current_workflow_id)
         try:
             request = _parse_spawn_arguments(classification.arguments)
         except ValueError as exc:
@@ -440,13 +438,10 @@ class MasCommandHandler:
                 mas_command_error="invalid_spawn_arguments",
             )
         spawn_result = await agent_interactions.spawn_children(
-            root_workflow_id=root_workflow_id,
             parent_workflow_id=current_workflow_id,
-            first_spawn_index=self.next_spawn_index,
             tasks=request.tasks,
         )
         children = spawn_result.children
-        self.next_spawn_index += len(children)
         if request.wait:
             wait_result = await agent_interactions.wait_for_spawned_children(
                 parent_workflow_id=current_workflow_id,
@@ -698,25 +693,29 @@ def _authority_result_error(result: Any) -> dict[str, Any] | None:
 
 def _authority_result_snapshot(result: Any) -> dict[str, Any]:
     if isinstance(result, dict):
-        return result
+        return normalize_agent_snapshot(result)
     raise TypeError(f"Unsupported Authority Policy result: {type(result)!r}")
 
 
 def _child_metadata_from_snapshot(snapshot: dict[str, Any]) -> dict[str, str]:
-    return {
+    snapshot = normalize_agent_snapshot(snapshot)
+    metadata = {
         "task": "",
-        "root_workflow_id": str(snapshot["root_workflow_id"]),
-        "workflow_id": str(snapshot["workflow_id"]),
-        "run_directory": str(snapshot["run_directory"]),
+        "agent_id": str(snapshot["agent_id"]),
+        "agent_artifact_directory": str(snapshot["agent_artifact_directory"]),
         "trajectory_artifact_path": str(snapshot["trajectory_artifact_path"]),
     }
+    if snapshot.get("parent_agent_id"):
+        metadata["parent_agent_id"] = str(snapshot["parent_agent_id"])
+    return metadata
 
 
 def _format_child_metadata_lines(child: dict[str, str]) -> list[str]:
     return [
         f"task: {child['task']}",
-        f"agent_id: {child['workflow_id']}",
-        f"run_directory: {child['run_directory']}",
+        f"agent_id: {child['agent_id']}",
+        *([f"parent_agent_id: {child['parent_agent_id']}"] if child.get("parent_agent_id") else []),
+        f"agent_artifact_directory: {child['agent_artifact_directory']}",
         f"trajectory_artifact_path: {child['trajectory_artifact_path']}",
     ]
 
@@ -735,8 +734,9 @@ def _format_still_running_ids(still_running_ids: list[str]) -> str:
 
 
 def _format_ready_snapshot(snapshot: dict[str, Any]) -> list[str]:
+    snapshot = normalize_agent_snapshot(snapshot)
     lines = [
-        f"ready_agent_id: {snapshot['workflow_id']}",
+        f"ready_agent_id: {snapshot['agent_id']}",
         f"lifecycle_state: {snapshot['lifecycle_state']}",
     ]
     if snapshot.get("latest_submission"):
@@ -745,7 +745,7 @@ def _format_ready_snapshot(snapshot: dict[str, Any]) -> list[str]:
         lines.append(f"latest_error: {snapshot['latest_error']}")
     lines.extend(
         [
-            f"run_directory: {snapshot['run_directory']}",
+            f"agent_artifact_directory: {snapshot['agent_artifact_directory']}",
             f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
         ]
     )
@@ -784,18 +784,20 @@ def _format_wait_summary_output(
 
 
 def _format_continue_output(*, target_workflow_id: str, content: str, snapshot: dict[str, Any]) -> str:
+    snapshot = normalize_agent_snapshot(snapshot)
     lines = [
         "Continuation signal sent",
         f"agent_id: {target_workflow_id}",
         f"lifecycle_state: {snapshot['lifecycle_state']}",
         f"message: {content}",
-        f"run_directory: {snapshot['run_directory']}",
+        f"agent_artifact_directory: {snapshot['agent_artifact_directory']}",
         f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
     ]
     return "\n".join(lines) + "\n"
 
 
 def _format_close_output(*, target_workflow_id: str, snapshot: dict[str, Any]) -> str:
+    snapshot = normalize_agent_snapshot(snapshot)
     lines = [
         "Close signal sent",
         f"agent_id: {target_workflow_id}",
@@ -805,7 +807,7 @@ def _format_close_output(*, target_workflow_id: str, snapshot: dict[str, Any]) -
         lines.append(f"latest_submission: {snapshot['latest_submission']}")
     lines.extend(
         [
-            f"run_directory: {snapshot['run_directory']}",
+            f"agent_artifact_directory: {snapshot['agent_artifact_directory']}",
             f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
         ]
     )

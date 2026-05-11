@@ -121,7 +121,7 @@ def test_mas_rejections_use_existing_model_specific_observation_formatters(model
     [
         (
             DeterministicModel(outputs=[]),
-            make_output("continue", [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "go on"'}]),
+            make_output("continue", [{"command": 'mini-mas continue mas-1111111111111111 "go on"'}]),
             "role",
         ),
         (
@@ -134,11 +134,11 @@ def test_mas_rejections_use_existing_model_specific_observation_formatters(model
                         "type": "function",
                         "function": {
                             "name": "bash",
-                            "arguments": '{"command": "mini-mas continue mas-0123456789abcdef-c001 \\"go on\\""}',
+                            "arguments": '{"command": "mini-mas continue mas-1111111111111111 \\"go on\\""}',
                         },
                     }
                 ],
-                [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "go on"', "tool_call_id": "call_0"}],
+                [{"command": 'mini-mas continue mas-1111111111111111 "go on"', "tool_call_id": "call_0"}],
             ),
             "tool_call_id",
         ),
@@ -146,7 +146,7 @@ def test_mas_rejections_use_existing_model_specific_observation_formatters(model
             DeterministicResponseAPIToolcallModel(outputs=[]),
             make_response_api_output(
                 "responses",
-                [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "go on"', "tool_call_id": "call_resp_0"}],
+                [{"command": 'mini-mas continue mas-1111111111111111 "go on"', "tool_call_id": "call_resp_0"}],
             ),
             "call_id",
         ),
@@ -161,12 +161,12 @@ def test_mas_continue_uses_existing_model_specific_observation_formatters(monkey
         workflows,
         "mas-0123456789abcdef",
         {
-            "workflow_id": "mas-0123456789abcdef-c001",
-            "root_workflow_id": "mas-0123456789abcdef",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
         },
     )
@@ -182,8 +182,8 @@ def test_mas_continue_uses_existing_model_specific_observation_formatters(monkey
             model=model,
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-0123456789abcdef",
             },
         )
     )

@@ -28,12 +28,12 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
         workflows,
         "mas-0123456789abcdef",
         {
-            "workflow_id": "mas-0123456789abcdef-c001",
-            "root_workflow_id": "mas-0123456789abcdef",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
             "latest_submission": "first answer",
         },
@@ -56,26 +56,26 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
         workflows.execute_agent_workflow_actions(
             message=make_output(
                 "continue child",
-                [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "please revise"'}],
+                [{"command": 'mini-mas continue mas-1111111111111111 "please revise"'}],
             ),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-0123456789abcdef",
             },
         )
     )
 
     assert sent == [
         (
-            "mas-0123456789abcdef-c001",
+            "mas-1111111111111111",
             {
                 "type": "continuation",
                 "signal_type": "mas_continuation",
                 "content": "please revise",
                 "source_workflow_id": "mas-0123456789abcdef",
-                "target_workflow_id": "mas-0123456789abcdef-c001",
+                "target_workflow_id": "mas-1111111111111111",
             },
             PARENT_DIRECTION_TOPIC,
         )
@@ -83,7 +83,7 @@ def test_workflow_continue_sends_parent_to_child_continuation_signal(monkeypatch
     text = _observation_text(observations[0])
     assert "<returncode>0</returncode>" in text
     assert "Continuation signal sent" in text
-    assert "agent_id: mas-0123456789abcdef-c001" in text
+    assert "agent_id: mas-1111111111111111" in text
 
 def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
@@ -94,12 +94,12 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
         workflows,
         "mas-0123456789abcdef",
         {
-            "workflow_id": "mas-0123456789abcdef-c001",
-            "root_workflow_id": "mas-0123456789abcdef",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_parent",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
             "latest_submission": "first answer",
         },
@@ -120,24 +120,24 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
 
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("close child", [{"command": "mini-mas close mas-0123456789abcdef-c001"}]),
+            message=make_output("close child", [{"command": "mini-mas close mas-1111111111111111"}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-0123456789abcdef",
             },
         )
     )
 
     assert sent == [
         (
-            "mas-0123456789abcdef-c001",
+            "mas-1111111111111111",
             {
                 "type": "close",
                 "signal_type": "mas_close",
                 "source_workflow_id": "mas-0123456789abcdef",
-                "target_workflow_id": "mas-0123456789abcdef-c001",
+                "target_workflow_id": "mas-1111111111111111",
             },
             PARENT_DIRECTION_TOPIC,
         )
@@ -145,7 +145,7 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
     text = _observation_text(observations[0])
     assert "<returncode>0</returncode>" in text
     assert "Close signal sent" in text
-    assert "agent_id: mas-0123456789abcdef-c001" in text
+    assert "agent_id: mas-1111111111111111" in text
     assert "lifecycle_state: waiting_for_parent" in text
     assert "accepted" not in text.lower()
     assert "rejected" not in text.lower()
@@ -157,11 +157,11 @@ def test_workflow_close_sends_parent_to_child_neutral_close_signal(monkeypatch):
     [
         ("mini-mas continue mas-0123456789abcdef root", "Cannot continue the current Agent"),
         (
-            "mini-mas continue mas-fedcba9876543210-c001 no",
+            "mini-mas continue mas-fedcba9876543210 no",
             "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
         (
-            "mini-mas continue mas-0123456789abcdef-c002 no",
+            "mini-mas continue mas-2222222222222222 no",
             "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
     ],
@@ -183,8 +183,8 @@ def test_workflow_continue_rejects_root_outside_tree_and_missing_children(monkey
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-0123456789abcdef",
             },
         )
     )
@@ -196,8 +196,8 @@ def test_workflow_continue_rejects_root_outside_tree_and_missing_children(monkey
 def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
-    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef-c001")
-    _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef-c001", {})
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-1111111111111111")
+    _mock_direct_child_status_events(monkeypatch, workflows, "mas-1111111111111111", {})
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "send_async",
@@ -206,30 +206,30 @@ def test_workflow_continue_rejects_sibling_from_child_workflow(monkeypatch):
 
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("bad continue", [{"command": "mini-mas continue mas-0123456789abcdef-c002 no"}]),
+            message=make_output("bad continue", [{"command": "mini-mas continue mas-2222222222222222 no"}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef-c001",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-1111111111111111",
             },
         )
     )
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Agent is not a direct Child Agent of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
+    assert "Agent is not a direct Child Agent of mas-1111111111111111: mas-2222222222222222" in text
 
 @pytest.mark.parametrize(
     ("command", "expected_error"),
     [
         ("mini-mas close mas-0123456789abcdef", "Cannot close the current Agent"),
         (
-            "mini-mas close mas-fedcba9876543210-c001",
+            "mini-mas close mas-fedcba9876543210",
             "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
         (
-            "mini-mas close mas-0123456789abcdef-c002",
+            "mini-mas close mas-2222222222222222",
             "Agent is not a direct Child Agent of mas-0123456789abcdef",
         ),
     ],
@@ -251,8 +251,8 @@ def test_workflow_close_rejects_root_outside_tree_and_missing_children(monkeypat
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-0123456789abcdef",
             },
         )
     )
@@ -264,8 +264,8 @@ def test_workflow_close_rejects_root_outside_tree_and_missing_children(monkeypat
 def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
-    _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef-c001")
-    _mock_direct_child_status_events(monkeypatch, workflows, "mas-0123456789abcdef-c001", {})
+    _set_agent_workflow_context(monkeypatch, workflows, "mas-1111111111111111")
+    _mock_direct_child_status_events(monkeypatch, workflows, "mas-1111111111111111", {})
     monkeypatch.setattr(
         workflows._dbos.DBOS,
         "send_async",
@@ -274,19 +274,19 @@ def test_workflow_close_rejects_sibling_from_child_workflow(monkeypatch):
 
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("bad close", [{"command": "mini-mas close mas-0123456789abcdef-c002"}]),
+            message=make_output("bad close", [{"command": "mini-mas close mas-2222222222222222"}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef-c001",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-1111111111111111",
             },
         )
     )
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Agent is not a direct Child Agent of mas-0123456789abcdef-c001: mas-0123456789abcdef-c002" in text
+    assert "Agent is not a direct Child Agent of mas-1111111111111111: mas-2222222222222222" in text
 
 @pytest.mark.parametrize("lifecycle_state", ["closed", "failed", "limits_exceeded", "running", "waiting_for_child"])
 def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, lifecycle_state):
@@ -298,12 +298,12 @@ def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, l
         workflows,
         "mas-0123456789abcdef",
         {
-            "workflow_id": "mas-0123456789abcdef-c001",
-            "root_workflow_id": "mas-0123456789abcdef",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": lifecycle_state,
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
         },
     )
@@ -315,19 +315,19 @@ def test_workflow_close_rejects_not_waiting_or_terminal_workflows(monkeypatch, l
 
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("close", [{"command": "mini-mas close mas-0123456789abcdef-c001"}]),
+            message=make_output("close", [{"command": "mini-mas close mas-1111111111111111"}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
+                "parent_agent_id": "mas-0123456789abcdef",
+                "agent_id": "mas-0123456789abcdef",
             },
         )
     )
 
     text = _observation_text(observations[0])
     assert "<returncode>1</returncode>" in text
-    assert "Agent is not waiting for parent direction: mas-0123456789abcdef-c001" in text
+    assert "Agent is not waiting for parent direction: mas-1111111111111111" in text
 
 def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
@@ -338,12 +338,12 @@ def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch
         workflows,
         "mas-0123456789abcdef",
         {
-            "workflow_id": "mas-0123456789abcdef-c001",
-            "root_workflow_id": "mas-0123456789abcdef",
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
             "lifecycle_state": "waiting_for_child",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
         },
     )
@@ -355,12 +355,12 @@ def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch
 
     model = DeterministicModel(outputs=[])
     template_vars = {
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": "mas-0123456789abcdef",
+        "parent_agent_id": "mas-0123456789abcdef",
+        "agent_id": "mas-0123456789abcdef",
     }
     continued = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("continue", [{"command": 'mini-mas continue mas-0123456789abcdef-c001 "go"'}]),
+            message=make_output("continue", [{"command": 'mini-mas continue mas-1111111111111111 "go"'}]),
             model=model,
             env=Mock(),
             template_vars=template_vars,
@@ -368,7 +368,7 @@ def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch
     )
     closed = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("close", [{"command": "mini-mas close mas-0123456789abcdef-c001"}]),
+            message=make_output("close", [{"command": "mini-mas close mas-1111111111111111"}]),
             model=model,
             env=Mock(),
             template_vars=template_vars,
@@ -378,4 +378,4 @@ def test_workflow_continue_and_close_reject_waiting_for_child_status(monkeypatch
     for observations in (continued, closed):
         text = _observation_text(observations[0])
         assert "<returncode>1</returncode>" in text
-        assert "Agent is not waiting for parent direction: mas-0123456789abcdef-c001" in text
+        assert "Agent is not waiting for parent direction: mas-1111111111111111" in text

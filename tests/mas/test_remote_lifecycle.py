@@ -15,8 +15,8 @@ def test_remote_interactive_lifecycle_behavior_is_owned_by_mas_agent():
         remote_lifecycle = None
 
     agent = workflows.MasAgent(
-        root_workflow_id="mas-0123456789abcdef",
-        workflow_id="mas-0123456789abcdef-c001",
+        agent_id="mas-1111111111111111",
+        parent_agent_id="mas-0123456789abcdef",
         model=None,
         env=None,
         step_limit=3,
@@ -24,7 +24,7 @@ def test_remote_interactive_lifecycle_behavior_is_owned_by_mas_agent():
 
     signal = make_continuation_signal(
         source_workflow_id="mas-0123456789abcdef",
-        target_workflow_id="mas-0123456789abcdef-c001",
+        target_workflow_id="mas-1111111111111111",
         content="continue",
     )
 
@@ -34,7 +34,7 @@ def test_remote_interactive_lifecycle_behavior_is_owned_by_mas_agent():
     assert callable(agent._close_after_parent_signal)
     if remote_lifecycle is not None:
         assert not hasattr(remote_lifecycle, "RemoteInteractiveAgentLifecycle")
-    assert signal["target_workflow_id"] == "mas-0123456789abcdef-c001"
+    assert signal["target_workflow_id"] == "mas-1111111111111111"
     assert is_continuation_signal({"signal_type": "mas_continuation"})
     assert is_close_signal({"signal_type": "mas_close"})
 

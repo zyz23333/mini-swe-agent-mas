@@ -1,5 +1,4 @@
 import inspect
-import re
 from unittest.mock import Mock, patch
 
 import pytest
@@ -9,7 +8,6 @@ from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
     get_agent_workflow_status,
-    make_root_agent_id,
     wait_for_agent_workflow,
 )
 
@@ -24,11 +22,10 @@ def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
     handle = AsyncMockHandle(
         "mas-1111111111111111",
         {
-            "root_workflow_id": "mas-1111111111111111",
-            "workflow_id": "mas-1111111111111111",
+            "agent_id": "mas-1111111111111111",
             "status": "started",
-            "run_directory": ".mini-mas/runs/mas-1111111111111111",
-            "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
         },
     )
 
@@ -58,16 +55,14 @@ def test_mini_mas_run_initializes_launches_and_starts_root_workflow():
     assert workflow_func.__name__ == "root_agent_workflow"
     assert dbos_module.DBOS.start_workflow_async.call_args.args[1] == "mas-1111111111111111"
     assert result == {
-        "root_workflow_id": "mas-1111111111111111",
-        "workflow_id": "mas-1111111111111111",
-        "run_directory": ".mini-mas/runs/mas-1111111111111111",
-        "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+        "agent_id": "mas-1111111111111111",
+        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+        "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
         "result": {
-            "root_workflow_id": "mas-1111111111111111",
-            "workflow_id": "mas-1111111111111111",
+            "agent_id": "mas-1111111111111111",
             "status": "started",
-            "run_directory": ".mini-mas/runs/mas-1111111111111111",
-            "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
         },
     }
 
@@ -75,11 +70,10 @@ def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
     handle = AsyncMockHandle(
         "mas-1111111111111111",
         {
-            "root_workflow_id": "mas-1111111111111111",
-            "workflow_id": "mas-1111111111111111",
+            "agent_id": "mas-1111111111111111",
             "status": "started",
-            "run_directory": ".mini-mas/runs/mas-1111111111111111",
-            "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
         },
     )
 
@@ -94,22 +88,21 @@ def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
 
     dbos_module.DBOS.start_workflow_async.assert_called_once()
     assert result == {
-        "root_workflow_id": "mas-1111111111111111",
-        "workflow_id": "mas-1111111111111111",
-        "run_directory": ".mini-mas/runs/mas-1111111111111111",
-        "trajectory_artifact_path": ".mini-mas/runs/mas-1111111111111111/trajectories/mas-1111111111111111.traj.json",
+        "agent_id": "mas-1111111111111111",
+        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+        "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
     }
 
 @pytest.mark.parametrize(
     ("runtime_func", "kwargs"),
     [
-        (get_agent_workflow_status, {"workflow_id": "mas-1111111111111111-c001"}),
-        (wait_for_agent_workflow, {"workflow_id": "mas-1111111111111111-c001", "timeout_seconds": 1.0}),
+        (get_agent_workflow_status, {"workflow_id": "mas-2222222222222222"}),
+        (wait_for_agent_workflow, {"workflow_id": "mas-2222222222222222", "timeout_seconds": 1.0}),
         (
             continue_agent_workflow,
-            {"workflow_id": "mas-1111111111111111-c001", "message": "please continue"},
+            {"workflow_id": "mas-2222222222222222", "message": "please continue"},
         ),
-        (close_agent_workflow, {"workflow_id": "mas-1111111111111111-c001"}),
+        (close_agent_workflow, {"workflow_id": "mas-2222222222222222"}),
     ],
 )
 def test_external_agent_interaction_runtimes_share_unsupported_response_without_dbos(runtime_func, kwargs):
@@ -122,7 +115,7 @@ def test_external_agent_interaction_runtimes_share_unsupported_response_without_
     dbos_module.DBOS.launch.assert_not_called()
     assert result == {
         "kind": "unsupported",
-        "workflow_id": "mas-1111111111111111-c001",
+        "agent_id": "mas-2222222222222222",
         "output": (
             "External mini-mas status, wait, continue, and close are unsupported until terminal commands are routed "
             "through an Interactive Root Agent.\n"
@@ -132,8 +125,3 @@ def test_external_agent_interaction_runtimes_share_unsupported_response_without_
         "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
     }
     assert "unsupported until terminal commands are routed through an Interactive Root Agent" in result["output"]
-
-def test_root_workflow_ids_use_mas_16_hex_shape():
-    generated_ids = [make_root_agent_id() for _ in range(20)]
-
-    assert all(re.fullmatch(r"mas-[0-9a-f]{16}", workflow_id) for workflow_id in generated_ids)

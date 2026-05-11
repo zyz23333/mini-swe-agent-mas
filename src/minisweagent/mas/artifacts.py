@@ -1,60 +1,66 @@
-"""Deterministic artifact paths for MAS workflow runs."""
+"""Deterministic artifact paths for MAS Agents."""
 
 from __future__ import annotations
 
 import json
 import re
+import secrets
 from pathlib import Path
 
 from minisweagent import __version__
 
-RUNS_ROOT = Path(".mini-mas") / "runs"
-ROOT_AGENT_ID_RE = re.compile(r"mas-[0-9a-f]{16}\Z")
-AGENT_ID_RE = re.compile(r"mas-[0-9a-f]{16}(?:-c[0-9]{3})*\Z")
+AGENTS_ROOT = Path(".mini-mas") / "agents"
+AGENT_ID_RE = re.compile(r"mas-[0-9a-f]{16}\Z")
 
 
-def validate_root_agent_id(root_workflow_id: str) -> str:
-    """Return a Root Agent ID after validating its path-safe shape."""
-    if not ROOT_AGENT_ID_RE.fullmatch(root_workflow_id):
-        raise ValueError("Root Agent ID must match mas-<16 lowercase hex characters>")
-    return root_workflow_id
+def make_agent_id() -> str:
+    """Return an opaque MAS Agent ID."""
+    return f"mas-{secrets.token_hex(8)}"
 
 
-def validate_agent_id(workflow_id: str) -> str:
-    """Return an Agent ID after validating its path-safe tree shape."""
-    if not AGENT_ID_RE.fullmatch(workflow_id):
-        raise ValueError("Agent ID must match mas-<16hex> with optional -cNNN child segments")
-    return workflow_id
+def validate_agent_id(agent_id: str) -> str:
+    """Return an opaque Agent ID after validating its path-safe shape."""
+    if not AGENT_ID_RE.fullmatch(agent_id):
+        raise ValueError("Agent ID must match mas-<16 lowercase hex characters>")
+    return agent_id
 
 
-def make_run_directory(root_workflow_id: str) -> Path:
-    """Build the Run Directory for one Root Agent."""
-    root_workflow_id = validate_root_agent_id(root_workflow_id)
-    return RUNS_ROOT / root_workflow_id
+def make_agent_artifact_directory(agent_id: str) -> Path:
+    """Build the Agent Artifact Directory for one Agent."""
+    agent_id = validate_agent_id(agent_id)
+    return AGENTS_ROOT / agent_id
 
 
-def make_trajectory_artifact_path(run_directory: Path, workflow_id: str) -> Path:
+def make_trajectory_artifact_path(agent_id: str) -> Path:
     """Build the deterministic Trajectory Artifact path for one Agent."""
-    workflow_id = validate_agent_id(workflow_id)
-    return run_directory / "trajectories" / f"{workflow_id}.traj.json"
+    return make_agent_artifact_directory(agent_id) / "trajectory.traj.json"
 
 
-def make_artifact_metadata(*, root_workflow_id: str, workflow_id: str) -> dict[str, str]:
+def make_artifact_metadata(
+    *,
+    agent_id: str,
+    parent_agent_id: str | None = None,
+) -> dict[str, str]:
     """Return artifact metadata for one Agent backed by DBOS workflow identifiers."""
-    run_directory = make_run_directory(root_workflow_id)
-    trajectory_path = make_trajectory_artifact_path(run_directory, workflow_id)
-    return {
-        "root_workflow_id": root_workflow_id,
-        "workflow_id": workflow_id,
-        "run_directory": run_directory.as_posix(),
+    resolved_agent_id = validate_agent_id(agent_id)
+    if parent_agent_id is not None:
+        parent_agent_id = validate_agent_id(parent_agent_id)
+    artifact_directory = make_agent_artifact_directory(resolved_agent_id)
+    trajectory_path = make_trajectory_artifact_path(resolved_agent_id)
+    metadata = {
+        "agent_id": resolved_agent_id,
+        "agent_artifact_directory": artifact_directory.as_posix(),
         "trajectory_artifact_path": trajectory_path.as_posix(),
     }
+    if parent_agent_id is not None:
+        metadata["parent_agent_id"] = parent_agent_id
+    return metadata
 
 
 def build_trajectory_artifact(
     *,
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
+    parent_agent_id: str | None = None,
     status: str,
     messages: list[dict] | None = None,
     model_stats: dict | None = None,
@@ -62,7 +68,10 @@ def build_trajectory_artifact(
     extra_info: dict | None = None,
 ) -> dict:
     """Build a mini-swe-agent-compatible trajectory artifact."""
-    metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
+    metadata = make_artifact_metadata(
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
+    )
     messages = messages or [
         {
             "role": "exit",
@@ -96,8 +105,8 @@ def build_trajectory_artifact(
 
 def save_trajectory_artifact(
     *,
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
+    parent_agent_id: str | None = None,
     status: str,
     messages: list[dict] | None = None,
     model_stats: dict | None = None,
@@ -105,11 +114,14 @@ def save_trajectory_artifact(
     extra_info: dict | None = None,
 ) -> Path:
     """Persist a Trajectory Artifact, creating parents and overwriting the same path safely."""
-    metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
+    metadata = make_artifact_metadata(
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
+    )
     trajectory_path = Path(metadata["trajectory_artifact_path"])
     artifact = build_trajectory_artifact(
-        root_workflow_id=root_workflow_id,
-        workflow_id=workflow_id,
+        agent_id=metadata["agent_id"],
+        parent_agent_id=parent_agent_id,
         status=status,
         messages=messages,
         model_stats=model_stats,

@@ -29,15 +29,15 @@ def test_agent_interactions_module_owns_status_first_observable_wait_and_message
         published.append((key, value))
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
-        assert workflow_id == "mas-0123456789abcdef-c001"
+        assert workflow_id == "mas-1111111111111111"
         assert key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY
         assert timeout_seconds == 0.25
         return {
-            "workflow_id": workflow_id,
+            "agent_id": workflow_id,
             "lifecycle_state": "waiting_for_parent",
-            "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
             "trajectory_artifact_path": (
-                ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
             ),
         }
 
@@ -63,21 +63,20 @@ def test_agent_interactions_module_owns_status_first_observable_wait_and_message
     assert agent_interactions.current_workflow_id() == "mas-0123456789abcdef"
     asyncio.run(
         agent_interactions.publish_status(
-            root_workflow_id="mas-0123456789abcdef",
-            workflow_id="mas-0123456789abcdef",
+            agent_id="mas-0123456789abcdef",
             lifecycle_state="waiting_for_child",
         )
     )
     asyncio.run(
         agent_interactions.publish_first_observable(
-            root_workflow_id="mas-0123456789abcdef",
-            workflow_id="mas-0123456789abcdef-c001",
+            agent_id="mas-1111111111111111",
+            parent_agent_id="mas-0123456789abcdef",
             lifecycle_state="waiting_for_parent",
         )
     )
     ready, still_running, timed_out = asyncio.run(
         agent_interactions.wait_for_first_observable_events(
-            child_agent_ids=["mas-0123456789abcdef-c001"],
+            child_agent_ids=["mas-1111111111111111"],
             wait_all=False,
             timeout_seconds=0.25,
         )
@@ -85,7 +84,7 @@ def test_agent_interactions_module_owns_status_first_observable_wait_and_message
     signal = asyncio.run(agent_interactions.receive_parent_direction(topic=PARENT_DIRECTION_TOPIC, timeout_seconds=3))
     asyncio.run(
         agent_interactions.send_parent_direction(
-            target_workflow_id="mas-0123456789abcdef-c001",
+            target_workflow_id="mas-1111111111111111",
             signal={"type": "close"},
             topic=PARENT_DIRECTION_TOPIC,
         )
@@ -95,27 +94,27 @@ def test_agent_interactions_module_owns_status_first_observable_wait_and_message
         (mas_status_events.STATUS_EVENT_KEY, "waiting_for_child"),
         (mas_status_events.FIRST_OBSERVABLE_EVENT_KEY, "waiting_for_parent"),
     ]
-    assert ready[0]["workflow_id"] == "mas-0123456789abcdef-c001"
+    assert ready[0]["agent_id"] == "mas-1111111111111111"
     assert still_running == []
     assert timed_out is False
     assert signal == {"type": "close"}
     assert received == [(PARENT_DIRECTION_TOPIC, 3)]
-    assert sent == [("mas-0123456789abcdef-c001", {"type": "close"}, PARENT_DIRECTION_TOPIC)]
+    assert sent == [("mas-1111111111111111", {"type": "close"}, PARENT_DIRECTION_TOPIC)]
 
 def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     events_by_workflow = {
-        "mas-0123456789abcdef-c001": {
+        "mas-1111111111111111": {
             "mini_mas_status": {
-                "workflow_id": "mas-0123456789abcdef-c001",
-                "root_workflow_id": "mas-0123456789abcdef",
+                "agent_id": "mas-1111111111111111",
+                "parent_agent_id": "mas-0123456789abcdef",
                 "lifecycle_state": "waiting_for_parent",
                 "latest_submission": "ready for review",
-                "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+                "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
                 "trajectory_artifact_path": (
-                    ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+                    ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
                 ),
             }
         },
@@ -139,10 +138,7 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
             message=message,
             model=model,
             env=Mock(),
-            template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
-            },
+            template_vars={"agent_id": "mas-0123456789abcdef"},
         )
     )
 
@@ -154,31 +150,31 @@ def test_workflow_status_reports_current_tree_without_blocking(monkeypatch):
     text = _observation_text(observations[0])
     assert "<returncode>0</returncode>" in text
     assert "Direct Child Agents for: mas-0123456789abcdef" in text
-    assert "agent_id: mas-0123456789abcdef\n" not in text
-    assert "agent_id: mas-0123456789abcdef-c001" in text
+    assert "agent_id: mas-0123456789abcdef\nlifecycle_state" not in text
+    assert "agent_id: mas-1111111111111111" in text
     assert "lifecycle_state: waiting_for_parent" in text
     assert "latest_submission: ready for review" in text
-    assert "trajectory_artifact_path: .mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json" in text
+    assert "trajectory_artifact_path: .mini-mas/agents/mas-1111111111111111/trajectory.traj.json" in text
 
 def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     child_status = {
-        "workflow_id": "mas-0123456789abcdef-c001",
-        "root_workflow_id": "mas-0123456789abcdef",
+        "agent_id": "mas-1111111111111111",
+        "parent_agent_id": "mas-0123456789abcdef",
         "lifecycle_state": "failed",
         "latest_error": "model failed",
-        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": (
-            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
         ),
     }
     _mock_direct_child_status_events(
         monkeypatch,
         workflows,
         "mas-0123456789abcdef",
-        {"mas-0123456789abcdef-c001": {"mini_mas_status": child_status}},
+        {"mas-1111111111111111": {"mini_mas_status": child_status}},
     )
     monkeypatch.setattr(
         workflows._dbos.DBOS,
@@ -189,44 +185,61 @@ def test_workflow_status_reports_specific_descendant_and_missing_workflow(monkey
     model = DeterministicModel(outputs=[])
     found = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("status child", [{"command": "mini-mas status mas-0123456789abcdef-c001"}]),
+            message=make_output("status child", [{"command": "mini-mas status mas-1111111111111111"}]),
             model=model,
             env=Mock(),
-            template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
-            },
+            template_vars={"agent_id": "mas-0123456789abcdef"},
         )
     )
 
     found_text = _observation_text(found[0])
     assert "<returncode>0</returncode>" in found_text
-    assert "agent_id: mas-0123456789abcdef-c001" in found_text
+    assert "agent_id: mas-1111111111111111" in found_text
     assert "lifecycle_state: failed" in found_text
     assert "latest_error: model failed" in found_text
 
     missing = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("missing child", [{"command": "mini-mas status mas-0123456789abcdef-c999"}]),
+            message=make_output("missing child", [{"command": "mini-mas status mas-9999999999999999"}]),
             model=model,
             env=Mock(),
-            template_vars={
-                "root_workflow_id": "mas-0123456789abcdef",
-                "workflow_id": "mas-0123456789abcdef",
-            },
+            template_vars={"agent_id": "mas-0123456789abcdef"},
         )
     )
 
     missing_text = _observation_text(missing[0])
     assert "<returncode>1</returncode>" in missing_text
-    assert "Agent is not a direct Child Agent of mas-0123456789abcdef: mas-0123456789abcdef-c999" in missing_text
+    assert "Agent is not a direct Child Agent of mas-0123456789abcdef: mas-9999999999999999" in missing_text
 
 def test_status_snapshot_accepts_waiting_for_child_lifecycle_state():
 
     snapshot = mas_status_events.make_status_snapshot(
-        root_workflow_id="mas-0123456789abcdef",
-        workflow_id="mas-0123456789abcdef-c001",
+        agent_id="mas-1111111111111111",
+        parent_agent_id="mas-0123456789abcdef",
         lifecycle_state="waiting_for_child",
     )
 
     assert snapshot.to_event()["lifecycle_state"] == "waiting_for_child"
+
+
+def test_status_snapshot_normalization_rebuilds_canonical_agent_artifact_metadata():
+    snapshot = mas_status_events.normalize_agent_snapshot(
+        {
+            "agent_id": "mas-1111111111111111",
+            "parent_agent_id": "mas-0123456789abcdef",
+            "lifecycle_state": "waiting_for_parent",
+            "agent_artifact_directory": ".mini-mas/agents/mas-0123456789abcdef",
+            "trajectory_artifact_path": (
+                ".mini-mas/agents/mas-0123456789abcdef/trajectories/"
+                "mas-1111111111111111.traj.json"
+            ),
+        }
+    )
+
+    assert snapshot["agent_id"] == "mas-1111111111111111"
+    assert "workflow_id" not in snapshot
+    assert snapshot["parent_agent_id"] == "mas-0123456789abcdef"
+    assert snapshot["agent_artifact_directory"] == ".mini-mas/agents/mas-1111111111111111"
+    assert snapshot["trajectory_artifact_path"] == (
+        ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
+    )

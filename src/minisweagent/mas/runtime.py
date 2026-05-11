@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-import secrets
 from collections.abc import Mapping
 from typing import Any
 
-from minisweagent.mas.artifacts import make_artifact_metadata, validate_agent_id, validate_root_agent_id
+from minisweagent.mas.artifacts import make_agent_id, make_artifact_metadata, validate_agent_id
 
 MAS_APP_NAME = "mini-swe-agent-mas"
 UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE = (
@@ -23,11 +22,6 @@ def load_dbos():
     import dbos
 
     return dbos
-
-
-def make_root_agent_id() -> str:
-    """Return a readable Root Agent ID."""
-    return f"mas-{secrets.token_hex(8)}"
 
 
 def make_dbos_config(*, system_database_url: str | None = None) -> dict[str, str | None]:
@@ -46,11 +40,8 @@ def _handle_workflow_id(handle: Any) -> str:
     return str(handle.workflow_id)
 
 
-def _format_run_result(*, root_workflow_id: str, result: Any | None, wait: bool) -> dict[str, Any]:
-    data: dict[str, Any] = make_artifact_metadata(
-        root_workflow_id=root_workflow_id,
-        workflow_id=root_workflow_id,
-    )
+def _format_run_result(*, agent_id: str, result: Any | None, wait: bool) -> dict[str, Any]:
+    data: dict[str, Any] = make_artifact_metadata(agent_id=agent_id)
     if wait:
         data["result"] = result
     return data
@@ -60,7 +51,7 @@ def _unsupported_external_agent_interaction_result(*, workflow_id: str) -> dict[
     """Return the shared unsupported result for naked external Agent Interaction commands."""
     return {
         "kind": "unsupported",
-        "workflow_id": workflow_id,
+        "agent_id": workflow_id,
         "output": UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE,
         "returncode": 2,
         "exception_info": UNSUPPORTED_EXTERNAL_COORDINATION_ERROR,
@@ -83,13 +74,13 @@ async def _start_root_agent_workflow_async(
 
     dbos_module.DBOS.launch()
 
-    assigned_workflow_id = validate_root_agent_id(workflow_id or make_root_agent_id())
+    assigned_workflow_id = validate_agent_id(workflow_id or make_agent_id())
     with dbos_module.SetWorkflowID(assigned_workflow_id):
         handle = await dbos_module.DBOS.start_workflow_async(root_agent_workflow, assigned_workflow_id)
 
     started_workflow_id = _handle_workflow_id(handle)
     result = await handle.get_result() if wait else None
-    return _format_run_result(root_workflow_id=started_workflow_id, result=result, wait=wait)
+    return _format_run_result(agent_id=started_workflow_id, result=result, wait=wait)
 
 
 def start_root_agent_workflow(
@@ -155,15 +146,6 @@ def wait_for_agent_workflow(
             system_database_url=system_database_url,
         )
     )
-
-
-def parent_id_for_workflow(workflow_id: str) -> str:
-    """Return the encoded immediate Parent Agent ID for a descendant Agent."""
-    workflow_id = validate_agent_id(workflow_id)
-    parent_id, separator, _child_suffix = workflow_id.rpartition("-c")
-    if not separator:
-        return workflow_id
-    return validate_agent_id(parent_id)
 
 
 async def _continue_agent_workflow_async(

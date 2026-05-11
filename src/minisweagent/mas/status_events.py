@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from inspect import isawaitable
 from typing import Any, Literal
 
-from minisweagent.mas.artifacts import make_artifact_metadata, validate_agent_id, validate_root_agent_id
+from minisweagent.mas.artifacts import make_artifact_metadata, validate_agent_id
 
 STATUS_EVENT_KEY = "mini_mas_status"
 FIRST_OBSERVABLE_EVENT_KEY = "mini_mas_first_observable"
@@ -29,22 +29,23 @@ async def _maybe_await(value: Any) -> Any:
 class AgentStatusSnapshot:
     """Lightweight status data exposed through DBOS events."""
 
-    root_workflow_id: str
-    workflow_id: str
+    agent_id: str
     lifecycle_state: LifecycleState
-    run_directory: str
+    agent_artifact_directory: str
     trajectory_artifact_path: str
+    parent_agent_id: str = ""
     latest_submission: str = ""
     latest_error: str = ""
 
     def to_event(self) -> dict[str, str]:
         data = {
-            "root_workflow_id": self.root_workflow_id,
-            "workflow_id": self.workflow_id,
+            "agent_id": self.agent_id,
             "lifecycle_state": self.lifecycle_state,
-            "run_directory": self.run_directory,
+            "agent_artifact_directory": self.agent_artifact_directory,
             "trajectory_artifact_path": self.trajectory_artifact_path,
         }
+        if self.parent_agent_id:
+            data["parent_agent_id"] = self.parent_agent_id
         if self.latest_submission:
             data["latest_submission"] = self.latest_submission
         if self.latest_error:
@@ -54,8 +55,8 @@ class AgentStatusSnapshot:
 
 def make_status_snapshot(
     *,
-    root_workflow_id: str,
-    workflow_id: str,
+    agent_id: str,
+    parent_agent_id: str | None = None,
     lifecycle_state: LifecycleState,
     latest_submission: str = "",
     latest_error: str = "",
@@ -63,27 +64,43 @@ def make_status_snapshot(
     """Build the status snapshot shape stored in DBOS events."""
     if lifecycle_state not in LIFECYCLE_STATES:
         raise ValueError(f"Unsupported MAS lifecycle state: {lifecycle_state}")
-    metadata = make_artifact_metadata(root_workflow_id=root_workflow_id, workflow_id=workflow_id)
+    metadata = make_artifact_metadata(
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
+    )
     return AgentStatusSnapshot(
-        root_workflow_id=metadata["root_workflow_id"],
-        workflow_id=metadata["workflow_id"],
+        agent_id=metadata["agent_id"],
         lifecycle_state=lifecycle_state,
-        run_directory=metadata["run_directory"],
+        agent_artifact_directory=metadata["agent_artifact_directory"],
         trajectory_artifact_path=metadata["trajectory_artifact_path"],
+        parent_agent_id=metadata.get("parent_agent_id", ""),
         latest_submission=latest_submission,
         latest_error=latest_error,
     )
 
 
-def root_id_for_workflow(workflow_id: str) -> str:
-    """Return the Root Agent ID encoded in an Agent ID."""
-    workflow_id = validate_agent_id(workflow_id)
-    return validate_root_agent_id(workflow_id[:20])
-
-
 def _status_from_events(events: dict[str, Any]) -> dict[str, Any] | None:
     status = events.get(STATUS_EVENT_KEY)
-    return status if isinstance(status, dict) else None
+    return normalize_agent_snapshot(status) if isinstance(status, dict) else None
+
+
+def normalize_agent_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return a snapshot with canonical Agent Metadata keys."""
+    agent_id = validate_agent_id(str(snapshot.get("agent_id") or ""))
+    metadata = make_artifact_metadata(
+        agent_id=agent_id,
+        parent_agent_id=snapshot.get("parent_agent_id"),
+    )
+    normalized = {
+        **metadata,
+        "agent_id": agent_id,
+        "lifecycle_state": snapshot["lifecycle_state"],
+    }
+    if snapshot.get("latest_submission"):
+        normalized["latest_submission"] = snapshot["latest_submission"]
+    if snapshot.get("latest_error"):
+        normalized["latest_error"] = snapshot["latest_error"]
+    return normalized
 
 
 async def list_direct_child_agent_ids_async(dbos_api: Any, parent_workflow_id: str) -> list[str]:
@@ -111,7 +128,7 @@ async def query_direct_child_statuses_async(dbos_api: Any, parent_workflow_id: s
         snapshot = _status_from_events(await _maybe_await(dbos_api.get_all_events_async(workflow_id)))
         if snapshot is not None:
             snapshots.append(snapshot)
-    return sorted(snapshots, key=lambda snapshot: snapshot["workflow_id"])
+    return sorted(snapshots, key=lambda snapshot: snapshot["agent_id"])
 
 
 async def query_direct_child_status_async(
@@ -134,17 +151,20 @@ async def query_direct_child_status_async(
 
 
 def _format_snapshot(snapshot: dict[str, Any]) -> list[str]:
+    snapshot = normalize_agent_snapshot(snapshot)
     lines = [
-        f"agent_id: {snapshot['workflow_id']}",
+        f"agent_id: {snapshot['agent_id']}",
         f"lifecycle_state: {snapshot['lifecycle_state']}",
     ]
+    if snapshot.get("parent_agent_id"):
+        lines.append(f"parent_agent_id: {snapshot['parent_agent_id']}")
     if snapshot.get("latest_submission"):
         lines.append(f"latest_submission: {snapshot['latest_submission']}")
     if snapshot.get("latest_error"):
         lines.append(f"latest_error: {snapshot['latest_error']}")
     lines.extend(
         [
-            f"run_directory: {snapshot['run_directory']}",
+            f"agent_artifact_directory: {snapshot['agent_artifact_directory']}",
             f"trajectory_artifact_path: {snapshot['trajectory_artifact_path']}",
         ]
     )

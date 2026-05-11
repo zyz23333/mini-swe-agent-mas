@@ -10,17 +10,17 @@ def test_mas_command_result_formatter_owns_success_and_error_shapes():
 
     formatter = MasCommandResultFormatter()
     children = [
-        _child_metadata("mas-0123456789abcdef-c001", task="task A"),
-        _child_metadata("mas-0123456789abcdef-c002", task="task B"),
+        _child_metadata("mas-1111111111111111", task="task A"),
+        _child_metadata("mas-2222222222222222", task="task B"),
     ]
     ready_snapshot = {
-        "root_workflow_id": "mas-0123456789abcdef",
-        "workflow_id": "mas-0123456789abcdef-c001",
+        "agent_id": "mas-1111111111111111",
+        "parent_agent_id": "mas-0123456789abcdef",
         "lifecycle_state": "waiting_for_parent",
         "latest_submission": "ready",
-        "run_directory": ".mini-mas/runs/mas-0123456789abcdef",
+        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": (
-            ".mini-mas/runs/mas-0123456789abcdef/trajectories/mas-0123456789abcdef-c001.traj.json"
+            ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
         ),
     }
 
@@ -30,7 +30,7 @@ def test_mas_command_result_formatter_owns_success_and_error_shapes():
         wait_result=ChildWaitResult(
             children=children,
             ready_snapshots=[ready_snapshot],
-            still_running_ids=["mas-0123456789abcdef-c002"],
+            still_running_ids=["mas-2222222222222222"],
             timed_out=True,
             wait_mode="all",
         ),
@@ -40,27 +40,27 @@ def test_mas_command_result_formatter_owns_success_and_error_shapes():
     assert spawn_result["returncode"] == 0
     assert spawn_result["exception_info"] == ""
     assert "Waited spawn timed out" in spawn_result["output"]
-    assert "ready_agent_id: mas-0123456789abcdef-c001" in spawn_result["output"]
-    assert "still_running_child_agent_ids: mas-0123456789abcdef-c002" in spawn_result["output"]
+    assert "ready_agent_id: mas-1111111111111111" in spawn_result["output"]
+    assert "still_running_child_agent_ids: mas-2222222222222222" in spawn_result["output"]
     assert spawn_result["extra"]["mas_command"] == ["spawn", "task A", "task B"]
     assert spawn_result["extra"]["spawned_child_count"] == 2
     assert spawn_result["extra"]["ready_children"] == [ready_snapshot]
     assert spawn_result["extra"]["child_agent_ids"] == [
-        "mas-0123456789abcdef-c001",
-        "mas-0123456789abcdef-c002",
+        "mas-1111111111111111",
+        "mas-2222222222222222",
     ]
-    assert spawn_result["extra"]["still_running_child_agent_ids"] == ["mas-0123456789abcdef-c002"]
+    assert spawn_result["extra"]["still_running_child_agent_ids"] == ["mas-2222222222222222"]
 
     signal = {
         "type": "continuation",
         "signal_type": "mas_continuation",
         "content": "please revise",
         "source_workflow_id": "mas-0123456789abcdef",
-        "target_workflow_id": "mas-0123456789abcdef-c001",
+        "target_workflow_id": "mas-1111111111111111",
     }
     continue_result = formatter.continuation_sent(
-        mas_command=["continue", "mas-0123456789abcdef-c001", "please revise"],
-        target_workflow_id="mas-0123456789abcdef-c001",
+        mas_command=["continue", "mas-1111111111111111", "please revise"],
+        target_workflow_id="mas-1111111111111111",
         content="please revise",
         target_status=ready_snapshot,
         signal=signal,
@@ -68,27 +68,27 @@ def test_mas_command_result_formatter_owns_success_and_error_shapes():
 
     assert "Continuation signal sent" in continue_result["output"]
     assert "message: please revise" in continue_result["output"]
-    assert "agent_id: mas-0123456789abcdef-c001" in continue_result["output"]
-    assert continue_result["extra"]["continued_agent_id"] == "mas-0123456789abcdef-c001"
+    assert "agent_id: mas-1111111111111111" in continue_result["output"]
+    assert continue_result["extra"]["continued_agent_id"] == "mas-1111111111111111"
     assert continue_result["extra"]["target_status"] == ready_snapshot
     assert continue_result["extra"]["continuation_signal"] == signal
 
     close_result = formatter.close_sent(
-        mas_command=["close", "mas-0123456789abcdef-c001"],
-        target_workflow_id="mas-0123456789abcdef-c001",
+        mas_command=["close", "mas-1111111111111111"],
+        target_workflow_id="mas-1111111111111111",
         target_status=ready_snapshot,
         signal={
             "type": "close",
             "signal_type": "mas_close",
             "source_workflow_id": "mas-0123456789abcdef",
-            "target_workflow_id": "mas-0123456789abcdef-c001",
+            "target_workflow_id": "mas-1111111111111111",
         },
     )
 
     assert "Close signal sent" in close_result["output"]
     assert "latest_submission: ready" in close_result["output"]
-    assert "agent_id: mas-0123456789abcdef-c001" in close_result["output"]
-    assert close_result["extra"]["closed_agent_id"] == "mas-0123456789abcdef-c001"
+    assert "agent_id: mas-1111111111111111" in close_result["output"]
+    assert close_result["extra"]["closed_agent_id"] == "mas-1111111111111111"
     assert close_result["extra"]["target_status"] == ready_snapshot
 
     error_result = formatter.error(
