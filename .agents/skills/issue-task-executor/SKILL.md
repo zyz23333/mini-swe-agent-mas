@@ -21,7 +21,7 @@ If the issue is not executable, stop and switch to triage behavior. Do not edit 
 
 Before planning or editing, collect enough context to understand the issue's local feature, neighboring work, and implementation surface.
 
-Read the issue's parent feature PRD at `.scratch/<feature-slug>/PRD.md` when present. Also look across the repo for related decision, design, and planning docs such as `ADR*.md`, `SPEC*.md`, `PLAN*.md`, or equivalent files when they are referenced or clearly relevant; these files may live outside `.scratch/<feature-slug>/`. Note missing or stale context docs, and stop only when the gap makes behavior ambiguous.
+Read the issue's parent feature PRD at `.scratch/<feature-slug>/PRD.md` when present. Also look across the repo for domain, decision, design, and planning docs such as `CONTEXT.md`, `ADR*.md`, `SPEC*.md`, `PLAN*.md`, or equivalent files when they are referenced or clearly relevant; these files may live outside `.scratch/<feature-slug>/`. Note missing or stale context docs, and stop only when the gap makes behavior ambiguous.
 
 Inspect related issues in `.scratch/<feature-slug>/issues/`: named dependencies/blockers, same affected area, nearby issue numbers, and completed issues defining behavior to preserve. Do not implement unrelated sibling issues.
 
@@ -58,9 +58,9 @@ Tests should verify observable behavior through real code paths. Mock only unavo
 
 ## Verification Gate
 
-Before claiming completion, re-read every acceptance criterion, run fresh verification commands, read full output and exit codes, and state only what the evidence supports.
+Before claiming completion, re-read every acceptance criterion, run fresh verification using the project's documented or established commands, read full output and exit codes, and state only what the evidence supports.
 
-Use repo commands first: `make lint`, `make test-backend`, `make test-frontend`, and specialized backend targets when contract, database migration, or integration boundaries are touched.
+Choose verification that matches the changed surface and project conventions: lint, type-check, format checks, unit tests, integration tests, contract tests, migration checks, or focused feature tests as applicable.
 
 If verification fails, do not call the work complete. Report the failing command, relevant output, and next debugging step.
 
