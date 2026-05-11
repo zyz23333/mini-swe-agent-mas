@@ -39,9 +39,11 @@ Treat the issue plus collected context and selected supporting skills as the imp
 
 Review critically before implementation. Stop if the issue is ambiguous, unsafe, blocked, requires human judgment, or would exceed scope.
 
+For feature tasks, prefer correctness and safety over the smallest textual change. The plan should identify the smallest complete, correct, and safe vertical slice that satisfies the acceptance criteria, including necessary validation, authorization/security boundaries, error handling, and tests within the issue scope.
+
 ## TDD Loop
 
-For behavior changes, use vertical slices: write one public-interface behavior test, confirm it fails for the expected reason, implement the minimum to pass, confirm it passes, refactor only while green, then repeat for the next behavior.
+For behavior changes, use vertical slices: write one public-interface behavior test, confirm it fails for the expected reason, implement the smallest complete and safe change that passes, confirm it passes, refactor only while green, then repeat for the next behavior.
 
 Do not write all tests first. Do not write production code before a failing test unless the task is pure docs, static configuration, or mechanical wiring where no meaningful automated test exists. Record the exception and replacement verification command.
 
@@ -50,6 +52,7 @@ Tests should verify observable behavior through real code paths. Mock only unavo
 ## Implementation Rules
 
 - Keep scope limited to the issue and out-of-scope section.
+- For feature work, do not choose a brittle local patch just because it is smaller. Fix the relevant root behavior when that is necessary for correctness or safety, while staying inside the issue's accepted scope.
 - Prefer existing project patterns, helpers, and dependencies.
 - Do not add third-party dependencies without approval.
 - If dependency behavior matters, inspect `references/` first.
