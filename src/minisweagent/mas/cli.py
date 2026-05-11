@@ -11,6 +11,7 @@ from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
     get_agent_workflow_status,
+    send_root_command,
     start_interactive_root_agent_workflow,
     start_root_agent_workflow,
     wait_for_agent_workflow,
@@ -99,6 +100,38 @@ def status(
     result = dict(get_agent_workflow_status(workflow_id=workflow_id, system_database_url=system_database_url))
     console.print(result["output"], end="")
     raise typer.Exit(code=result["returncode"])
+
+
+@app.command(help="Send one bash-shaped command to an Interactive Root Agent.")
+def command(
+    root_agent_id: Annotated[str, typer.Argument(help="Interactive Root Agent ID.")],
+    command_text: Annotated[str, typer.Argument(help="One bash-shaped command to execute through the Root Agent.")],
+    result_timeout_seconds: Annotated[
+        float,
+        typer.Option("--result-timeout", help="Maximum seconds to wait for the Root Command Result."),
+    ] = 60,
+    system_database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--system-database-url",
+            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
+            show_default=False,
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    result_event = dict(
+        send_root_command(
+            root_agent_id=root_agent_id,
+            command=command_text,
+            result_timeout_seconds=result_timeout_seconds,
+            system_database_url=system_database_url,
+        )
+    )
+    command_result = result_event["result"]
+    console.print(command_result.get("output", ""), end="")
+    if command_result.get("returncode", 0) != 0:
+        raise typer.Exit(code=command_result["returncode"])
+    return result_event
 
 
 @app.command(help="Wait for one Child Agent First Observable Event.")

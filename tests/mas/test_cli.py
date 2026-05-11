@@ -12,21 +12,22 @@ from .helpers import (
 
 
 def test_plain_mini_mas_creates_interactive_root_and_prints_metadata_banner():
-    handle = AsyncMockHandle(
-        "mas-2222222222222222",
-        {
-            "agent_id": "mas-2222222222222222",
-            "lifecycle_state": "waiting_for_command",
-            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-        },
-    )
+    handle = AsyncMockHandle("mas-2222222222222222")
 
     async def start_workflow_async(*_args, **_kwargs):
         return handle
 
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+        }
+
     dbos_module = _mock_dbos_module()
     dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
 
     with (
         patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
@@ -46,6 +47,7 @@ def test_plain_mini_mas_creates_interactive_root_and_prints_metadata_banner():
     workflow_func = dbos_module.DBOS.start_workflow_async.call_args.args[0]
     assert workflow_func.__name__ == "interactive_root_agent_workflow"
     assert dbos_module.DBOS.start_workflow_async.call_args.args[1] == "mas-2222222222222222"
+    assert dbos_module.DBOS.start_workflow_async.call_args.kwargs == {"max_commands": None}
 
 
 def test_mini_mas_run_cli_outputs_artifact_locations():
@@ -94,6 +96,35 @@ def test_mini_mas_status_cli_reports_external_agent_interaction_unsupported(monk
     cli_result = CliRunner().invoke(app, ["status", "mas-2222222222222222"])
     assert cli_result.exit_code == 2
     assert "unsupported" in cli_result.stdout
+
+
+def test_mini_mas_command_cli_sends_root_command_and_prints_result(monkeypatch):
+    root_command = Mock(
+        return_value={
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": "mas-2222222222222222",
+            "command": "echo hello",
+            "result": {
+                "output": "hello\n",
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {},
+            },
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", root_command)
+
+    cli_result = CliRunner().invoke(app, ["command", "mas-2222222222222222", "echo hello"])
+
+    assert cli_result.exit_code == 0
+    assert cli_result.stdout == "hello\n"
+    root_command.assert_called_once_with(
+        root_agent_id="mas-2222222222222222",
+        command="echo hello",
+        result_timeout_seconds=60,
+        system_database_url=None,
+    )
 
 def test_mini_mas_status_cli_does_not_support_missing_descendant_lookup(monkeypatch):
     monkeypatch.setattr(

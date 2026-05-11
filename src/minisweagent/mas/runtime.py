@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 from collections.abc import Mapping
 from typing import Any
 
 from minisweagent.mas.artifacts import make_agent_id, make_artifact_metadata, validate_agent_id
+from minisweagent.mas.signals import (
+    ROOT_COMMAND_TOPIC,
+    make_root_command_signal,
+    root_command_result_event_key,
+)
+from minisweagent.mas.status_events import STATUS_EVENT_KEY
 
 MAS_APP_NAME = "mini-swe-agent-mas"
 UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE = (
@@ -38,6 +45,11 @@ def _handle_workflow_id(handle: Any) -> str:
     if hasattr(handle, "get_workflow_id"):
         return str(handle.get_workflow_id())
     return str(handle.workflow_id)
+
+
+def make_command_id() -> str:
+    """Generate an opaque Root command ID."""
+    return f"cmd-{secrets.token_hex(8)}"
 
 
 def _format_run_result(*, agent_id: str, result: Any | None, wait: bool) -> dict[str, Any]:
@@ -111,7 +123,7 @@ async def _start_interactive_root_agent_workflow_async(
     workflow_id: str | None = None,
     system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
-    """Async implementation for starting the minimal Interactive Root Agent."""
+    """Async implementation for starting an Interactive Root Agent and waiting until it is idle."""
     dbos_module = load_dbos()
 
     dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
@@ -122,10 +134,14 @@ async def _start_interactive_root_agent_workflow_async(
 
     assigned_workflow_id = validate_agent_id(workflow_id or make_agent_id())
     with dbos_module.SetWorkflowID(assigned_workflow_id):
-        handle = await dbos_module.DBOS.start_workflow_async(interactive_root_agent_workflow, assigned_workflow_id)
+        handle = await dbos_module.DBOS.start_workflow_async(
+            interactive_root_agent_workflow,
+            assigned_workflow_id,
+            max_commands=None,
+        )
 
     started_workflow_id = _handle_workflow_id(handle)
-    result = await handle.get_result()
+    result = await dbos_module.DBOS.get_event_async(started_workflow_id, STATUS_EVENT_KEY, 60)
     return _format_interactive_root_result(agent_id=started_workflow_id, result=result)
 
 
@@ -138,6 +154,69 @@ def start_interactive_root_agent_workflow(
     return asyncio.run(
         _start_interactive_root_agent_workflow_async(
             workflow_id=workflow_id,
+            system_database_url=system_database_url,
+        )
+    )
+
+
+async def _send_root_command_async(
+    *,
+    root_agent_id: str,
+    command: str,
+    command_id: str | None = None,
+    result_timeout_seconds: float = 60,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Async implementation for submitting one Root Command Signal and waiting for its scoped result."""
+    dbos_module = load_dbos()
+    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+    dbos_module.DBOS.launch()
+
+    root_agent_id = validate_agent_id(root_agent_id)
+    command_id = command_id or make_command_id()
+    signal = make_root_command_signal(
+        command_id=command_id,
+        root_agent_id=root_agent_id,
+        command=command,
+        source="external_cli",
+    )
+    await dbos_module.DBOS.send_async(root_agent_id, signal, ROOT_COMMAND_TOPIC)
+    event = await dbos_module.DBOS.get_event_async(
+        root_agent_id,
+        root_command_result_event_key(command_id),
+        result_timeout_seconds,
+    )
+    if not isinstance(event, Mapping):
+        return {
+            "kind": "root_command_result_timeout",
+            "command_id": command_id,
+            "root_agent_id": root_agent_id,
+            "command": command,
+            "result": {
+                "output": "Timed out waiting for Root Command Result.\n",
+                "returncode": 1,
+                "exception_info": "root_command_result_timeout",
+                "extra": {"mas_command_error": "root_command_result_timeout"},
+            },
+        }
+    return event
+
+
+def send_root_command(
+    *,
+    root_agent_id: str,
+    command: str,
+    command_id: str | None = None,
+    result_timeout_seconds: float = 60,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Initialize DBOS, send one Root command, and wait on the command-id-scoped result event."""
+    return asyncio.run(
+        _send_root_command_async(
+            root_agent_id=root_agent_id,
+            command=command,
+            command_id=command_id,
+            result_timeout_seconds=result_timeout_seconds,
             system_database_url=system_database_url,
         )
     )

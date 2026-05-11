@@ -89,6 +89,334 @@ def test_interactive_root_agent_workflow_publishes_waiting_for_command_and_write
     assert "interaction_mode" not in artifact["info"]
 
 
+def test_interactive_root_agent_executes_root_command_signal_and_publishes_scoped_result(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX, ROOT_COMMAND_TOPIC
+
+    published = []
+    received = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        received.append((topic, timeout_seconds))
+        return {
+            "kind": "root_command",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": "mas-0123456789abcdef",
+            "command": "echo hello",
+            "source": "external_cli",
+        }
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.return_value = {"output": "hello\n", "returncode": 0, "exception_info": "", "extra": {}}
+
+    result = _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        step_limit=0,
+        max_commands=1,
+    )
+
+    assert received == [(ROOT_COMMAND_TOPIC, workflows.ROOT_COMMAND_WAIT_TIMEOUT_SECONDS)]
+    assert result["status"] == "waiting_for_command"
+    assert result["lifecycle_state"] == "waiting_for_command"
+    assert env.execute.call_args.args[0] == {"command": "echo hello"}
+
+    result_events = [
+        value
+        for key, value in published
+        if key == f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-1111111111111111"
+    ]
+    assert len(result_events) == 1
+    event = result_events[0]
+    assert event["kind"] == "root_command_result"
+    assert event["command_id"] == "cmd-1111111111111111"
+    assert event["root_agent_id"] == "mas-0123456789abcdef"
+    assert event["command"] == "echo hello"
+    assert set(event["result"]) == {"output", "returncode", "exception_info", "extra"}
+    assert event["result"]["returncode"] == 0
+    assert "hello" in event["result"]["output"]
+
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in status_events] == [
+        "waiting_for_command",
+        "running",
+        "waiting_for_command",
+    ]
+
+
+def test_interactive_root_agent_rejects_mismatched_root_command_signal_without_execution(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX, ROOT_COMMAND_TOPIC
+
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        assert topic == ROOT_COMMAND_TOPIC
+        return {
+            "kind": "root_command",
+            "command_id": "cmd-mismatch",
+            "root_agent_id": "mas-9999999999999999",
+            "command": "echo should-not-run",
+            "source": "external_cli",
+        }
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    result = _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        step_limit=0,
+        max_commands=1,
+    )
+
+    env.execute.assert_not_called()
+    assert result["lifecycle_state"] == "waiting_for_command"
+    result_events = [
+        value
+        for key, value in published
+        if key == f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-mismatch"
+    ]
+    assert len(result_events) == 1
+    event = result_events[0]
+    assert event["command_id"] == "cmd-mismatch"
+    assert event["root_agent_id"] == "mas-0123456789abcdef"
+    assert event["command"] == "echo should-not-run"
+    assert event["result"]["returncode"] == 2
+    assert "target mismatch" in event["result"]["exception_info"]
+
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
+    assert [event["lifecycle_state"] for event in status_events] == [
+        "waiting_for_command",
+        "waiting_for_command",
+    ]
+
+
+def test_interactive_root_agent_publishes_each_result_under_its_own_command_id(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX
+
+    published = []
+    signals = iter(
+        [
+            {
+                "kind": "root_command",
+                "command_id": "cmd-first",
+                "root_agent_id": "mas-0123456789abcdef",
+                "command": "echo first",
+                "source": "external_cli",
+            },
+            {
+                "kind": "root_command",
+                "command_id": "cmd-second",
+                "root_agent_id": "mas-0123456789abcdef",
+                "command": "echo second",
+                "source": "external_cli",
+            },
+        ]
+    )
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        return next(signals)
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.side_effect = [
+        {"output": "first\n", "returncode": 0, "exception_info": "", "extra": {}},
+        {"output": "second\n", "returncode": 0, "exception_info": "", "extra": {}},
+    ]
+
+    _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        step_limit=0,
+        max_commands=2,
+    )
+
+    events_by_key = {key: value for key, value in published if key.startswith(ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX)}
+    assert set(events_by_key) == {
+        f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-first",
+        f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-second",
+    }
+    assert events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-first"]["command_id"] == "cmd-first"
+    assert "first" in events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-first"]["result"]["output"]
+    assert events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-second"]["command_id"] == "cmd-second"
+    assert "second" in events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-second"]["result"]["output"]
+
+
+def test_interactive_root_agent_routes_standalone_mas_commands_and_rejects_composed_mas_commands(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX
+
+    published = []
+    signals = iter(
+        [
+            {
+                "kind": "root_command",
+                "command_id": "cmd-status",
+                "root_agent_id": "mas-0123456789abcdef",
+                "command": "mini-mas status",
+                "source": "external_cli",
+            },
+            {
+                "kind": "root_command",
+                "command_id": "cmd-composed",
+                "root_agent_id": "mas-0123456789abcdef",
+                "command": "mini-mas status && echo done",
+                "source": "external_cli",
+            },
+        ]
+    )
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        return next(signals)
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+
+    _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        step_limit=0,
+        max_commands=2,
+    )
+
+    env.execute.assert_not_called()
+    events_by_key = {key: value for key, value in published if key.startswith(ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX)}
+    status_result = events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-status"]["result"]
+    assert "Direct Child Agents for: mas-0123456789abcdef" in status_result["output"]
+    assert status_result["returncode"] == 0
+
+    composed_result = events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-composed"]["result"]
+    assert composed_result["returncode"] == 2
+    assert "mini-mas must be issued as a standalone command" in composed_result["output"]
+
+
+def test_interactive_root_agent_publishes_result_and_stays_alive_after_recoverable_command_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX
+
+    published = []
+    signals = iter(
+        [
+            {
+                "kind": "root_command",
+                "command_id": "cmd-error",
+                "root_agent_id": "mas-0123456789abcdef",
+                "command": "explode",
+                "source": "external_cli",
+            },
+            {
+                "kind": "root_command",
+                "command_id": "cmd-after-error",
+                "root_agent_id": "mas-0123456789abcdef",
+                "command": "echo after",
+                "source": "external_cli",
+            },
+        ]
+    )
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        return next(signals)
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+
+    model = DeterministicModel(outputs=[])
+    env = Mock()
+    env.get_template_vars.return_value = {}
+    env.execute.side_effect = [
+        RuntimeError("boom"),
+        {"output": "after\n", "returncode": 0, "exception_info": "", "extra": {}},
+    ]
+
+    result = _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        model=model,
+        env=env,
+        step_limit=0,
+        max_commands=2,
+    )
+
+    assert result["lifecycle_state"] == "waiting_for_command"
+    events_by_key = {key: value for key, value in published if key.startswith(ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX)}
+    error_result = events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-error"]["result"]
+    assert error_result["returncode"] == 1
+    assert "boom" in error_result["output"]
+    assert "boom" in error_result["exception_info"]
+
+    after_result = events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-after-error"]["result"]
+    assert after_result["returncode"] == 0
+    assert "after" in after_result["output"]
+
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
+    assert status_events[-1]["lifecycle_state"] == "waiting_for_command"
+
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    assert artifact["info"]["exit_status"] == "waiting_for_command"
+    assert any("boom" in _observation_text(message) for message in artifact["messages"])
+
+
 def test_waiting_for_command_lifecycle_is_owned_by_mas_interactive_agent():
     import minisweagent.mas.mas_agent as workflows
 

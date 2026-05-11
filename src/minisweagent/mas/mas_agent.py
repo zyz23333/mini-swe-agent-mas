@@ -23,16 +23,56 @@ from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.signals import (
     PARENT_DIRECTION_TOPIC,
     PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
+    ROOT_COMMAND_TOPIC,
     continuation_user_message,
     is_close_signal,
     is_continuation_signal,
+    make_root_command_result_event,
+    root_command_result_event_key,
+    validate_root_command_signal,
 )
+from minisweagent.models.utils.actions_text import format_observation_messages
 
 from .status_events import LifecycleState
 
 _dbos = load_dbos()
 agent_interactions._dbos = _dbos
 child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
+ROOT_COMMAND_WAIT_TIMEOUT_SECONDS = 60 * 60 * 24 * 30
+
+
+class RootCommandModel:
+    """Minimal formatter for externally submitted Root terminal commands."""
+
+    observation_template = (
+        "{% if output.exception_info %}<exception>{{output.exception_info}}</exception>\n{% endif %}"
+        "<returncode>{{output.returncode}}</returncode>\n<output>\n{{output.output}}</output>"
+    )
+
+    def format_message(self, **kwargs) -> dict:
+        return kwargs
+
+    def format_observation_messages(
+        self, message: dict, outputs: list[dict], template_vars: dict | None = None
+    ) -> list[dict]:
+        return format_observation_messages(
+            outputs,
+            observation_template=self.observation_template,
+            template_vars=template_vars,
+            multimodal_regex="",
+        )
+
+    def get_template_vars(self, **kwargs) -> dict[str, Any]:
+        return kwargs
+
+    def serialize(self) -> dict:
+        return {
+            "info": {
+                "config": {
+                    "model_type": f"{self.__class__.__module__}.{self.__class__.__name__}",
+                },
+            },
+        }
 
 
 async def _maybe_await(value):
@@ -81,6 +121,36 @@ def _reject_mas_shell_composition(classification: MasCommandClassification) -> d
         "returncode": 2,
         "exception_info": classification.error,
         "extra": {"mas_command_error": "non_standalone_mas_command"},
+    }
+
+
+def _root_command_user_message(model, command: str) -> dict:
+    return model.format_message(
+        role="user",
+        content=f"User command:\n```bash\n{command}\n```",
+        extra={"actions": [{"command": command}]},
+    )
+
+
+def _command_result_from_outputs(outputs: list[dict]) -> dict:
+    if not outputs:
+        return {"output": "", "returncode": 0, "exception_info": "", "extra": {}}
+    output = outputs[-1]
+    return {
+        "output": output.get("output", ""),
+        "returncode": output.get("returncode", 0),
+        "exception_info": output.get("exception_info", ""),
+        "extra": output.get("extra", {}),
+    }
+
+
+def _recoverable_root_command_error_result(error: Exception, *, returncode: int = 1) -> dict:
+    message = str(error)
+    return {
+        "output": f"{message}\n",
+        "returncode": returncode,
+        "exception_info": message,
+        "extra": {"mas_command_error": "root_command_error"},
     }
 
 
@@ -401,17 +471,23 @@ class MasInteractiveAgent:
         self,
         *,
         agent_id: str,
-        model,
-        env,
+        model=None,
+        env=None,
         step_limit: int,
     ) -> None:
         self.agent_id = validate_agent_id(agent_id)
         self.workflow_id = self.agent_id
         self.parent_agent_id = None
-        self.model = model
-        self.env = env
+        self.model = model or RootCommandModel()
+        self.env = env or self._default_environment()
         self.step_limit = step_limit
         self.messages: list[dict] = []
+        self.command_handler = MasCommandHandler()
+
+    def _default_environment(self):
+        from minisweagent.environments import get_environment
+
+        return get_environment({}, default_type="local")
 
     async def run_until_idle(self) -> dict:
         """Record the minimal idle Interactive Root Agent state."""
@@ -423,6 +499,106 @@ class MasInteractiveAgent:
             "lifecycle_state": "waiting_for_command",
             **metadata,
         }
+
+    async def run_command_loop(self, *, max_commands: int | None = None) -> dict:
+        """Receive Root commands, execute them through the Agent action flow, and stay idle afterward."""
+        metadata = await self._save_trajectory(status="waiting_for_command")
+        commands_completed = 0
+        while max_commands is None or commands_completed < max_commands:
+            await self._publish_status("waiting_for_command")
+            signal = await _maybe_await(
+                _dbos.DBOS.recv_async(ROOT_COMMAND_TOPIC, timeout_seconds=ROOT_COMMAND_WAIT_TIMEOUT_SECONDS)
+            )
+            if signal is None:
+                continue
+            try:
+                command_signal = validate_root_command_signal(signal, target_root_agent_id=self.agent_id)
+            except ValueError as exc:
+                command_signal = self._recoverable_signal_context(signal)
+                result = _recoverable_root_command_error_result(exc, returncode=2)
+                await self._publish_root_command_result(command_signal, result)
+                commands_completed += 1
+                continue
+            await self._publish_status("running")
+            try:
+                result = await self.execute_user_command(command_signal["command"])
+            except Exception as exc:
+                result = await self.record_recoverable_command_error(command_signal["command"], exc)
+            await self._publish_root_command_result(command_signal, result)
+            metadata = await self._save_trajectory(
+                status="waiting_for_command",
+                model_stats={"instance_cost": 0.0, "api_calls": 0},
+            )
+            commands_completed += 1
+        await self._publish_status("waiting_for_command")
+        return {
+            "status": "waiting_for_command",
+            "terminal_state": "waiting_for_command",
+            "lifecycle_state": "waiting_for_command",
+            **metadata,
+        }
+
+    async def execute_user_command(self, command: str) -> dict:
+        """Execute one terminal command through the existing MAS-aware bash action path."""
+        message = _root_command_user_message(self.model, command)
+        self.messages.append(message)
+        outputs = await _execute_agent_workflow_outputs(
+            message=message,
+            env=self.env,
+            command_handler=self.command_handler,
+        )
+        observations = self.model.format_observation_messages(message, outputs, self.get_template_vars())
+        self.messages.extend(observations)
+        return _command_result_from_outputs(outputs)
+
+    async def record_recoverable_command_error(self, command: str, error: Exception) -> dict:
+        """Persist a recoverable command failure as a normal command observation."""
+        result = _recoverable_root_command_error_result(error, returncode=1)
+        if not self.messages or self.messages[-1].get("extra", {}).get("actions", [{}])[-1].get("command") != command:
+            self.messages.append(_root_command_user_message(self.model, command))
+        observations = self.model.format_observation_messages(self.messages[-1], [result], self.get_template_vars())
+        self.messages.extend(observations)
+        return result
+
+    async def _publish_root_command_result(self, command_signal: dict[str, str], result: dict) -> None:
+        event = make_root_command_result_event(
+            command_id=command_signal["command_id"],
+            root_agent_id=self.agent_id,
+            command=command_signal["command"],
+            result=result,
+        )
+        await _maybe_await(
+            _dbos.DBOS.set_event_async(root_command_result_event_key(command_signal["command_id"]), event)
+        )
+
+    def _recoverable_signal_context(self, signal: Any) -> dict[str, str]:
+        if isinstance(signal, dict):
+            command_id = str(signal.get("command_id") or "invalid-root-command")
+            command = str(signal.get("command") or "")
+        else:
+            command_id = "invalid-root-command"
+            command = ""
+        return {
+            "kind": "root_command",
+            "command_id": command_id,
+            "root_agent_id": self.agent_id,
+            "command": command,
+            "source": "",
+        }
+
+    def get_template_vars(self) -> dict:
+        data = {}
+        if hasattr(self.env, "get_template_vars"):
+            data |= self.env.get_template_vars()
+        if hasattr(self.model, "get_template_vars"):
+            data |= self.model.get_template_vars()
+        data |= {
+            "task": "",
+            "n_model_calls": 0,
+            "model_cost": 0.0,
+            "agent_id": self.agent_id,
+        }
+        return data
 
     async def _publish_status(
         self,
@@ -539,8 +715,9 @@ async def interactive_root_agent_workflow(
     model=None,
     env=None,
     step_limit: int = 0,
+    max_commands: int | None = 0,
 ) -> dict:
-    """Interactive Root Agent DBOS workflow for the minimal idle CLI path."""
+    """Interactive Root Agent DBOS workflow for idle startup and Root command execution."""
     agent_id = validate_agent_id(agent_id)
     original_workflow_id = _current_agent_workflow_id()
     if original_workflow_id is None:
@@ -552,7 +729,9 @@ async def interactive_root_agent_workflow(
             env=env,
             step_limit=step_limit,
         )
-        return await agent.run_until_idle()
+        if max_commands == 0:
+            return await agent.run_until_idle()
+        return await agent.run_command_loop(max_commands=max_commands)
     finally:
         if original_workflow_id is None:
             _dbos.DBOS.workflow_id = original_workflow_id

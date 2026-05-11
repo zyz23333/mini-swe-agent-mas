@@ -8,6 +8,7 @@ from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
     get_agent_workflow_status,
+    send_root_command,
     start_interactive_root_agent_workflow,
     wait_for_agent_workflow,
 )
@@ -96,23 +97,22 @@ def test_mini_mas_run_returns_detached_metadata_without_waiting_for_result():
 
 
 def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_idle_metadata():
-    handle = AsyncMockHandle(
-        "mas-1111111111111111",
-        {
-            "agent_id": "mas-1111111111111111",
-            "status": "waiting_for_command",
-            "terminal_state": "waiting_for_command",
-            "lifecycle_state": "waiting_for_command",
-            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
-            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
-        },
-    )
+    handle = AsyncMockHandle("mas-1111111111111111")
 
     async def start_workflow_async(*_args, **_kwargs):
         return handle
 
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+
     dbos_module = _mock_dbos_module()
     dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
     dbos_module.DBOS.start_workflow.side_effect = AssertionError("MAS runtime must use start_workflow_async")
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
@@ -133,11 +133,88 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
     assert inspect.iscoroutinefunction(workflow_func)
     assert workflow_func.__name__ == "interactive_root_agent_workflow"
     assert dbos_module.DBOS.start_workflow_async.call_args.args[1] == "mas-1111111111111111"
+    assert dbos_module.DBOS.start_workflow_async.call_args.kwargs == {"max_commands": None}
+    dbos_module.DBOS.get_event_async.assert_called_once_with("mas-1111111111111111", "mini_mas_status", 60)
     assert result == {
         "agent_id": "mas-1111111111111111",
         "lifecycle_state": "waiting_for_command",
         "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+    }
+
+
+def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result():
+    sent = []
+
+    async def send_async(destination_id, message, topic=None):
+        sent.append((destination_id, message, topic))
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return {
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": workflow_id,
+            "command": "echo hello",
+            "result": {
+                "output": "hello\n",
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {},
+            },
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.send_async = Mock(side_effect=send_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        patch("minisweagent.mas.runtime.make_command_id", return_value="cmd-1111111111111111"),
+    ):
+        result = send_root_command(
+            root_agent_id="mas-1111111111111111",
+            command="echo hello",
+            result_timeout_seconds=3,
+        )
+
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX, ROOT_COMMAND_TOPIC
+
+    dbos_module.DBOS.assert_called_once_with(
+        config={
+            "name": "mini-swe-agent-mas",
+            "system_database_url": None,
+        }
+    )
+    dbos_module.DBOS.launch.assert_called_once_with()
+    assert sent == [
+        (
+            "mas-1111111111111111",
+            {
+                "kind": "root_command",
+                "command_id": "cmd-1111111111111111",
+                "root_agent_id": "mas-1111111111111111",
+                "command": "echo hello",
+                "source": "external_cli",
+            },
+            ROOT_COMMAND_TOPIC,
+        )
+    ]
+    dbos_module.DBOS.get_event_async.assert_called_once_with(
+        "mas-1111111111111111",
+        f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-1111111111111111",
+        3,
+    )
+    assert result == {
+        "kind": "root_command_result",
+        "command_id": "cmd-1111111111111111",
+        "root_agent_id": "mas-1111111111111111",
+        "command": "echo hello",
+        "result": {
+            "output": "hello\n",
+            "returncode": 0,
+            "exception_info": "",
+            "extra": {},
+        },
     }
 
 
