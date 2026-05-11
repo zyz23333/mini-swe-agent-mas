@@ -207,6 +207,15 @@ def _attachment_unavailable_result(
     return result
 
 
+def _root_command_result_timeout_output(root_agent_id: str) -> str:
+    return (
+        "Timed out waiting for Root Command Result. The command may still be running.\n"
+        f"root_agent_id: {root_agent_id}\n"
+        "Use mini-mas status to inspect Root Agents, then retry "
+        f"mini-mas resume {root_agent_id} later.\n"
+    )
+
+
 def _format_interactive_root_result(*, agent_id: str, result: Mapping[str, Any] | None) -> dict[str, str]:
     data: dict[str, Any] = make_artifact_metadata(agent_id=agent_id)
     if result is not None and result.get("lifecycle_state"):
@@ -330,7 +339,7 @@ async def _send_root_command_async(
                 "root_agent_id": root_agent_id,
                 "command": command,
                 "result": {
-                    "output": "Timed out waiting for Root Command Result.\n",
+                    "output": _root_command_result_timeout_output(root_agent_id),
                     "returncode": 1,
                     "exception_info": "root_command_result_timeout",
                     "extra": {"mas_command_error": "root_command_result_timeout"},
@@ -471,6 +480,13 @@ def _resume_unavailable_lifecycle_result(*, root_agent_id: str, lifecycle_state:
     )
 
 
+def _resume_retry_guidance(root_agent_id: str) -> str:
+    return (
+        "Use mini-mas status to inspect Root Agents, then retry "
+        f"mini-mas resume {root_agent_id} later.\n"
+    )
+
+
 def _is_interactive_root_workflow(workflow_status: Any) -> bool:
     return getattr(workflow_status, "name", "") == "interactive_root_agent_workflow"
 
@@ -579,7 +595,7 @@ async def _prepare_resume_root_agent_async(
                 f"Unknown Root Agent ID: {root_agent_id}\n"
                 f"root_agent_id: {root_agent_id}\n"
                 "lifecycle_state: unknown\n"
-                "Use mini-mas status to inspect Root Agents.\n"
+                f"{_resume_retry_guidance(root_agent_id)}"
             ),
         )
 
@@ -594,7 +610,7 @@ async def _prepare_resume_root_agent_async(
                 f"root_agent_id: {root_agent_id}\n"
                 "lifecycle_state: unknown\n"
                 f"parent_agent_id: {parent_workflow_id}\n"
-                "Use mini-mas status to inspect Root Agents.\n"
+                f"{_resume_retry_guidance(root_agent_id)}"
             ),
         )
 
@@ -608,7 +624,7 @@ async def _prepare_resume_root_agent_async(
                 f"root_agent_id: {root_agent_id}\n"
                 "lifecycle_state: unknown\n"
                 f"workflow_name: {getattr(workflow_status, 'name', '')}\n"
-                "Use mini-mas status to inspect Root Agents.\n"
+                f"{_resume_retry_guidance(root_agent_id)}"
             ),
         )
 

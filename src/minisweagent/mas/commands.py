@@ -599,6 +599,11 @@ class MasCommandHandler:
             raise ValueError(f"Invalid Agent context for mini-mas {command_name}: {workflow_id}") from exc
 
 
+def validate_spawn_arguments(arguments: list[str]) -> None:
+    """Validate spawn arguments shared by external CLI and workflow-layer MAS commands."""
+    _parse_spawn_arguments(["spawn", *arguments])
+
+
 def _parse_timeout_seconds(raw_timeout: str) -> float:
     try:
         timeout_seconds = float(raw_timeout)

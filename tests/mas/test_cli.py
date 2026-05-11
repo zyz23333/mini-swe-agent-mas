@@ -352,32 +352,15 @@ def test_mini_mas_spawn_timeout_reports_resumable_root_without_canceling_childre
     )
 
 
-def test_mini_mas_spawn_timeout_without_wait_remains_invalid_through_root_command(monkeypatch):
-    one_shot_spawn = Mock(
-        return_value={
-            "kind": "one_shot_spawn",
-            "root_agent_id": "mas-1111111111111111",
-            "command": "mini-mas spawn --timeout 1 task",
-            "result": {
-                "output": "mini-mas spawn --timeout requires --wait because Detached Spawn has no wait phase\n",
-                "returncode": 2,
-                "exception_info": "invalid_mas_command",
-                "extra": {"mas_command_error": "invalid_mas_command"},
-            },
-            "returncode": 2,
-        }
-    )
+def test_mini_mas_spawn_timeout_without_wait_fails_before_starting_root(monkeypatch):
+    one_shot_spawn = Mock(side_effect=AssertionError("invalid external spawn arguments must not start a Root Agent"))
     monkeypatch.setattr("minisweagent.mas.cli.one_shot_spawn_through_interactive_root", one_shot_spawn)
 
     cli_result = CliRunner().invoke(app, ["spawn", "--timeout", "1", "task"])
 
     assert cli_result.exit_code == 2
     assert "Detached Spawn has no wait phase" in cli_result.stdout
-    one_shot_spawn.assert_called_once_with(
-        spawn_arguments=["--timeout", "1", "task"],
-        result_timeout_seconds=60,
-        system_database_url=None,
-    )
+    one_shot_spawn.assert_not_called()
 
 
 def test_mini_mas_resume_prints_metadata_once_and_sends_each_input_line(monkeypatch):

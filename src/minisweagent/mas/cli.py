@@ -8,6 +8,7 @@ from typing import Annotated, Any
 import typer
 from rich.console import Console
 
+from minisweagent.mas.commands import validate_spawn_arguments
 from minisweagent.mas.runtime import (
     discover_interactive_root_agents,
     one_shot_spawn_through_interactive_root,
@@ -116,6 +117,12 @@ def spawn(
         ),
     ] = None,
 ) -> dict[str, Any]:
+    try:
+        validate_spawn_arguments(list(ctx.args))
+    except ValueError as exc:
+        console.print(str(exc))
+        raise typer.Exit(code=2) from exc
+
     result = dict(
         one_shot_spawn_through_interactive_root(
             spawn_arguments=list(ctx.args),

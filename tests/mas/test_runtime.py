@@ -468,6 +468,9 @@ def test_resume_preparation_rejects_unknown_root_agent_id():
     dbos_module.DBOS.launch.assert_called_once_with()
     assert result["returncode"] == 2
     assert "Unknown Root Agent ID: mas-1111111111111111" in result["output"]
+    assert "lifecycle_state: unknown" in result["output"]
+    assert "mini-mas status" in result["output"]
+    assert "mini-mas resume mas-1111111111111111" in result["output"]
 
 
 def test_resume_preparation_rejects_child_agent_ids():
@@ -657,6 +660,10 @@ def test_root_command_result_timeout_keeps_attachment_until_lease_expires(tmp_pa
         )
 
     assert first["kind"] == "root_command_result_timeout"
+    assert "may still be running" in first["result"]["output"]
+    assert "root_agent_id: mas-1111111111111111" in first["result"]["output"]
+    assert "mini-mas status" in first["result"]["output"]
+    assert "mini-mas resume mas-1111111111111111" in first["result"]["output"]
     assert second["kind"] == "root_command_attachment_unavailable"
     assert dbos_module.DBOS.send_async.call_count == 1
 
