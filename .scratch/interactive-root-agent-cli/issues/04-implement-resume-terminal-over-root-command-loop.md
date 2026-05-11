@@ -14,6 +14,12 @@ Implement `mini-mas resume <root-agent-id>` as an attachment to an existing Inte
 ## Acceptance criteria
 
 - [ ] `mini-mas resume <root-agent-id>` re-enters an existing Interactive Root Agent only when it is `waiting_for_command`.
+- [ ] Resume validates the Agent ID shape before querying or attaching.
+- [ ] Resume rejects unknown Root Agent IDs with a clear error.
+- [ ] Resume rejects Child Agent IDs because the target is not a parentless Interactive Root Agent.
+- [ ] Resume rejects parentless workflows that are not Interactive Root Agent workflow types.
+- [ ] Resume rejects Root Agents in `running`, `waiting_for_child`, `failed`, `closed`, or `limits_exceeded`.
+- [ ] Resume unavailable messages include the Root Agent ID and lifecycle state and direct the user to `mini-mas status` and retrying `mini-mas resume <root-agent-id>` later.
 - [ ] Resume prints Root Agent metadata once before accepting input.
 - [ ] User input is sent to the Root Agent as Root Command Signals.
 - [ ] Full standalone `mini-mas ...` commands are accepted; prefix-free MAS shorthand is not added.

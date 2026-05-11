@@ -16,6 +16,9 @@ Enforce the first-version attachment model for Interactive Root Agents. A Root A
 - [ ] A Root Agent accepts `resume` only in `waiting_for_command`.
 - [ ] A Root Agent rejects or clearly reports unavailable attachment while it is `running`.
 - [ ] A Root Agent rejects or clearly reports unavailable attachment while it is `waiting_for_child`.
+- [ ] Concurrent attachment attempts cannot both submit commands to the same Root while it is accepting one command.
+- [ ] If lifecycle-state gating is insufficient to prevent races, the implementation adds a small attachment lease or serialized accept handshake that is not Agent Metadata and not a Root index.
+- [ ] Competing clients receive an unavailable result or time out with a clear message; they do not execute Root actions directly.
 - [ ] One-shot `mini-mas spawn` occupies the Root attachment while its submitted command is running.
 - [ ] One-shot `mini-mas spawn --wait` occupies the Root attachment until the waited spawn returns or times out.
 - [ ] A detached Root Agent returns to `waiting_for_command` when ready for later resume.

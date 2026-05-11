@@ -17,6 +17,8 @@ Support `--wait`, `--all`, and `--timeout` on external one-shot `mini-mas spawn`
 - [ ] `mini-mas spawn --wait --all "task A" "task B"` waits until all started children become observable or timeout.
 - [ ] `mini-mas spawn --wait --timeout <seconds> "task"` bounds only the wait phase.
 - [ ] Timeout returns available ready child data and still-running child IDs without cancelling, closing, failing, or retrying children.
+- [ ] Waited spawn output follows the existing MAS waited result shape, including wait mode, timed-out indication, ready child snapshots, and still-running child IDs where applicable.
+- [ ] The external CLI wait timeout is distinct from `mini-mas spawn --wait --timeout <seconds>`, which only bounds the MAS Waited Spawn wait phase.
 - [ ] `mini-mas spawn --timeout <seconds> "task"` without `--wait` remains invalid.
 - [ ] The Interactive Root Agent is `waiting_for_child` during the waited phase and returns to `waiting_for_command` after the one-shot command detaches.
 
