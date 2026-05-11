@@ -11,8 +11,6 @@ Status: needs-triage
 
 Change plain `mini-mas` so it enters an unbound terminal without immediately creating an Interactive Root Agent. The first effective command should create a new Interactive Root Agent, claim the Root attachment, print the Root metadata banner, submit that command through the Root Command Signal path, and then continue as an attached terminal. Inputs that do not represent work before Root creation must not leave durable Root Agents behind.
 
-Also remove the user-facing `--system-database-url` CLI option from the External MAS CLI surface. DBOS system database configuration should continue to come from environment/runtime configuration, not from ordinary command-line arguments.
-
 ## Acceptance criteria
 
 - [ ] Plain `mini-mas` starts a terminal input loop without starting an Interactive Root Agent before effective input.
@@ -27,9 +25,7 @@ Also remove the user-facing `--system-database-url` CLI option from the External
 - [ ] `exit` and `quit` after lazy Root creation detach locally without sending a Root Command Signal and leave the Root available for resume.
 - [ ] Recoverable non-zero command results after lazy Root creation keep the terminal attached; the CLI exits with the last executed command return code when the local terminal exits.
 - [ ] Lazy Root creation failure exits visibly with a non-zero return code instead of leaving the user in an unbound terminal.
-- [ ] The External MAS CLI help and command signatures no longer expose `--system-database-url`.
-- [ ] DBOS system database configuration still uses `DBOS_SYSTEM_DATABASE_URL` or equivalent runtime configuration from the process environment.
-- [ ] Tests cover no-root startup, ignored empty/whitespace input, local pre-root exit, first-command lazy creation, metadata-before-result ordering, first `mini-mas status` governance routing, attachment reuse, local post-root detach, non-zero command continuation, lazy creation failure, and removal of the CLI database URL option.
+- [ ] Tests cover no-root startup, ignored empty/whitespace input, local pre-root exit, first-command lazy creation, metadata-before-result ordering, first `mini-mas status` governance routing, attachment reuse, local post-root detach, non-zero command continuation, and lazy creation failure.
 
 ## Blocked by
 
@@ -47,7 +43,7 @@ Also remove the user-facing `--system-database-url` CLI option from the External
 **Summary:** Make plain `mini-mas` lazily create its Interactive Root Agent only when the first effective command is entered.
 
 **Current behavior:**
-The current plain External MAS CLI path starts an Interactive Root Agent immediately when `mini-mas` is invoked without a subcommand and prints Root metadata right away. This leaves durable Root Agent workflows and artifacts even when the user opens the terminal accidentally, presses only Enter, or exits immediately. It also still exposes a `--system-database-url` command-line option that was not part of the PRD/DESIGN and can put sensitive database connection strings into shell history and process arguments.
+The current plain External MAS CLI path starts an Interactive Root Agent immediately when `mini-mas` is invoked without a subcommand and prints Root metadata right away. This leaves durable Root Agent workflows and artifacts even when the user opens the terminal accidentally, presses only Enter, or exits immediately.
 
 `mini-mas resume <root-agent-id>` already has the attached terminal behavior needed after a Root exists: it prepares the Root, claims an attachment token, refreshes the lease while waiting for input, sends each command through `send_root_command`, prints Root Command Results, preserves non-zero command results without exiting immediately, and releases the attachment on local terminal exit.
 
@@ -60,15 +56,12 @@ After lazy Root creation, plain `mini-mas` should use the same attachment lifecy
 
 A first effective command such as `mini-mas status` should create the new Root Agent and execute inside it as a Standalone MAS Command. It must not be treated as external `mini-mas status` discovery, because the user is already inside the plain Interactive Root terminal.
 
-The External MAS CLI should not expose `--system-database-url` on user-facing commands. DBOS system database configuration should continue to come from environment/runtime configuration such as `DBOS_SYSTEM_DATABASE_URL`.
-
 **Key interfaces:**
 - Plain External MAS CLI invocation - should enter an unbound terminal first and lazily create the Root only on effective input.
 - Terminal input iterator / attached terminal loop - should distinguish ignored pre-root input, local exit controls, and effective commands while avoiding prompt-history files.
 - Interactive Root Agent startup runtime - should still create a parentless Interactive Root Agent and wait for idle metadata when called after first effective input.
 - Root attachment runtime - should claim, refresh, and release a single attachment for the lazily created Root.
 - Root Command Signal sending API - should receive the first and later commands unchanged and execute them through the Root Agent, not the CLI process.
-- CLI option definitions/help - should remove the user-facing system database URL option while preserving environment-based DBOS configuration in runtime.
 
 **Acceptance criteria:**
 - [ ] Plain `mini-mas` starts a terminal input loop without starting an Interactive Root Agent before effective input.
@@ -83,9 +76,7 @@ The External MAS CLI should not expose `--system-database-url` on user-facing co
 - [ ] `exit` and `quit` after lazy Root creation detach locally without sending a Root Command Signal and leave the Root available for resume.
 - [ ] Recoverable non-zero command results after lazy Root creation keep the terminal attached; the CLI exits with the last executed command return code when the local terminal exits.
 - [ ] Lazy Root creation failure exits visibly with a non-zero return code instead of leaving the user in an unbound terminal.
-- [ ] The External MAS CLI help and command signatures no longer expose `--system-database-url`.
-- [ ] DBOS system database configuration still uses `DBOS_SYSTEM_DATABASE_URL` or equivalent runtime configuration from the process environment.
-- [ ] Tests cover no-root startup, ignored empty/whitespace input, local pre-root exit, first-command lazy creation, metadata-before-result ordering, first `mini-mas status` governance routing, attachment reuse, local post-root detach, non-zero command continuation, lazy creation failure, and removal of the CLI database URL option.
+- [ ] Tests cover no-root startup, ignored empty/whitespace input, local pre-root exit, first-command lazy creation, metadata-before-result ordering, first `mini-mas status` governance routing, attachment reuse, local post-root detach, non-zero command continuation, and lazy creation failure.
 
 **Out of scope:**
 - Prompt format decisions such as full Agent ID, short Agent ID, or current directory in the prompt.
@@ -93,4 +84,3 @@ The External MAS CLI should not expose `--system-database-url` on user-facing co
 - Root Agent close, delete, cleanup, garbage collection, or retention policy.
 - Multiple simultaneous terminal attachments to one Interactive Root Agent.
 - A new Root Command Result payload schema.
-- A new DBOS database configuration command or config file format.
