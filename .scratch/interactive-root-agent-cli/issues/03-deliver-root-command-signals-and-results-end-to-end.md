@@ -5,6 +5,7 @@ Status: needs-triage
 ## Parent
 
 .scratch/interactive-root-agent-cli/PRD.md
+.scratch/interactive-root-agent-cli/DESIGN.md
 
 ## What to build
 
