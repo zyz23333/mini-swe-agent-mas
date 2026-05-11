@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Annotated, Any
 
 import typer
@@ -14,6 +15,8 @@ from minisweagent.mas.runtime import (
     get_agent_workflow_status,
     one_shot_spawn_through_interactive_root,
     prepare_resume_root_agent,
+    refresh_root_attachment,
+    release_root_attachment,
     send_root_command,
     start_interactive_root_agent_workflow,
     start_root_agent_workflow,
@@ -205,20 +208,34 @@ def resume(
     _print_root_metadata_banner(resume_result)
     last_result: dict[str, Any] = resume_result
     last_returncode = 0
-    for command_text in _iter_terminal_input():
-        if command_text == "":
-            continue
-        last_result = dict(
-            send_root_command(
-                root_agent_id=root_agent_id,
-                command=command_text,
-                result_timeout_seconds=result_timeout_seconds,
-                system_database_url=system_database_url,
+    attachment_token = str(resume_result["attachment_token"])
+    stop_heartbeat = threading.Event()
+    heartbeat = threading.Thread(
+        target=_refresh_attachment_until_stopped,
+        kwargs={"root_agent_id": root_agent_id, "attachment_token": attachment_token, "stop_event": stop_heartbeat},
+        daemon=True,
+    )
+    heartbeat.start()
+    try:
+        for command_text in _iter_terminal_input():
+            if command_text == "":
+                continue
+            last_result = dict(
+                send_root_command(
+                    root_agent_id=root_agent_id,
+                    command=command_text,
+                    result_timeout_seconds=result_timeout_seconds,
+                    system_database_url=system_database_url,
+                    attachment_token=attachment_token,
+                )
             )
-        )
-        command_result = last_result["result"]
-        console.print(command_result.get("output", ""), end="")
-        last_returncode = command_result.get("returncode", 0)
+            command_result = last_result["result"]
+            console.print(command_result.get("output", ""), end="")
+            last_returncode = command_result.get("returncode", 0)
+    finally:
+        stop_heartbeat.set()
+        heartbeat.join(timeout=1)
+        release_root_attachment(root_agent_id=root_agent_id, attachment_token=attachment_token)
     if last_returncode != 0:
         raise typer.Exit(code=last_returncode)
     return last_result
@@ -231,6 +248,18 @@ def _iter_terminal_input():
             yield input()
         except EOFError:
             return
+
+
+def _refresh_attachment_until_stopped(
+    *,
+    root_agent_id: str,
+    attachment_token: str,
+    stop_event: threading.Event,
+    interval_seconds: float = 30.0,
+) -> None:
+    """Keep an attached resume terminal's lease alive while waiting for local input."""
+    while not stop_event.wait(interval_seconds):
+        refresh_root_attachment(root_agent_id=root_agent_id, attachment_token=attachment_token)
 
 
 @app.command(help="Wait for one Child Agent First Observable Event.")

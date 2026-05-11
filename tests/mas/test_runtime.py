@@ -12,6 +12,7 @@ from minisweagent.mas.runtime import (
     make_standalone_spawn_command,
     one_shot_spawn_through_interactive_root,
     prepare_resume_root_agent,
+    release_root_attachment,
     send_root_command,
     start_interactive_root_agent_workflow,
     wait_for_agent_workflow,
@@ -148,13 +149,21 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
     }
 
 
-def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result():
+def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
     sent = []
 
     async def send_async(destination_id, message, topic=None):
         sent.append((destination_id, message, topic))
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
+        if key == "mini_mas_status":
+            return {
+                "agent_id": workflow_id,
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+            }
         return {
             "kind": "root_command_result",
             "command_id": "cmd-1111111111111111",
@@ -204,7 +213,7 @@ def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result
             ROOT_COMMAND_TOPIC,
         )
     ]
-    dbos_module.DBOS.get_event_async.assert_called_once_with(
+    assert dbos_module.DBOS.get_event_async.call_args_list[-1] == call(
         "mas-1111111111111111",
         f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-1111111111111111",
         3,
@@ -272,7 +281,8 @@ def test_one_shot_spawn_creates_interactive_root_then_sends_standalone_spawn_com
     assert result["result"]["extra"]["parent_agent_id"] == "mas-1111111111111111"
 
 
-def test_one_shot_spawn_uses_root_command_signal_result_flow():
+def test_one_shot_spawn_uses_root_command_signal_result_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
     sent = []
     handle = AsyncMockHandle("mas-1111111111111111")
 
@@ -350,7 +360,8 @@ def test_one_shot_spawn_uses_root_command_signal_result_flow():
     assert result["result"]["extra"]["parent_agent_id"] == "mas-1111111111111111"
 
 
-def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadata():
+def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
     sent = []
     handle = AsyncMockHandle("mas-1111111111111111")
 
@@ -608,7 +619,8 @@ def test_resume_preparation_rejects_unavailable_lifecycle_states(lifecycle_state
     assert "mini-mas resume mas-1111111111111111" in result["output"]
 
 
-def test_resume_preparation_returns_metadata_for_waiting_interactive_root():
+def test_resume_preparation_claims_single_active_attachment_for_waiting_interactive_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
     status = _workflow_status_record("mas-1111111111111111")
     status.name = "interactive_root_agent_workflow"
 
@@ -628,17 +640,109 @@ def test_resume_preparation_returns_metadata_for_waiting_interactive_root():
     dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
-        result = prepare_resume_root_agent(root_agent_id="mas-1111111111111111")
+        first = prepare_resume_root_agent(root_agent_id="mas-1111111111111111")
+        second = prepare_resume_root_agent(root_agent_id="mas-1111111111111111")
 
-    assert result == {
+    assert first | {"attachment_token": "<token>"} == {
         "kind": "resume_ready",
         "root_agent_id": "mas-1111111111111111",
         "agent_id": "mas-1111111111111111",
         "lifecycle_state": "waiting_for_command",
         "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        "attachment_token": "<token>",
         "returncode": 0,
     }
+    assert first["attachment_token"].startswith("att-")
+    assert second["returncode"] == 2
+    assert second["exception_info"] == "root_attachment_unavailable"
+    assert "Root Agent attachment is already active" in second["output"]
+    assert "root_agent_id: mas-1111111111111111" in second["output"]
+
+    release_root_attachment(
+        root_agent_id="mas-1111111111111111",
+        attachment_token=first["attachment_token"],
+    )
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        third = prepare_resume_root_agent(root_agent_id="mas-1111111111111111")
+    assert third["kind"] == "resume_ready"
+    assert third["attachment_token"] != first["attachment_token"]
+    release_root_attachment(
+        root_agent_id="mas-1111111111111111",
+        attachment_token=third["attachment_token"],
+    )
+
+
+@pytest.mark.parametrize("lifecycle_state", ["running", "waiting_for_child"])
+def test_root_command_submission_rejects_unavailable_lifecycle_without_sending(
+    lifecycle_state,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        assert key == "mini_mas_status"
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": lifecycle_state,
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+    dbos_module.DBOS.send_async = Mock(side_effect=AssertionError("unavailable Root must not receive commands"))
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        result = send_root_command(
+            root_agent_id="mas-1111111111111111",
+            command="echo blocked",
+        )
+
+    assert result["kind"] == "root_command_attachment_unavailable"
+    assert result["result"]["returncode"] == 2
+    assert f"lifecycle_state: {lifecycle_state}" in result["result"]["output"]
+    assert "mini-mas resume mas-1111111111111111" in result["result"]["output"]
+
+
+def test_root_command_result_timeout_keeps_attachment_until_lease_expires(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
+
+    async def send_async(_destination_id, _message, topic=None):
+        return None
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        if key == "mini_mas_status":
+            return {
+                "agent_id": workflow_id,
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+            }
+        return None
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.send_async = Mock(side_effect=send_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        patch("minisweagent.mas.runtime.make_command_id", return_value="cmd-1111111111111111"),
+    ):
+        first = send_root_command(
+            root_agent_id="mas-1111111111111111",
+            command="mini-mas spawn 'long task'",
+            result_timeout_seconds=0.01,
+        )
+        second = send_root_command(
+            root_agent_id="mas-1111111111111111",
+            command="echo blocked",
+        )
+
+    assert first["kind"] == "root_command_result_timeout"
+    assert second["kind"] == "root_command_attachment_unavailable"
+    assert dbos_module.DBOS.send_async.call_count == 1
 
 
 def test_external_status_discovers_parentless_interactive_root_agents_only():

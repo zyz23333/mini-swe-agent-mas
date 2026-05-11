@@ -6,7 +6,9 @@ import asyncio
 import os
 import secrets
 import shlex
+import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from minisweagent.mas.artifacts import make_agent_id, make_artifact_metadata, validate_agent_id
@@ -23,6 +25,8 @@ UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE = (
     "an Interactive Root Agent.\n"
 )
 UNSUPPORTED_EXTERNAL_COORDINATION_ERROR = "external_agent_interaction_unsupported"
+ATTACHMENT_LEASE_TOKEN_PREFIX = "att-"
+ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS = 300.0
 
 
 def load_dbos():
@@ -51,6 +55,161 @@ def _handle_workflow_id(handle: Any) -> str:
 def make_command_id() -> str:
     """Generate an opaque Root command ID."""
     return f"cmd-{secrets.token_hex(8)}"
+
+
+def make_attachment_token() -> str:
+    """Generate an opaque Root attachment token."""
+    return f"{ATTACHMENT_LEASE_TOKEN_PREFIX}{secrets.token_hex(8)}"
+
+
+def _attachment_lease_directory() -> Path:
+    configured = os.environ.get("MINI_MAS_ATTACHMENT_LEASE_DIR")
+    if configured:
+        return Path(configured)
+    return Path(".mini-mas") / "attachments"
+
+
+def _attachment_lease_path(root_agent_id: str) -> Path:
+    return _attachment_lease_directory() / f"{root_agent_id}.lease"
+
+
+def _parse_attachment_lease(raw: str) -> dict[str, Any]:
+    token, expires_at = raw.strip().split("\n", 1)
+    return {"token": token, "expires_at": float(expires_at)}
+
+
+def _read_attachment_lease(path: Path) -> dict[str, Any] | None:
+    try:
+        return _parse_attachment_lease(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {"token": "", "expires_at": float("inf")}
+
+
+def _try_remove_stale_attachment_lease(path: Path, *, now: float) -> None:
+    lease = _read_attachment_lease(path)
+    if lease is None or lease["expires_at"] > now:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+
+
+def claim_root_attachment(
+    *,
+    root_agent_id: str,
+    ttl_seconds: float = ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Claim the single external attachment slot for one Interactive Root Agent."""
+    root_agent_id = validate_agent_id(root_agent_id)
+    now = time.monotonic() if now is None else now
+    lease_path = _attachment_lease_path(root_agent_id)
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    _try_remove_stale_attachment_lease(lease_path, now=now)
+
+    token = make_attachment_token()
+    expires_at = now + ttl_seconds
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        fd = os.open(lease_path, flags, 0o600)
+    except FileExistsError:
+        return {
+            "claimed": False,
+            "root_agent_id": root_agent_id,
+            "lease_path": str(lease_path),
+        }
+    with os.fdopen(fd, "w", encoding="utf-8") as lease_file:
+        lease_file.write(f"{token}\n{expires_at}\n")
+    return {
+        "claimed": True,
+        "root_agent_id": root_agent_id,
+        "attachment_token": token,
+        "expires_at": expires_at,
+        "lease_path": str(lease_path),
+    }
+
+
+def release_root_attachment(*, root_agent_id: str, attachment_token: str | None) -> bool:
+    """Release a Root attachment only when the caller still owns the lease token."""
+    if not attachment_token:
+        return False
+    root_agent_id = validate_agent_id(root_agent_id)
+    lease_path = _attachment_lease_path(root_agent_id)
+    lease = _read_attachment_lease(lease_path)
+    if lease is None or lease["token"] != attachment_token:
+        return False
+    try:
+        lease_path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def refresh_root_attachment(
+    *,
+    root_agent_id: str,
+    attachment_token: str | None,
+    ttl_seconds: float = ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS,
+) -> bool:
+    """Extend a Root attachment lease while the caller still owns its token."""
+    if not attachment_token:
+        return False
+    root_agent_id = validate_agent_id(root_agent_id)
+    lease_path = _attachment_lease_path(root_agent_id)
+    lease = _read_attachment_lease(lease_path)
+    if lease is None or lease["token"] != attachment_token:
+        return False
+    expires_at = time.monotonic() + ttl_seconds
+    try:
+        lease_path.write_text(f"{attachment_token}\n{expires_at}\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _attachment_token_is_active(*, root_agent_id: str, attachment_token: str | None) -> bool:
+    if not attachment_token:
+        return False
+    root_agent_id = validate_agent_id(root_agent_id)
+    lease = _read_attachment_lease(_attachment_lease_path(root_agent_id))
+    return lease is not None and lease["token"] == attachment_token and lease["expires_at"] > time.monotonic()
+
+
+def _attachment_unavailable_result(
+    *,
+    root_agent_id: str,
+    command: str | None = None,
+    lifecycle_state: str | None = None,
+    command_id: str | None = None,
+) -> dict[str, Any]:
+    output_lines = [
+        "Root Agent attachment is already active or unavailable.",
+        f"root_agent_id: {root_agent_id}",
+    ]
+    if lifecycle_state:
+        output_lines.append(f"lifecycle_state: {lifecycle_state}")
+    output_lines.append(
+        f"Use mini-mas status to inspect Root Agents, then retry mini-mas resume {root_agent_id} later."
+    )
+    command_result = {
+        "output": "\n".join(output_lines) + "\n",
+        "returncode": 2,
+        "exception_info": "root_attachment_unavailable",
+        "extra": {"mas_command_error": "root_attachment_unavailable"},
+    }
+    result: dict[str, Any] = {
+        "kind": "root_command_attachment_unavailable",
+        "root_agent_id": root_agent_id,
+        "result": command_result,
+    }
+    if command is not None:
+        result["command"] = command
+    if command_id is not None:
+        result["command_id"] = command_id
+    return result
 
 
 def _format_run_result(*, agent_id: str, result: Any | None, wait: bool) -> dict[str, Any]:
@@ -167,6 +326,7 @@ async def _send_root_command_async(
     command_id: str | None = None,
     result_timeout_seconds: float = 60,
     system_database_url: str | None = None,
+    attachment_token: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for submitting one Root Command Signal and waiting for its scoped result."""
     dbos_module = load_dbos()
@@ -175,32 +335,76 @@ async def _send_root_command_async(
 
     root_agent_id = validate_agent_id(root_agent_id)
     command_id = command_id or make_command_id()
-    signal = make_root_command_signal(
-        command_id=command_id,
-        root_agent_id=root_agent_id,
-        command=command,
-        source="external_cli",
-    )
-    await dbos_module.DBOS.send_async(root_agent_id, signal, ROOT_COMMAND_TOPIC)
-    event = await dbos_module.DBOS.get_event_async(
-        root_agent_id,
-        root_command_result_event_key(command_id),
-        result_timeout_seconds,
-    )
-    if not isinstance(event, Mapping):
-        return {
-            "kind": "root_command_result_timeout",
-            "command_id": command_id,
-            "root_agent_id": root_agent_id,
-            "command": command,
-            "result": {
-                "output": "Timed out waiting for Root Command Result.\n",
-                "returncode": 1,
-                "exception_info": "root_command_result_timeout",
-                "extra": {"mas_command_error": "root_command_result_timeout"},
-            },
-        }
-    return event
+    claimed_token: str | None = None
+    if attachment_token is None:
+        snapshot = await dbos_module.DBOS.get_event_async(root_agent_id, STATUS_EVENT_KEY, 1)
+        if not isinstance(snapshot, Mapping):
+            return _attachment_unavailable_result(
+                root_agent_id=root_agent_id,
+                command=command,
+                lifecycle_state="unknown",
+                command_id=command_id,
+            )
+        lifecycle_state = str(normalize_agent_snapshot(dict(snapshot))["lifecycle_state"])
+        if lifecycle_state != "waiting_for_command":
+            return _attachment_unavailable_result(
+                root_agent_id=root_agent_id,
+                command=command,
+                lifecycle_state=lifecycle_state,
+                command_id=command_id,
+            )
+        lease = claim_root_attachment(
+            root_agent_id=root_agent_id,
+            ttl_seconds=max(result_timeout_seconds, 0.0) + ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS,
+        )
+        if not lease["claimed"]:
+            return _attachment_unavailable_result(
+                root_agent_id=root_agent_id,
+                command=command,
+                lifecycle_state=lifecycle_state,
+                command_id=command_id,
+            )
+        claimed_token = str(lease["attachment_token"])
+    elif not _attachment_token_is_active(root_agent_id=root_agent_id, attachment_token=attachment_token):
+        return _attachment_unavailable_result(
+            root_agent_id=root_agent_id,
+            command=command,
+            lifecycle_state="unknown",
+            command_id=command_id,
+        )
+
+    release_claimed_token = False
+    try:
+        signal = make_root_command_signal(
+            command_id=command_id,
+            root_agent_id=root_agent_id,
+            command=command,
+            source="external_cli",
+        )
+        await dbos_module.DBOS.send_async(root_agent_id, signal, ROOT_COMMAND_TOPIC)
+        event = await dbos_module.DBOS.get_event_async(
+            root_agent_id,
+            root_command_result_event_key(command_id),
+            result_timeout_seconds,
+        )
+        if not isinstance(event, Mapping):
+            return {
+                "kind": "root_command_result_timeout",
+                "command_id": command_id,
+                "root_agent_id": root_agent_id,
+                "command": command,
+                "result": {
+                    "output": "Timed out waiting for Root Command Result.\n",
+                    "returncode": 1,
+                    "exception_info": "root_command_result_timeout",
+                    "extra": {"mas_command_error": "root_command_result_timeout"},
+                },
+            }
+        release_claimed_token = True
+        return event
+    finally:
+        if claimed_token is not None and release_claimed_token:
+            release_root_attachment(root_agent_id=root_agent_id, attachment_token=claimed_token)
 
 
 def send_root_command(
@@ -210,6 +414,7 @@ def send_root_command(
     command_id: str | None = None,
     result_timeout_seconds: float = 60,
     system_database_url: str | None = None,
+    attachment_token: str | None = None,
 ) -> Mapping[str, Any]:
     """Initialize DBOS, send one Root command, and wait on the command-id-scoped result event."""
     return asyncio.run(
@@ -219,6 +424,7 @@ def send_root_command(
             command_id=command_id,
             result_timeout_seconds=result_timeout_seconds,
             system_database_url=system_database_url,
+            attachment_token=attachment_token,
         )
     )
 
@@ -479,9 +685,25 @@ async def _prepare_resume_root_agent_async(
     if lifecycle_state != "waiting_for_command":
         return _resume_unavailable_lifecycle_result(root_agent_id=root_agent_id, lifecycle_state=lifecycle_state)
 
+    lease = claim_root_attachment(root_agent_id=root_agent_id)
+    if not lease["claimed"]:
+        return _resume_unavailable_result(
+            root_agent_id=root_agent_id,
+            lifecycle_state=lifecycle_state,
+            exception_info="root_attachment_unavailable",
+            output=(
+                "Root Agent attachment is already active or unavailable.\n"
+                f"root_agent_id: {root_agent_id}\n"
+                f"lifecycle_state: {lifecycle_state}\n"
+                "Use mini-mas status to inspect Root Agents, then retry "
+                f"mini-mas resume {root_agent_id} later.\n"
+            ),
+        )
+
     return {
         "kind": "resume_ready",
         "root_agent_id": root_agent_id,
+        "attachment_token": lease["attachment_token"],
         **metadata,
         "returncode": 0,
     }
