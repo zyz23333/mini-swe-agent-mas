@@ -50,33 +50,23 @@ def test_plain_mini_mas_creates_interactive_root_and_prints_metadata_banner():
     assert dbos_module.DBOS.start_workflow_async.call_args.kwargs == {"max_commands": None}
 
 
-def test_mini_mas_run_cli_outputs_artifact_locations():
-    handle = AsyncMockHandle(
-        "mas-2222222222222222",
-        {
-            "agent_id": "mas-2222222222222222",
-            "status": "started",
-            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-        },
-    )
-
-    async def start_workflow_async(*_args, **_kwargs):
-        return handle
-
-    dbos_module = _mock_dbos_module()
-    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
-
-    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
-        cli_result = CliRunner().invoke(app, ["run", "--workflow-id", "mas-2222222222222222"])
+def test_mini_mas_help_presents_first_version_root_cli_surface_without_legacy_commands():
+    cli_result = CliRunner().invoke(app, ["--help"])
 
     assert cli_result.exit_code == 0
-    assert "agent_id: mas-2222222222222222" in cli_result.stdout
-    assert "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222" in cli_result.stdout
-    assert (
-        "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
-        in cli_result.stdout
-    )
+    assert "Interactive Root Agent" in cli_result.stdout
+    assert "mini-mas" in cli_result.stdout
+    assert "spawn" in cli_result.stdout
+    assert "status" in cli_result.stdout
+    assert "resume" in cli_result.stdout
+    assert "run" not in cli_result.stdout
+    assert "command" not in cli_result.stdout
+    assert "wait" not in cli_result.stdout
+    assert "continue" not in cli_result.stdout
+    assert "close" not in cli_result.stdout
+    assert "close-root" not in cli_result.stdout
+    assert "run ID" not in cli_result.stdout
+    assert "cleanup" not in cli_result.stdout.lower()
 
 
 def test_mini_mas_status_cli_lists_interactive_root_agents(monkeypatch):
@@ -128,53 +118,22 @@ def test_mini_mas_status_cli_lists_interactive_root_agents(monkeypatch):
     discover.assert_called_once_with(system_database_url=None)
 
 
-def test_mini_mas_status_cli_with_agent_id_keeps_external_agent_interaction_unsupported(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.get_agent_workflow_status",
-        Mock(
-            return_value={
-                "kind": "unsupported",
-                "workflow_id": "mas-2222222222222222",
-                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
-                "returncode": 2,
-                "exception_info": "external_agent_interaction_unsupported",
-                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
-            }
-        ),
-    )
-
+def test_mini_mas_status_with_agent_id_is_not_a_supported_external_lookup():
     cli_result = CliRunner().invoke(app, ["status", "mas-2222222222222222"])
-    assert cli_result.exit_code == 2
-    assert "unsupported" in cli_result.stdout
+
+    assert cli_result.exit_code != 0
+    assert "Unsupported external MAS governance command" in cli_result.output
+    assert "mini-mas status" in cli_result.output
+    assert "mini-mas resume <root-agent-id>" in cli_result.output
 
 
-def test_mini_mas_command_cli_sends_root_command_and_prints_result(monkeypatch):
-    root_command = Mock(
-        return_value={
-            "kind": "root_command_result",
-            "command_id": "cmd-1111111111111111",
-            "root_agent_id": "mas-2222222222222222",
-            "command": "echo hello",
-            "result": {
-                "output": "hello\n",
-                "returncode": 0,
-                "exception_info": "",
-                "extra": {},
-            },
-        }
-    )
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", root_command)
-
+def test_mini_mas_command_is_not_a_supported_external_bypass():
     cli_result = CliRunner().invoke(app, ["command", "mas-2222222222222222", "echo hello"])
 
-    assert cli_result.exit_code == 0
-    assert cli_result.stdout == "hello\n"
-    root_command.assert_called_once_with(
-        root_agent_id="mas-2222222222222222",
-        command="echo hello",
-        result_timeout_seconds=60,
-        system_database_url=None,
-    )
+    assert cli_result.exit_code != 0
+    assert "Unsupported external MAS governance command" in cli_result.output
+    assert "mini-mas status" in cli_result.output
+    assert "mini-mas resume <root-agent-id>" in cli_result.output
 
 
 def test_mini_mas_spawn_creates_root_sends_preserved_spawn_command_and_prints_child_metadata(monkeypatch):
@@ -695,127 +654,38 @@ def test_mini_mas_resume_detaches_on_eof_without_sending_close_or_using_prompt_h
     )
 
 
-def test_mini_mas_status_cli_does_not_support_missing_descendant_lookup(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.get_agent_workflow_status",
-        Mock(
-            return_value={
-                "kind": "unsupported",
-                "workflow_id": "mas-9999999999999999",
-                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
-                "returncode": 2,
-                "exception_info": "external_agent_interaction_unsupported",
-                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
-            }
-        ),
-    )
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run"],
+        ["wait", "mas-3333333333333333"],
+        ["continue", "mas-3333333333333333", "go on"],
+        ["close", "mas-3333333333333333"],
+    ],
+)
+def test_external_legacy_and_governance_commands_are_not_supported_bypasses(argv):
+    cli_result = CliRunner().invoke(app, argv)
 
-    cli_result = CliRunner().invoke(app, ["status", "mas-9999999999999999"])
+    assert cli_result.exit_code != 0
+    assert "Unsupported external MAS" in cli_result.output
+    assert "mini-mas status" in cli_result.output
+    assert "mini-mas resume <root-agent-id>" in cli_result.output
+    assert "Root Agent closure" not in cli_result.output
+    assert "cleanup" not in cli_result.output.lower()
+    assert "run ID" not in cli_result.output
+    assert "Root index" not in cli_result.output
 
-    assert cli_result.exit_code == 2
-    assert "unsupported" in cli_result.stdout
 
-def test_mini_mas_wait_cli_outputs_first_observable_event(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.wait_for_agent_workflow",
-        Mock(
-            return_value={
-                "workflow_id": "mas-3333333333333333",
-                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
-                "returncode": 2,
-                "exception_info": "external_agent_interaction_unsupported",
-                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
-            }
-        ),
-    )
+def test_mini_mas_does_not_add_close_root_command():
+    cli_result = CliRunner().invoke(app, ["close-root", "mas-3333333333333333"])
 
-    cli_result = CliRunner().invoke(app, ["wait", "mas-3333333333333333", "--timeout", "0.01"])
+    assert cli_result.exit_code != 0
+    assert "No such command" in cli_result.output
+    assert "Root Agent closure" not in cli_result.output
+    assert "cleanup" not in cli_result.output.lower()
+    assert "run ID" not in cli_result.output
+    assert "Root index" not in cli_result.output
 
-    assert cli_result.exit_code == 2
-    assert "unsupported" in cli_result.stdout
-
-def test_mini_mas_wait_cli_outputs_closed_event_neutrally(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.wait_for_agent_workflow",
-        Mock(
-            return_value={
-                "workflow_id": "mas-3333333333333333",
-                "output": "External mini-mas status, wait, continue, and close are unsupported.\n",
-                "returncode": 2,
-                "exception_info": "external_agent_interaction_unsupported",
-                "extra": {"mas_command_error": "external_agent_interaction_unsupported"},
-            }
-        ),
-    )
-
-    cli_result = CliRunner().invoke(app, ["wait", "mas-3333333333333333"])
-
-    assert cli_result.exit_code == 2
-    assert "unsupported" in cli_result.stdout
-    assert "accepted" not in cli_result.stdout.lower()
-    assert "rejected" not in cli_result.stdout.lower()
-    assert "aborted" not in cli_result.stdout.lower()
-    assert "cancel" not in cli_result.stdout.lower()
-
-def test_mini_mas_continue_cli_outputs_continuation_dispatch(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.continue_agent_workflow",
-        Mock(
-            return_value={
-                "ok": True,
-                "output": (
-                    "Continuation signal sent\n"
-                    "agent_id: mas-3333333333333333\n"
-                    "lifecycle_state: waiting_for_parent\n"
-                    "message: go on\n"
-                    "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
-                    "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
-                ),
-                "returncode": 0,
-                "exception_info": "",
-                "extra": {},
-            }
-        ),
-    )
-
-    cli_result = CliRunner().invoke(app, ["continue", "mas-3333333333333333", "go on"])
-
-    assert cli_result.exit_code == 0
-    assert "Continuation signal sent" in cli_result.stdout
-    assert "agent_id: mas-3333333333333333" in cli_result.stdout
-    assert "message: go on" in cli_result.stdout
-
-def test_mini_mas_close_cli_outputs_neutral_close_dispatch(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.close_agent_workflow",
-        Mock(
-            return_value={
-                "ok": True,
-                "output": (
-                    "Close signal sent\n"
-                    "agent_id: mas-3333333333333333\n"
-                    "lifecycle_state: waiting_for_parent\n"
-                    "latest_submission: ready\n"
-                    "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
-                    "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
-                ),
-                "returncode": 0,
-                "exception_info": "",
-                "extra": {},
-            }
-        ),
-    )
-
-    cli_result = CliRunner().invoke(app, ["close", "mas-3333333333333333"])
-
-    assert cli_result.exit_code == 0
-    assert "Close signal sent" in cli_result.stdout
-    assert "agent_id: mas-3333333333333333" in cli_result.stdout
-    assert "latest_submission: ready" in cli_result.stdout
-    assert "accepted" not in cli_result.stdout.lower()
-    assert "rejected" not in cli_result.stdout.lower()
-    assert "aborted" not in cli_result.stdout.lower()
-    assert "cancel" not in cli_result.stdout.lower()
 
 @pytest.mark.parametrize("command", ["history", "logs", "grep"])
 def test_mini_mas_does_not_add_dedicated_history_or_log_commands(command):
