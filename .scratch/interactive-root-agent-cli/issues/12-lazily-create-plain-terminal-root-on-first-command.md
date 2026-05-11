@@ -1,6 +1,6 @@
 # Lazily create plain terminal Root on first command
 
-Status: needs-triage
+Status: ready-for-agent
 
 ## Parent
 
