@@ -269,7 +269,15 @@ def test_mini_mas_multi_spawn_prints_one_root_id_and_each_child(monkeypatch):
     assert cli_result.stdout.count("root_agent_id: mas-1111111111111111") == 1
     assert "agent_id: mas-2222222222222222" in cli_result.stdout
     assert "agent_id: mas-3333333333333333" in cli_result.stdout
+    assert cli_result.stdout.index("task: task A") < cli_result.stdout.index("task: task B")
+    assert cli_result.stdout.index("agent_id: mas-2222222222222222") < cli_result.stdout.index(
+        "agent_id: mas-3333333333333333"
+    )
     assert cli_result.stdout.count("parent_agent_id: mas-1111111111111111") == 2
+    assert "spawn_index" not in cli_result.stdout
+    assert "sibling_index" not in cli_result.stdout
+    assert "task_position" not in cli_result.stdout
+    assert "result_order" not in cli_result.stdout
     one_shot_spawn.assert_called_once_with(
         spawn_arguments=["task A", "task B"],
         result_timeout_seconds=60,

@@ -350,6 +350,116 @@ def test_one_shot_spawn_uses_root_command_signal_result_flow():
     assert result["result"]["extra"]["parent_agent_id"] == "mas-1111111111111111"
 
 
+def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadata():
+    sent = []
+    handle = AsyncMockHandle("mas-1111111111111111")
+
+    async def start_workflow_async(*_args, **_kwargs):
+        return handle
+
+    async def send_async(destination_id, message, topic=None):
+        sent.append((destination_id, message, topic))
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        if key == "mini_mas_status":
+            return {
+                "agent_id": workflow_id,
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+            }
+        assert key == "mini_mas_root_command_result:cmd-1111111111111111"
+        return {
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": workflow_id,
+            "command": "mini-mas spawn 'task A' 'task B'",
+            "result": {
+                "output": (
+                    "Detached spawn started\n"
+                    "child_count: 2\n"
+                    "task: task A\n"
+                    "agent_id: mas-2222222222222222\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json\n"
+                    "\n"
+                    "task: task B\n"
+                    "agent_id: mas-3333333333333333\n"
+                    "parent_agent_id: mas-1111111111111111\n"
+                    "agent_artifact_directory: .mini-mas/agents/mas-3333333333333333\n"
+                    "trajectory_artifact_path: .mini-mas/agents/mas-3333333333333333/trajectory.traj.json\n"
+                ),
+                "returncode": 0,
+                "exception_info": "",
+                "extra": {
+                    "mas_command": ["spawn", "task A", "task B"],
+                    "spawned_child_count": 2,
+                    "child_agent_ids": ["mas-2222222222222222", "mas-3333333333333333"],
+                    "children": [
+                        {
+                            "task": "task A",
+                            "agent_id": "mas-2222222222222222",
+                            "parent_agent_id": "mas-1111111111111111",
+                            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+                            "trajectory_artifact_path": (
+                                ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
+                            ),
+                        },
+                        {
+                            "task": "task B",
+                            "agent_id": "mas-3333333333333333",
+                            "parent_agent_id": "mas-1111111111111111",
+                            "agent_artifact_directory": ".mini-mas/agents/mas-3333333333333333",
+                            "trajectory_artifact_path": (
+                                ".mini-mas/agents/mas-3333333333333333/trajectory.traj.json"
+                            ),
+                        },
+                    ],
+                    "waited": False,
+                    "ready_children": [],
+                    "still_running_child_agent_ids": [],
+                },
+            },
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.send_async = Mock(side_effect=send_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        patch("minisweagent.mas.runtime.make_agent_id", return_value="mas-1111111111111111"),
+        patch("minisweagent.mas.runtime.make_command_id", return_value="cmd-1111111111111111"),
+    ):
+        result = one_shot_spawn_through_interactive_root(
+            spawn_arguments=["task A", "task B"],
+            result_timeout_seconds=5,
+        )
+
+    assert result["kind"] == "one_shot_spawn"
+    assert result["root_agent_id"] == "mas-1111111111111111"
+    assert result["command"] == "mini-mas spawn 'task A' 'task B'"
+    dbos_module.DBOS.start_workflow_async.assert_called_once()
+    assert sent[0][1]["command"] == "mini-mas spawn 'task A' 'task B'"
+
+    extra = result["result"]["extra"]
+    assert extra["child_agent_ids"] == ["mas-2222222222222222", "mas-3333333333333333"]
+    assert [child["task"] for child in extra["children"]] == ["task A", "task B"]
+    assert [child["agent_id"] for child in extra["children"]] == [
+        "mas-2222222222222222",
+        "mas-3333333333333333",
+    ]
+    assert {child["parent_agent_id"] for child in extra["children"]} == {"mas-1111111111111111"}
+    assert all("mas-1111111111111111" not in child["agent_id"] for child in extra["children"])
+
+    durable_order_fields = {"spawn_index", "sibling_index", "task_position", "result_order"}
+    for child in extra["children"]:
+        assert durable_order_fields.isdisjoint(child)
+    assert durable_order_fields.isdisjoint(extra)
+
+
 def test_standalone_spawn_command_preserves_external_multi_spawn_arguments():
     assert make_standalone_spawn_command(["--wait", "--all", "--timeout", "0.5", "task A", "task B"]) == (
         "mini-mas spawn --wait --all --timeout 0.5 'task A' 'task B'"

@@ -105,6 +105,12 @@ def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypa
     assert result["extra"]["waited"] is True
     assert result["extra"]["wait_mode"] == "all"
     assert result["extra"]["timed_out"] is True
+    assert result["extra"]["child_agent_ids"] == ["mas-1111111111111111", "mas-2222222222222222"]
+    assert [child["task"] for child in result["extra"]["children"]] == ["task A", "task B"]
+    assert [child["agent_id"] for child in result["extra"]["children"]] == [
+        "mas-1111111111111111",
+        "mas-2222222222222222",
+    ]
     assert result["extra"]["still_running_child_agent_ids"] == ["mas-2222222222222222"]
     assert "Waited spawn timed out" in result["output"]
     assert "agent_id: mas-3333333333333333" in second_result["output"]
