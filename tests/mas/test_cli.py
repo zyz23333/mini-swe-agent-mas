@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -125,6 +125,244 @@ def test_mini_mas_command_cli_sends_root_command_and_prints_result(monkeypatch):
         result_timeout_seconds=60,
         system_database_url=None,
     )
+
+
+def test_mini_mas_resume_prints_metadata_once_and_sends_each_input_line(monkeypatch):
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "returncode": 0,
+        }
+    )
+    send_root_command = Mock(
+        side_effect=[
+            {
+                "kind": "root_command_result",
+                "command_id": "cmd-1111111111111111",
+                "root_agent_id": "mas-2222222222222222",
+                "command": "echo hello",
+                "result": {"output": "hello\n", "returncode": 0, "exception_info": "", "extra": {}},
+            },
+            {
+                "kind": "root_command_result",
+                "command_id": "cmd-2222222222222222",
+                "root_agent_id": "mas-2222222222222222",
+                "command": "mini-mas status",
+                "result": {"output": "status output\n", "returncode": 0, "exception_info": "", "extra": {}},
+            },
+        ]
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
+    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+
+    cli_result = CliRunner().invoke(
+        app,
+        ["resume", "mas-2222222222222222"],
+        input="echo hello\nmini-mas status\n",
+    )
+
+    assert cli_result.exit_code == 0
+    assert cli_result.stdout.count("agent_id: mas-2222222222222222") == 1
+    assert "lifecycle_state: waiting_for_command" in cli_result.stdout
+    assert "hello\n" in cli_result.stdout
+    assert "status output\n" in cli_result.stdout
+    prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222", system_database_url=None)
+    assert send_root_command.call_args_list == [
+        call(
+            root_agent_id="mas-2222222222222222",
+            command="echo hello",
+            result_timeout_seconds=60,
+            system_database_url=None,
+        ),
+        call(
+            root_agent_id="mas-2222222222222222",
+            command="mini-mas status",
+            result_timeout_seconds=60,
+            system_database_url=None,
+        ),
+    ]
+
+
+def test_mini_mas_resume_sends_prefix_free_input_as_ordinary_bash_without_rewriting(monkeypatch):
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.prepare_resume_root_agent",
+        Mock(
+            return_value={
+                "kind": "resume_ready",
+                "root_agent_id": "mas-2222222222222222",
+                "agent_id": "mas-2222222222222222",
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+                "returncode": 0,
+            }
+        ),
+    )
+    send_root_command = Mock(
+        return_value={
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": "mas-2222222222222222",
+            "command": "status",
+            "result": {"output": "bash status output\n", "returncode": 0, "exception_info": "", "extra": {}},
+        }
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+
+    cli_result = CliRunner().invoke(app, ["resume", "mas-2222222222222222"], input="status\n")
+
+    assert cli_result.exit_code == 0
+    assert "bash status output\n" in cli_result.stdout
+    send_root_command.assert_called_once_with(
+        root_agent_id="mas-2222222222222222",
+        command="status",
+        result_timeout_seconds=60,
+        system_database_url=None,
+    )
+
+
+def test_mini_mas_resume_exits_with_last_command_returncode(monkeypatch):
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.prepare_resume_root_agent",
+        Mock(
+            return_value={
+                "kind": "resume_ready",
+                "root_agent_id": "mas-2222222222222222",
+                "agent_id": "mas-2222222222222222",
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+                "returncode": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.send_root_command",
+        Mock(
+            return_value={
+                "kind": "root_command_result",
+                "command_id": "cmd-1111111111111111",
+                "root_agent_id": "mas-2222222222222222",
+                "command": "false",
+                "result": {"output": "failed\n", "returncode": 7, "exception_info": "failed", "extra": {}},
+            }
+        ),
+    )
+
+    cli_result = CliRunner().invoke(app, ["resume", "mas-2222222222222222"], input="false\n")
+
+    assert cli_result.exit_code == 7
+    assert "failed\n" in cli_result.stdout
+
+
+def test_mini_mas_resume_keeps_terminal_attached_after_nonzero_command(monkeypatch):
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.prepare_resume_root_agent",
+        Mock(
+            return_value={
+                "kind": "resume_ready",
+                "root_agent_id": "mas-2222222222222222",
+                "agent_id": "mas-2222222222222222",
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+                "returncode": 0,
+            }
+        ),
+    )
+    send_root_command = Mock(
+        side_effect=[
+            {
+                "kind": "root_command_result",
+                "command_id": "cmd-1111111111111111",
+                "root_agent_id": "mas-2222222222222222",
+                "command": "false",
+                "result": {"output": "failed\n", "returncode": 7, "exception_info": "failed", "extra": {}},
+            },
+            {
+                "kind": "root_command_result",
+                "command_id": "cmd-2222222222222222",
+                "root_agent_id": "mas-2222222222222222",
+                "command": "echo recovered",
+                "result": {"output": "recovered\n", "returncode": 0, "exception_info": "", "extra": {}},
+            },
+        ]
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+
+    cli_result = CliRunner().invoke(
+        app,
+        ["resume", "mas-2222222222222222"],
+        input="false\necho recovered\n",
+    )
+
+    assert cli_result.exit_code == 0
+    assert "failed\n" in cli_result.stdout
+    assert "recovered\n" in cli_result.stdout
+    assert send_root_command.call_count == 2
+
+
+def test_mini_mas_resume_prints_unavailable_error_without_entering_terminal(monkeypatch):
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_unavailable",
+            "root_agent_id": "mas-2222222222222222",
+            "output": (
+                "Root Agent is not available for resume.\n"
+                "root_agent_id: mas-2222222222222222\n"
+                "lifecycle_state: running\n"
+                "Use mini-mas status to inspect Root Agents, then retry "
+                "mini-mas resume mas-2222222222222222 later when it is waiting_for_command.\n"
+            ),
+            "returncode": 2,
+            "exception_info": "root_agent_not_waiting_for_command",
+            "extra": {"mas_command_error": "root_agent_not_waiting_for_command"},
+        }
+    )
+    send_root_command = Mock()
+    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
+    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+
+    cli_result = CliRunner().invoke(app, ["resume", "mas-2222222222222222"], input="echo ignored\n")
+
+    assert cli_result.exit_code == 2
+    assert "root_agent_id: mas-2222222222222222" in cli_result.stdout
+    assert "lifecycle_state: running" in cli_result.stdout
+    assert "mini-mas status" in cli_result.stdout
+    assert "mini-mas resume mas-2222222222222222" in cli_result.stdout
+    send_root_command.assert_not_called()
+
+
+def test_mini_mas_resume_detaches_on_eof_without_sending_close_or_using_prompt_history(monkeypatch):
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "returncode": 0,
+        }
+    )
+    send_root_command = Mock()
+    prompt_history_prompt = Mock(side_effect=AssertionError("resume must not use prompt history"))
+    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
+    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    monkeypatch.setattr("minisweagent.agents.utils.prompt_user.prompt_session.prompt", prompt_history_prompt)
+
+    cli_result = CliRunner().invoke(app, ["resume", "mas-2222222222222222"], input="")
+
+    assert cli_result.exit_code == 0
+    assert "agent_id: mas-2222222222222222" in cli_result.stdout
+    send_root_command.assert_not_called()
+    prompt_history_prompt.assert_not_called()
+
 
 def test_mini_mas_status_cli_does_not_support_missing_descendant_lookup(monkeypatch):
     monkeypatch.setattr(

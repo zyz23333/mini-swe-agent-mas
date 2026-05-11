@@ -11,6 +11,7 @@ from minisweagent.mas.runtime import (
     close_agent_workflow,
     continue_agent_workflow,
     get_agent_workflow_status,
+    prepare_resume_root_agent,
     send_root_command,
     start_interactive_root_agent_workflow,
     start_root_agent_workflow,
@@ -132,6 +133,58 @@ def command(
     if command_result.get("returncode", 0) != 0:
         raise typer.Exit(code=command_result["returncode"])
     return result_event
+
+
+@app.command(help="Resume an existing Interactive Root Agent terminal.")
+def resume(
+    root_agent_id: Annotated[str, typer.Argument(help="Interactive Root Agent ID to resume.")],
+    result_timeout_seconds: Annotated[
+        float,
+        typer.Option("--result-timeout", help="Maximum seconds to wait for each Root Command Result."),
+    ] = 60,
+    system_database_url: Annotated[
+        str | None,
+        typer.Option(
+            "--system-database-url",
+            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
+            show_default=False,
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id, system_database_url=system_database_url))
+    if resume_result["returncode"] != 0:
+        console.print(resume_result["output"], end="")
+        raise typer.Exit(code=resume_result["returncode"])
+
+    _print_root_metadata_banner(resume_result)
+    last_result: dict[str, Any] = resume_result
+    last_returncode = 0
+    for command_text in _iter_terminal_input():
+        if command_text == "":
+            continue
+        last_result = dict(
+            send_root_command(
+                root_agent_id=root_agent_id,
+                command=command_text,
+                result_timeout_seconds=result_timeout_seconds,
+                system_database_url=system_database_url,
+            )
+        )
+        command_result = last_result["result"]
+        console.print(command_result.get("output", ""), end="")
+        last_returncode = command_result.get("returncode", 0)
+    if last_returncode != 0:
+        raise typer.Exit(code=last_returncode)
+    return last_result
+
+
+def _iter_terminal_input():
+    """Yield terminal input lines without using prompt-toolkit history."""
+    while True:
+        try:
+            yield input()
+        except EOFError:
+            return
 
 
 @app.command(help="Wait for one Child Agent First Observable Event.")

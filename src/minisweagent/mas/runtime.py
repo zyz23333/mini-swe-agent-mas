@@ -14,7 +14,7 @@ from minisweagent.mas.signals import (
     make_root_command_signal,
     root_command_result_event_key,
 )
-from minisweagent.mas.status_events import STATUS_EVENT_KEY
+from minisweagent.mas.status_events import STATUS_EVENT_KEY, normalize_agent_snapshot
 
 MAS_APP_NAME = "mini-swe-agent-mas"
 UNSUPPORTED_EXTERNAL_COORDINATION_MESSAGE = (
@@ -217,6 +217,150 @@ def send_root_command(
             command=command,
             command_id=command_id,
             result_timeout_seconds=result_timeout_seconds,
+            system_database_url=system_database_url,
+        )
+    )
+
+
+def _resume_invalid_agent_id_result(*, root_agent_id: str, error: ValueError) -> dict[str, Any]:
+    return {
+        "kind": "resume_unavailable",
+        "root_agent_id": root_agent_id,
+        "output": f"Invalid Agent ID for resume: {root_agent_id}\n{error}\n",
+        "returncode": 2,
+        "exception_info": "invalid_agent_id",
+        "extra": {"mas_command_error": "invalid_agent_id"},
+    }
+
+
+def _resume_unavailable_result(
+    *,
+    root_agent_id: str,
+    output: str,
+    exception_info: str,
+    lifecycle_state: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "kind": "resume_unavailable",
+        "root_agent_id": root_agent_id,
+        "output": output,
+        "returncode": 2,
+        "exception_info": exception_info,
+        "extra": {"mas_command_error": exception_info},
+    }
+    if lifecycle_state:
+        result["lifecycle_state"] = lifecycle_state
+    return result
+
+
+def _resume_unavailable_lifecycle_result(*, root_agent_id: str, lifecycle_state: str) -> dict[str, Any]:
+    return _resume_unavailable_result(
+        root_agent_id=root_agent_id,
+        lifecycle_state=lifecycle_state,
+        exception_info="root_agent_not_waiting_for_command",
+        output=(
+            "Root Agent is not available for resume.\n"
+            f"root_agent_id: {root_agent_id}\n"
+            f"lifecycle_state: {lifecycle_state}\n"
+            "Use mini-mas status to inspect Root Agents, then retry "
+            f"mini-mas resume {root_agent_id} later when it is waiting_for_command.\n"
+        ),
+    )
+
+
+def _is_interactive_root_workflow(workflow_status: Any) -> bool:
+    return getattr(workflow_status, "name", "") == "interactive_root_agent_workflow"
+
+
+def _parent_workflow_id(workflow_status: Any) -> str | None:
+    parent_workflow_id = getattr(workflow_status, "parent_workflow_id", None)
+    return str(parent_workflow_id) if parent_workflow_id else None
+
+
+async def _prepare_resume_root_agent_async(
+    *,
+    root_agent_id: str,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Async implementation for validating an Interactive Root Agent before resume."""
+    try:
+        root_agent_id = validate_agent_id(root_agent_id)
+    except ValueError as exc:
+        return _resume_invalid_agent_id_result(root_agent_id=root_agent_id, error=exc)
+
+    dbos_module = load_dbos()
+    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+    dbos_module.DBOS.launch()
+
+    workflow_status = await dbos_module.DBOS.get_workflow_status_async(root_agent_id)
+    if workflow_status is None:
+        return _resume_unavailable_result(
+            root_agent_id=root_agent_id,
+            lifecycle_state="unknown",
+            exception_info="unknown_root_agent_id",
+            output=(
+                f"Unknown Root Agent ID: {root_agent_id}\n"
+                f"root_agent_id: {root_agent_id}\n"
+                "lifecycle_state: unknown\n"
+                "Use mini-mas status to inspect Root Agents.\n"
+            ),
+        )
+
+    parent_workflow_id = _parent_workflow_id(workflow_status)
+    if parent_workflow_id is not None:
+        return _resume_unavailable_result(
+            root_agent_id=root_agent_id,
+            lifecycle_state="unknown",
+            exception_info="not_parentless_interactive_root_agent",
+            output=(
+                "Resume target is not a parentless Interactive Root Agent.\n"
+                f"root_agent_id: {root_agent_id}\n"
+                "lifecycle_state: unknown\n"
+                f"parent_agent_id: {parent_workflow_id}\n"
+                "Use mini-mas status to inspect Root Agents.\n"
+            ),
+        )
+
+    if not _is_interactive_root_workflow(workflow_status):
+        return _resume_unavailable_result(
+            root_agent_id=root_agent_id,
+            lifecycle_state="unknown",
+            exception_info="not_interactive_root_agent",
+            output=(
+                "Resume target is not an Interactive Root Agent workflow.\n"
+                f"root_agent_id: {root_agent_id}\n"
+                "lifecycle_state: unknown\n"
+                f"workflow_name: {getattr(workflow_status, 'name', '')}\n"
+                "Use mini-mas status to inspect Root Agents.\n"
+            ),
+        )
+
+    snapshot = await dbos_module.DBOS.get_event_async(root_agent_id, STATUS_EVENT_KEY, 1)
+    if not isinstance(snapshot, Mapping):
+        return _resume_unavailable_lifecycle_result(root_agent_id=root_agent_id, lifecycle_state="unknown")
+
+    metadata = normalize_agent_snapshot(dict(snapshot))
+    lifecycle_state = str(metadata["lifecycle_state"])
+    if lifecycle_state != "waiting_for_command":
+        return _resume_unavailable_lifecycle_result(root_agent_id=root_agent_id, lifecycle_state=lifecycle_state)
+
+    return {
+        "kind": "resume_ready",
+        "root_agent_id": root_agent_id,
+        **metadata,
+        "returncode": 0,
+    }
+
+
+def prepare_resume_root_agent(
+    *,
+    root_agent_id: str,
+    system_database_url: str | None = None,
+) -> Mapping[str, Any]:
+    """Validate an Interactive Root Agent before the resume terminal attaches."""
+    return asyncio.run(
+        _prepare_resume_root_agent_async(
+            root_agent_id=root_agent_id,
             system_database_url=system_database_url,
         )
     )
