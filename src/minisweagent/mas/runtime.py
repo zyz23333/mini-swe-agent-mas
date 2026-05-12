@@ -20,6 +20,7 @@ from minisweagent.mas.signals import (
 from minisweagent.mas.status_events import STATUS_EVENT_KEY, normalize_agent_snapshot
 
 MAS_APP_NAME = "mini-swe-agent-mas"
+MAS_RUNTIME_STATE_STORE_PATH = Path(".mini-mas") / "runtime" / "mini_mas_dbos.sqlite"
 ATTACHMENT_LEASE_TOKEN_PREFIX = "att-"
 ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS = 300.0
 
@@ -31,13 +32,12 @@ def load_dbos():
     return dbos
 
 
-def make_dbos_config(*, system_database_url: str | None = None) -> dict[str, str | None]:
+def make_dbos_config() -> dict[str, str]:
     """Build the minimal DBOS configuration for the external MAS CLI."""
+    MAS_RUNTIME_STATE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     return {
         "name": MAS_APP_NAME,
-        "system_database_url": (
-            system_database_url if system_database_url is not None else os.environ.get("DBOS_SYSTEM_DATABASE_URL")
-        ),
+        "system_database_url": f"sqlite:///{MAS_RUNTIME_STATE_STORE_PATH.as_posix()}",
     }
 
 
@@ -226,12 +226,11 @@ def _format_interactive_root_result(*, agent_id: str, result: Mapping[str, Any] 
 async def _start_interactive_root_agent_workflow_async(
     *,
     workflow_id: str | None = None,
-    system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for starting an Interactive Root Agent and waiting until it is idle."""
     dbos_module = load_dbos()
 
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+    dbos_module.DBOS(config=make_dbos_config())
 
     from minisweagent.mas.mas_agent import interactive_root_agent_workflow
 
@@ -253,13 +252,11 @@ async def _start_interactive_root_agent_workflow_async(
 def start_interactive_root_agent_workflow(
     *,
     workflow_id: str | None = None,
-    system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Initialize DBOS and start the minimal Interactive Root Agent path."""
     return asyncio.run(
         _start_interactive_root_agent_workflow_async(
             workflow_id=workflow_id,
-            system_database_url=system_database_url,
         )
     )
 
@@ -270,12 +267,11 @@ async def _send_root_command_async(
     command: str,
     command_id: str | None = None,
     result_timeout_seconds: float = 60,
-    system_database_url: str | None = None,
     attachment_token: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for submitting one Root Command Signal and waiting for its scoped result."""
     dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+    dbos_module.DBOS(config=make_dbos_config())
     dbos_module.DBOS.launch()
 
     root_agent_id = validate_agent_id(root_agent_id)
@@ -358,7 +354,6 @@ def send_root_command(
     command: str,
     command_id: str | None = None,
     result_timeout_seconds: float = 60,
-    system_database_url: str | None = None,
     attachment_token: str | None = None,
 ) -> Mapping[str, Any]:
     """Initialize DBOS, send one Root command, and wait on the command-id-scoped result event."""
@@ -368,7 +363,6 @@ def send_root_command(
             command=command,
             command_id=command_id,
             result_timeout_seconds=result_timeout_seconds,
-            system_database_url=system_database_url,
             attachment_token=attachment_token,
         )
     )
@@ -407,17 +401,15 @@ def one_shot_spawn_through_interactive_root(
     *,
     spawn_arguments: list[str],
     result_timeout_seconds: float = 60,
-    system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Create an Interactive Root Agent and submit external spawn through its Root command loop."""
-    root_result = start_interactive_root_agent_workflow(system_database_url=system_database_url)
+    root_result = start_interactive_root_agent_workflow()
     root_agent_id = str(root_result["agent_id"])
     command = make_standalone_spawn_command(spawn_arguments)
     result_event = send_root_command(
         root_agent_id=root_agent_id,
         command=command,
         result_timeout_seconds=result_timeout_seconds,
-        system_database_url=system_database_url,
     )
     if result_event.get("kind") == "root_command_result_timeout":
         return _format_one_shot_spawn_result_timeout(
@@ -481,10 +473,7 @@ def _resume_unavailable_lifecycle_result(*, root_agent_id: str, lifecycle_state:
 
 
 def _resume_retry_guidance(root_agent_id: str) -> str:
-    return (
-        "Use mini-mas status to inspect Root Agents, then retry "
-        f"mini-mas resume {root_agent_id} later.\n"
-    )
+    return f"Use mini-mas status to inspect Root Agents, then retry mini-mas resume {root_agent_id} later.\n"
 
 
 def _is_interactive_root_workflow(workflow_status: Any) -> bool:
@@ -526,13 +515,10 @@ def _format_root_discovery(snapshots: list[Mapping[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def _discover_interactive_root_agents_async(
-    *,
-    system_database_url: str | None = None,
-) -> Mapping[str, Any]:
+async def _discover_interactive_root_agents_async() -> Mapping[str, Any]:
     """Async implementation for external Interactive Root Agent discovery."""
     dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+    dbos_module.DBOS(config=make_dbos_config())
     dbos_module.DBOS.launch()
 
     workflow_statuses = await dbos_module.DBOS.list_workflows_async(
@@ -562,18 +548,14 @@ async def _discover_interactive_root_agents_async(
     }
 
 
-def discover_interactive_root_agents(
-    *,
-    system_database_url: str | None = None,
-) -> Mapping[str, Any]:
+def discover_interactive_root_agents() -> Mapping[str, Any]:
     """Initialize DBOS and list parentless Interactive Root Agent workflows."""
-    return asyncio.run(_discover_interactive_root_agents_async(system_database_url=system_database_url))
+    return asyncio.run(_discover_interactive_root_agents_async())
 
 
 async def _prepare_resume_root_agent_async(
     *,
     root_agent_id: str,
-    system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Async implementation for validating an Interactive Root Agent before resume."""
     try:
@@ -582,7 +564,7 @@ async def _prepare_resume_root_agent_async(
         return _resume_invalid_agent_id_result(root_agent_id=root_agent_id, error=exc)
 
     dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config(system_database_url=system_database_url))
+    dbos_module.DBOS(config=make_dbos_config())
     dbos_module.DBOS.launch()
 
     workflow_status = await dbos_module.DBOS.get_workflow_status_async(root_agent_id)
@@ -664,12 +646,10 @@ async def _prepare_resume_root_agent_async(
 def prepare_resume_root_agent(
     *,
     root_agent_id: str,
-    system_database_url: str | None = None,
 ) -> Mapping[str, Any]:
     """Validate an Interactive Root Agent before the resume terminal attaches."""
     return asyncio.run(
         _prepare_resume_root_agent_async(
             root_agent_id=root_agent_id,
-            system_database_url=system_database_url,
         )
     )

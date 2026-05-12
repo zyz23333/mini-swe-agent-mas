@@ -18,8 +18,18 @@ from .helpers import (
     _workflow_status_record,
 )
 
+DEFAULT_RUNTIME_DBOS_CONFIG = {
+    "name": "mini-swe-agent-mas",
+    "system_database_url": "sqlite:///.mini-mas/runtime/mini_mas_dbos.sqlite",
+}
 
-def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_idle_metadata():
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_state_workspace(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+
+def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_idle_metadata(tmp_path):
     handle = AsyncMockHandle("mas-1111111111111111")
 
     async def start_workflow_async(*_args, **_kwargs):
@@ -41,12 +51,9 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         result = start_interactive_root_agent_workflow(workflow_id="mas-1111111111111111")
 
-    dbos_module.DBOS.assert_called_once_with(
-        config={
-            "name": "mini-swe-agent-mas",
-            "system_database_url": None,
-        }
-    )
+    dbos_module.DBOS.assert_called_once_with(config=DEFAULT_RUNTIME_DBOS_CONFIG)
+    assert (tmp_path / ".mini-mas" / "runtime").is_dir()
+    assert not (tmp_path / ".gitignore").exists()
     dbos_module.DBOS.launch.assert_called_once_with()
     dbos_module.SetWorkflowID.assert_called_once_with("mas-1111111111111111")
     dbos_module.DBOS.start_workflow.assert_not_called()
@@ -109,12 +116,7 @@ def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result
 
     from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX, ROOT_COMMAND_TOPIC
 
-    dbos_module.DBOS.assert_called_once_with(
-        config={
-            "name": "mini-swe-agent-mas",
-            "system_database_url": None,
-        }
-    )
+    dbos_module.DBOS.assert_called_once_with(config=DEFAULT_RUNTIME_DBOS_CONFIG)
     dbos_module.DBOS.launch.assert_called_once_with()
     assert sent == [
         (
@@ -180,15 +182,13 @@ def test_one_shot_spawn_creates_interactive_root_then_sends_standalone_spawn_com
     result = one_shot_spawn_through_interactive_root(
         spawn_arguments=["task A"],
         result_timeout_seconds=7,
-        system_database_url="postgres://db",
     )
 
-    start_root.assert_called_once_with(system_database_url="postgres://db")
+    start_root.assert_called_once_with()
     send_command.assert_called_once_with(
         root_agent_id="mas-1111111111111111",
         command="mini-mas spawn 'task A'",
         result_timeout_seconds=7,
-        system_database_url="postgres://db",
     )
     assert result["kind"] == "one_shot_spawn"
     assert result["root_agent_id"] == "mas-1111111111111111"
@@ -329,18 +329,14 @@ def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadat
                             "agent_id": "mas-2222222222222222",
                             "parent_agent_id": "mas-1111111111111111",
                             "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                            "trajectory_artifact_path": (
-                                ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
-                            ),
+                            "trajectory_artifact_path": (".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"),
                         },
                         {
                             "task": "task B",
                             "agent_id": "mas-3333333333333333",
                             "parent_agent_id": "mas-1111111111111111",
                             "agent_artifact_directory": ".mini-mas/agents/mas-3333333333333333",
-                            "trajectory_artifact_path": (
-                                ".mini-mas/agents/mas-3333333333333333/trajectory.traj.json"
-                            ),
+                            "trajectory_artifact_path": (".mini-mas/agents/mas-3333333333333333/trajectory.traj.json"),
                         },
                     ],
                     "waited": False,
@@ -424,12 +420,11 @@ def test_one_shot_spawn_result_timeout_reports_resumable_root_without_cleanup(mo
         result_timeout_seconds=0.01,
     )
 
-    start_root.assert_called_once_with(system_database_url=None)
+    start_root.assert_called_once_with()
     send_command.assert_called_once_with(
         root_agent_id="mas-1111111111111111",
         command="mini-mas spawn 'task A'",
         result_timeout_seconds=0.01,
-        system_database_url=None,
     )
     assert result["kind"] == "one_shot_spawn_result_timeout"
     assert result["returncode"] == 1
@@ -705,12 +700,7 @@ def test_external_status_discovers_parentless_interactive_root_agents_only():
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         result = discover_interactive_root_agents()
 
-    dbos_module.DBOS.assert_called_once_with(
-        config={
-            "name": "mini-swe-agent-mas",
-            "system_database_url": None,
-        }
-    )
+    dbos_module.DBOS.assert_called_once_with(config=DEFAULT_RUNTIME_DBOS_CONFIG)
     dbos_module.DBOS.launch.assert_called_once_with()
     dbos_module.DBOS.get_event_async.assert_called_once_with("mas-1111111111111111", "mini_mas_status", 1)
     assert result["kind"] == "interactive_root_discovery"
@@ -769,8 +759,9 @@ def test_external_status_dbos_errors_propagate_visibly():
     dbos_module = _mock_dbos_module()
     dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
 
-    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module), pytest.raises(
-        RuntimeError, match="dbos query failed"
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        pytest.raises(RuntimeError, match="dbos query failed"),
     ):
         discover_interactive_root_agents()
 
@@ -779,8 +770,9 @@ def test_external_status_dbos_configuration_errors_propagate_visibly():
     dbos_module = _mock_dbos_module()
     dbos_module.DBOS.side_effect = RuntimeError("dbos config failed")
 
-    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module), pytest.raises(
-        RuntimeError, match="dbos config failed"
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        pytest.raises(RuntimeError, match="dbos config failed"),
     ):
         discover_interactive_root_agents()
 
@@ -799,7 +791,8 @@ def test_external_status_snapshot_read_errors_propagate_visibly():
     dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
     dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
 
-    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module), pytest.raises(
-        RuntimeError, match="status event read failed"
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        pytest.raises(RuntimeError, match="status event read failed"),
     ):
         discover_interactive_root_agents()

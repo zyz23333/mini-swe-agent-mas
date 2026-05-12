@@ -36,21 +36,11 @@ UNSUPPORTED_EXTERNAL_GOVERNANCE_RETURNCODE = 2
 
 
 @app.callback()
-def main(
-    ctx: typer.Context,
-    system_database_url: Annotated[
-        str | None,
-        typer.Option(
-            "--system-database-url",
-            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
-            show_default=False,
-        ),
-    ] = None,
-) -> None:
+def main(ctx: typer.Context) -> None:
     """External MAS CLI entrypoint."""
     if ctx.invoked_subcommand is not None:
         return
-    last_returncode = _run_lazy_plain_terminal(system_database_url=system_database_url)
+    last_returncode = _run_lazy_plain_terminal()
     if last_returncode != 0:
         raise typer.Exit(code=last_returncode)
 
@@ -78,19 +68,11 @@ def run(_ctx: typer.Context) -> None:
 )
 def status(
     ctx: typer.Context,
-    system_database_url: Annotated[
-        str | None,
-        typer.Option(
-            "--system-database-url",
-            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
-            show_default=False,
-        ),
-    ] = None,
 ) -> dict[str, Any]:
     if ctx.args:
         _reject_external_governance_command()
 
-    result = dict(discover_interactive_root_agents(system_database_url=system_database_url))
+    result = dict(discover_interactive_root_agents())
     console.print(result["output"], end="")
     return result
 
@@ -110,14 +92,6 @@ def spawn(
         float,
         typer.Option("--result-timeout", help="Maximum seconds to wait for the Root Command Result."),
     ] = 60,
-    system_database_url: Annotated[
-        str | None,
-        typer.Option(
-            "--system-database-url",
-            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
-            show_default=False,
-        ),
-    ] = None,
 ) -> dict[str, Any]:
     try:
         validate_spawn_arguments(list(ctx.args))
@@ -129,7 +103,6 @@ def spawn(
         one_shot_spawn_through_interactive_root(
             spawn_arguments=list(ctx.args),
             result_timeout_seconds=result_timeout_seconds,
-            system_database_url=system_database_url,
         )
     )
     if result["kind"] == "one_shot_spawn_result_timeout":
@@ -152,16 +125,8 @@ def resume(
         float,
         typer.Option("--result-timeout", help="Maximum seconds to wait for each Root Command Result."),
     ] = 60,
-    system_database_url: Annotated[
-        str | None,
-        typer.Option(
-            "--system-database-url",
-            help="DBOS system database URL. Defaults to DBOS_SYSTEM_DATABASE_URL.",
-            show_default=False,
-        ),
-    ] = None,
 ) -> dict[str, Any]:
-    resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id, system_database_url=system_database_url))
+    resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id))
     if resume_result["returncode"] != 0:
         console.print(resume_result["output"], end="")
         raise typer.Exit(code=resume_result["returncode"])
@@ -171,7 +136,6 @@ def resume(
         root_agent_id=root_agent_id,
         attachment_token=str(resume_result["attachment_token"]),
         result_timeout_seconds=result_timeout_seconds,
-        system_database_url=system_database_url,
     )
     if last_result is None:
         last_result = resume_result
@@ -180,7 +144,7 @@ def resume(
     return last_result
 
 
-def _run_lazy_plain_terminal(*, system_database_url: str | None, result_timeout_seconds: float = 60) -> int:
+def _run_lazy_plain_terminal(*, result_timeout_seconds: float = 60) -> int:
     for command_text in _iter_terminal_input():
         if _is_local_terminal_exit(command_text):
             return 0
@@ -188,7 +152,6 @@ def _run_lazy_plain_terminal(*, system_database_url: str | None, result_timeout_
             continue
         local_result = _handle_pre_root_local_command(
             command_text,
-            system_database_url=system_database_url,
             result_timeout_seconds=result_timeout_seconds,
         )
         if local_result["handled"]:
@@ -197,12 +160,12 @@ def _run_lazy_plain_terminal(*, system_database_url: str | None, result_timeout_
             continue
 
         try:
-            root_result = dict(start_interactive_root_agent_workflow(system_database_url=system_database_url))
+            root_result = dict(start_interactive_root_agent_workflow())
         except Exception as exc:
             console.print(f"Failed to create Interactive Root Agent: {exc}")
             return 1
         root_agent_id = str(root_result["agent_id"])
-        resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id, system_database_url=system_database_url))
+        resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id))
         if resume_result["returncode"] != 0:
             console.print(resume_result.get("output", ""), end="")
             return int(resume_result["returncode"])
@@ -212,7 +175,6 @@ def _run_lazy_plain_terminal(*, system_database_url: str | None, result_timeout_
             root_agent_id=root_agent_id,
             attachment_token=str(resume_result["attachment_token"]),
             result_timeout_seconds=result_timeout_seconds,
-            system_database_url=system_database_url,
             initial_command=command_text,
         )
         return last_returncode
@@ -222,7 +184,6 @@ def _run_lazy_plain_terminal(*, system_database_url: str | None, result_timeout_
 def _handle_pre_root_local_command(
     command_text: str,
     *,
-    system_database_url: str | None,
     result_timeout_seconds: float,
 ) -> dict[str, bool | int]:
     parsed_command = _parse_pre_root_local_mini_mas_command(command_text)
@@ -231,13 +192,13 @@ def _handle_pre_root_local_command(
 
     command_name, command_args = parsed_command
     if command_name == "status" and not command_args:
-        result = dict(discover_interactive_root_agents(system_database_url=system_database_url))
+        result = dict(discover_interactive_root_agents())
         console.print(result["output"], end="")
         return {"handled": True, "attached": False, "returncode": int(result.get("returncode", 0))}
 
     if command_name == "resume" and len(command_args) == 1:
         root_agent_id = command_args[0]
-        resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id, system_database_url=system_database_url))
+        resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id))
         if resume_result["returncode"] != 0:
             console.print(resume_result["output"], end="")
             return {"handled": True, "attached": False, "returncode": int(resume_result["returncode"])}
@@ -247,7 +208,6 @@ def _handle_pre_root_local_command(
             root_agent_id=root_agent_id,
             attachment_token=str(resume_result["attachment_token"]),
             result_timeout_seconds=result_timeout_seconds,
-            system_database_url=system_database_url,
         )
         return {"handled": True, "attached": True, "returncode": last_returncode}
 
@@ -269,7 +229,6 @@ def _run_attached_terminal(
     root_agent_id: str,
     attachment_token: str,
     result_timeout_seconds: float,
-    system_database_url: str | None,
     initial_command: str | None = None,
 ) -> tuple[dict[str, Any] | None, int]:
     last_result: dict[str, Any] | None = None
@@ -293,7 +252,6 @@ def _run_attached_terminal(
                     root_agent_id=root_agent_id,
                     command=command_text,
                     result_timeout_seconds=result_timeout_seconds,
-                    system_database_url=system_database_url,
                     attachment_token=attachment_token,
                 )
             )

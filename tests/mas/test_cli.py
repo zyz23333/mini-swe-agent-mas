@@ -80,13 +80,12 @@ def test_plain_mini_mas_lazily_creates_root_on_first_effective_command(monkeypat
     assert cli_result.exit_code == 0
     assert cli_result.stdout.index("agent_id: mas-2222222222222222") < cli_result.stdout.index("hello\n")
     assert "lifecycle_state: waiting_for_command" in cli_result.stdout
-    start_root.assert_called_once_with(system_database_url=None)
-    prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222", system_database_url=None)
+    start_root.assert_called_once_with()
+    prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222")
     send_root_command.assert_called_once_with(
         root_agent_id="mas-2222222222222222",
         command="echo hello",
         result_timeout_seconds=60,
-        system_database_url=None,
         attachment_token="att-1111111111111111",
     )
     release_attachment.assert_called_once_with(
@@ -114,7 +113,7 @@ def test_plain_mini_mas_handles_pre_root_status_locally_then_stays_unbound(monke
 
     assert cli_result.exit_code == 0
     assert cli_result.stdout == "Interactive Root Agents\nNo Interactive Root Agents found.\n"
-    discover.assert_called_once_with(system_database_url=None)
+    discover.assert_called_once_with()
     start_root.assert_not_called()
     send_root_command.assert_not_called()
 
@@ -171,13 +170,12 @@ def test_plain_mini_mas_handles_pre_root_status_then_later_creates_root_for_work
     assert cli_result.exit_code == 0
     assert "Interactive Root Agents\nNo Interactive Root Agents found.\n" in cli_result.stdout
     assert "inside-root status\n" in cli_result.stdout
-    discover.assert_called_once_with(system_database_url=None)
-    start_root.assert_called_once_with(system_database_url=None)
+    discover.assert_called_once_with()
+    start_root.assert_called_once_with()
     send_root_command.assert_called_once_with(
         root_agent_id="mas-2222222222222222",
         command="echo hello",
         result_timeout_seconds=60,
-        system_database_url=None,
         attachment_token="att-1111111111111111",
     )
 
@@ -216,13 +214,12 @@ def test_plain_mini_mas_handles_successful_pre_root_resume_without_creating_new_
 
     assert cli_result.exit_code == 0
     assert cli_result.stdout.index("agent_id: mas-2222222222222222") < cli_result.stdout.index("resumed\n")
-    prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222", system_database_url=None)
+    prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222")
     start_root.assert_not_called()
     send_root_command.assert_called_once_with(
         root_agent_id="mas-2222222222222222",
         command="echo resumed",
         result_timeout_seconds=60,
-        system_database_url=None,
         attachment_token="att-1111111111111111",
     )
     release_attachment.assert_called_once_with(
@@ -293,16 +290,15 @@ def test_plain_mini_mas_handles_failed_pre_root_resume_then_stays_unbound(monkey
     assert cli_result.exit_code == 0
     assert "Unknown Root Agent ID: mas-2222222222222222" in cli_result.stdout
     assert "after failed resume\n" in cli_result.stdout
-    start_root.assert_called_once_with(system_database_url=None)
+    start_root.assert_called_once_with()
     assert prepare_resume.call_args_list == [
-        call(root_agent_id="mas-2222222222222222", system_database_url=None),
-        call(root_agent_id="mas-3333333333333333", system_database_url=None),
+        call(root_agent_id="mas-2222222222222222"),
+        call(root_agent_id="mas-3333333333333333"),
     ]
     send_root_command.assert_called_once_with(
         root_agent_id="mas-3333333333333333",
         command="echo after failed resume",
         result_timeout_seconds=60,
-        system_database_url=None,
         attachment_token="att-3333333333333333",
     )
     release_attachment.assert_called_once_with(
@@ -528,6 +524,58 @@ def test_mini_mas_help_presents_first_version_root_cli_surface_without_legacy_co
     assert "cleanup" not in cli_result.stdout.lower()
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--help"],
+        ["status", "--help"],
+        ["spawn", "--help"],
+        ["resume", "--help"],
+    ],
+)
+def test_mini_mas_help_does_not_expose_system_database_configuration(argv):
+    cli_result = CliRunner().invoke(app, argv)
+
+    assert cli_result.exit_code == 0
+    assert "--system-database-url" not in cli_result.stdout
+    assert "system_database_url" not in cli_result.stdout
+    assert "DBOS_SYSTEM_DATABASE_URL" not in cli_result.stdout
+    assert "database URL" not in cli_result.stdout
+    assert "connection string" not in cli_result.stdout
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--system-database-url", "postgres://db"],
+        ["status", "--system-database-url", "postgres://db"],
+        ["spawn", "--system-database-url", "postgres://db", "task A"],
+        ["resume", "mas-2222222222222222", "--system-database-url", "postgres://db"],
+    ],
+)
+def test_mini_mas_does_not_accept_system_database_url_as_user_facing_option(argv, monkeypatch):
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.start_interactive_root_agent_workflow",
+        Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.discover_interactive_root_agents",
+        Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.one_shot_spawn_through_interactive_root",
+        Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.prepare_resume_root_agent",
+        Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
+    )
+
+    cli_result = CliRunner().invoke(app, argv, input="")
+
+    assert cli_result.exit_code != 0
+
+
 def test_mini_mas_status_cli_lists_interactive_root_agents(monkeypatch):
     discover = Mock(
         return_value={
@@ -574,7 +622,7 @@ def test_mini_mas_status_cli_lists_interactive_root_agents(monkeypatch):
     assert "lifecycle_state: failed" in cli_result.stdout
     assert "Child Agent" not in cli_result.stdout
     assert "latest_" not in cli_result.stdout
-    discover.assert_called_once_with(system_database_url=None)
+    discover.assert_called_once_with()
 
 
 def test_mini_mas_status_with_agent_id_is_not_a_supported_external_lookup():
@@ -620,9 +668,7 @@ def test_mini_mas_spawn_creates_root_sends_preserved_spawn_command_and_prints_ch
                             "agent_id": "mas-2222222222222222",
                             "parent_agent_id": "mas-1111111111111111",
                             "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                            "trajectory_artifact_path": (
-                                ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
-                            ),
+                            "trajectory_artifact_path": (".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"),
                         }
                     ],
                 },
@@ -638,15 +684,11 @@ def test_mini_mas_spawn_creates_root_sends_preserved_spawn_command_and_prints_ch
     assert "agent_id: mas-2222222222222222" in cli_result.stdout
     assert "parent_agent_id: mas-1111111111111111" in cli_result.stdout
     assert "agent_artifact_directory: .mini-mas/agents/mas-2222222222222222" in cli_result.stdout
-    assert (
-        "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json"
-        in cli_result.stdout
-    )
+    assert "trajectory_artifact_path: .mini-mas/agents/mas-2222222222222222/trajectory.traj.json" in cli_result.stdout
     assert ".mini-mas/agents/mas-1111111111111111" not in cli_result.stdout
     one_shot_spawn.assert_called_once_with(
         spawn_arguments=["task A"],
         result_timeout_seconds=60,
-        system_database_url=None,
     )
 
 
@@ -699,7 +741,6 @@ def test_mini_mas_multi_spawn_prints_one_root_id_and_each_child(monkeypatch):
     one_shot_spawn.assert_called_once_with(
         spawn_arguments=["task A", "task B"],
         result_timeout_seconds=60,
-        system_database_url=None,
     )
 
 
@@ -766,7 +807,6 @@ def test_mini_mas_spawn_wait_options_are_preserved_as_mas_wait_options(monkeypat
     one_shot_spawn.assert_called_once_with(
         spawn_arguments=["--wait", "--all", "--timeout", "0.5", "task A", "task B"],
         result_timeout_seconds=7,
-        system_database_url=None,
     )
 
 
@@ -807,7 +847,6 @@ def test_mini_mas_spawn_timeout_reports_resumable_root_without_canceling_childre
     one_shot_spawn.assert_called_once_with(
         spawn_arguments=["task A"],
         result_timeout_seconds=0.01,
-        system_database_url=None,
     )
 
 
@@ -870,20 +909,18 @@ def test_mini_mas_resume_prints_metadata_once_and_sends_each_input_line(monkeypa
     assert "lifecycle_state: waiting_for_command" in cli_result.stdout
     assert "hello\n" in cli_result.stdout
     assert "status output\n" in cli_result.stdout
-    prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222", system_database_url=None)
+    prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222")
     assert send_root_command.call_args_list == [
         call(
             root_agent_id="mas-2222222222222222",
             command="echo hello",
             result_timeout_seconds=60,
-            system_database_url=None,
             attachment_token="att-1111111111111111",
         ),
         call(
             root_agent_id="mas-2222222222222222",
             command="mini-mas status",
             result_timeout_seconds=60,
-            system_database_url=None,
             attachment_token="att-1111111111111111",
         ),
     ]
@@ -931,7 +968,6 @@ def test_mini_mas_resume_sends_prefix_free_input_as_ordinary_bash_without_rewrit
         root_agent_id="mas-2222222222222222",
         command="status",
         result_timeout_seconds=60,
-        system_database_url=None,
         attachment_token="att-1111111111111111",
     )
     release_attachment.assert_called_once_with(
