@@ -24,9 +24,17 @@ _Avoid_: Master agent, orchestrator process
 The top-level **Parent Agent** through which the **External MAS CLI** submits user-requested **Agent Interactions**.
 _Avoid_: Operator Agent, CLI Parent Agent, main process, root process
 
+**Interactive Agent**:
+An **Agent** that waits for external or parent-supplied commands instead of autonomously advancing through model calls.
+_Avoid_: Root-only interactive agent, DBOS interactive workflow
+
 **Interactive Root Agent**:
-A **Root Agent** that receives commands from the **External MAS CLI** and remains available as the parent authority context for its direct **Child Agents**.
+A parentless **Interactive Agent** that receives commands from the **External MAS CLI** and remains available as the parent authority context for its direct **Child Agents**.
 _Avoid_: ordinary root agent, terminal superuser, session process
+
+**AI Agent Execution**:
+The explicit runtime capability that lets queued autonomous **Agents** advance through model calls and bash actions.
+_Avoid_: background mode, daemon, worker start, run agent
 
 **Child Agent**:
 An **Agent** started by a **Parent Agent** to work on a delegated task.
@@ -168,6 +176,8 @@ _Avoid_: Special case, bypass
 - Future **Authority Models** may add broader **Authority Scopes** such as subtree-wide, tree-wide, or peer-to-peer governance.
 - A **Root Agent** owns one **Agent Tree** but does not have special tree-wide **Authority** beyond the current **Authority Model**.
 - A **Root Agent** is identified by having no **Parent Agent**, not by an `is_root` flag, a global root, or an index entry.
+- An **Interactive Root Agent** is the parentless **Interactive Agent** entered by the **External MAS CLI**.
+- Future non-root **Interactive Agents** may be introduced without treating interactivity as a Root-only capability.
 - **Agent Artifacts** are scoped to individual **Agents**, not to **Root Agents** or runs.
 - **Agent IDs** use the `mas-<random-hex>` shape and do not encode root identity, parent identity, sibling order, or tree position.
 - **Agent Metadata** records stable Agent identity and artifact fields such as Agent ID, optional Parent Agent ID, Agent Artifact Directory, and Trajectory Artifact path.
@@ -177,6 +187,22 @@ _Avoid_: Special case, bypass
 - Every **External MAS CLI** entrypoint creates or addresses an **Interactive Root Agent**; there is no separate non-interactive Root Agent mode for CLI-submitted work.
 - `mini-mas` without a subcommand opens an **Interactive Root Agent** for terminal-driven commands.
 - `mini-mas` without a subcommand prints the new Root Agent metadata once before entering the command prompt.
+- The MAS MVP has no daemon or always-on worker process by default; MAS Agents execute only while a `mini-mas` process has activated the MAS runtime.
+- Closing the terminal or exiting the last active `mini-mas` process stops local MAS execution but does not close the **Interactive Root Agent** or its **Agent Tree**.
+- Durable MAS state may remain after a `mini-mas` process exits, but no further model calls, bash actions, queue work, or workflow progress happen until another `mini-mas` process activates the MAS runtime.
+- Background execution after terminal exit is deferred beyond the MVP and must be explicit rather than implied by creating a **Root Agent**.
+- The MAS MVP separates interactive command handling from autonomous AI Agent execution by using distinct DBOS queues.
+- The `mini_mas_interactive_workflows` queue is for **Interactive Agents** that wait for external or parent-supplied commands.
+- The `mini_mas_ai_agent_workflows` queue is for **Agents** that autonomously advance through model calls and bash actions.
+- Default `mini-mas` runtime activation listens only to `mini_mas_interactive_workflows`.
+- `mini-mas` does not consume `mini_mas_ai_agent_workflows` unless the user explicitly activates **AI Agent Execution**.
+- `mini-mas agent activate` activates **AI Agent Execution** for the active **MAS Runtime State Store** while the command is running.
+- `mini-mas agent activate` does not create, continue, close, or accept any **Agent** by itself.
+- `mini-mas agent activate` remains active and waits for future queued AI Agent work even when no AI Agents are currently queued.
+- `mini-mas agent activate` starts without a second confirmation prompt because the command itself is explicit execution authorization.
+- `mini-mas agent activate` prints a startup notice that AI Agent work may call models, execute bash actions, and modify the **Shared Workspace**.
+- Stopping `mini-mas agent activate` deactivates **AI Agent Execution** without closing queued, running, or waiting **Agents**.
+- **AI Agent Execution** is an explicit execution authorization because it may call models, execute bash actions, and modify the **Shared Workspace**.
 - `mini-mas spawn "task"` is a one-shot convenience form that creates an **Interactive Root Agent**, submits the initial spawn command through it, and returns the spawned **Child Agent** metadata.
 - One-shot `mini-mas spawn "task A" "task B"` creates one **Interactive Root Agent** and multiple direct **Child Agents** under it.
 - One-shot `mini-mas spawn` supports the same Detached Spawn and Waited Spawn options as workflow-layer `mini-mas spawn`.
@@ -185,6 +211,8 @@ _Avoid_: Special case, bypass
 - External `mini-mas status` lists **Interactive Root Agents** only and does not include Child Agent counts or Child Agent status.
 - External `mini-mas status` lists all parentless **Interactive Root Agents** in the first version rather than filtering to only active or resumable roots.
 - External `mini-mas status` does not include latest commands or history summaries; durable command history is read from **Trajectory Artifacts**.
+- External `mini-mas status` does not report queued AI Agent work or whether **AI Agent Execution** is active.
+- **AI Agent Execution** activation is runtime state shown as a startup notice by `mini-mas agent activate`, not an **Agent** lifecycle state, prompt indicator, or **External MAS CLI** status concern.
 - `mini-mas resume <root-agent-id>` re-enters an existing **Interactive Root Agent**.
 - `mini-mas resume <root-agent-id>` prints the Root Agent metadata once before entering the command prompt.
 - `mini-mas resume <root-agent-id>` is allowed only when the **Interactive Root Agent** is **Waiting for Command** in the first version.
