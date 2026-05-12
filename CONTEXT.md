@@ -108,6 +108,14 @@ _Avoid_: DBOS event log, mini-mas history
 The artifact directory scoped to one **Agent**.
 _Avoid_: Run Directory, root-scoped history directory, global history directory
 
+**MAS Workspace State Directory**:
+The `.mini-mas/` directory that contains workspace-local MAS artifacts and runtime state.
+_Avoid_: global config directory, DBOS data directory, run directory
+
+**MAS Runtime State Store**:
+The workspace-scoped durable store that backs MAS workflow, event, queue, and Root discovery state.
+_Avoid_: system database, user database, agent artifact store, global history database
+
 **Detached Spawn**:
 A **MAS Command** that starts one or more **Child Agents** from repeated task arguments and immediately returns their identifiers.
 _Avoid_: Background subprocess, fire-and-forget shell
@@ -212,6 +220,13 @@ _Avoid_: Special case, bypass
 - Explicit **Agent IDs** in `status <agent-id>`, `wait <agent-id>`, `continue <agent-id>`, and `close <agent-id>` are target identifiers, not scope overrides.
 - `mini-mas wait`, `mini-mas continue`, and `mini-mas close` respect **Delegated Non-Transitive Authority** in the current MVP.
 - Full history search is performed with ordinary bash tools against **Trajectory Artifacts**, not with dedicated `mini-mas` history, logs, or grep commands.
+- A **MAS Runtime State Store** is scoped to one **Shared Workspace** by default, not to the whole user account.
+- The default **MAS Workspace State Directory** is `.mini-mas/` in the active **Shared Workspace**.
+- The default **MAS Runtime State Store** is `.mini-mas/runtime/mini_mas_dbos.sqlite`, separate from **Agent Artifact Directories** under `.mini-mas/agents/`.
+- The default **MAS Runtime State Store** is resolved relative to the current working directory; ordinary project-local MAS usage does not provide a separate state-root configuration.
+- Runtime creation of the **MAS Workspace State Directory** does not modify user project version-control ignore files.
+- `mini-mas status` discovers **Interactive Root Agents** from the active **MAS Runtime State Store**.
+- Separate **Shared Workspaces** have separate default **MAS Runtime State Stores** and do not discover each other's **Interactive Root Agents** by default.
 - `mini-mas spawn "task A" "task B"` starts one **Child Agent** per repeated task argument.
 - `mini-mas spawn` defaults to **Detached Spawn**.
 - `mini-mas spawn --wait` requests **Waited Spawn**.
@@ -340,6 +355,18 @@ _Avoid_: Special case, bypass
 > **Dev:** "Does the Root Agent ID determine where child artifacts are stored?"
 > **Domain expert:** "No. Root identifies the CLI entry Agent; each Agent owns its own artifact directory."
 
+> **Dev:** "If I run `mini-mas status` in another repository, should I see Roots from this one?"
+> **Domain expert:** "No. By default each Shared Workspace has its own MAS Runtime State Store, so Root discovery is workspace-local unless the runtime is explicitly pointed at a shared external store."
+
+> **Dev:** "Is the DBOS SQLite file a repo-root file?"
+> **Domain expert:** "No. The default MAS Runtime State Store is `.mini-mas/runtime/mini_mas_dbos.sqlite`, separate from Agent Artifact Directories."
+
+> **Dev:** "Can I point normal `mini-mas` at a different local state root?"
+> **Domain expert:** "No. Ordinary project-local MAS usage resolves the MAS Workspace State Directory from the current working directory."
+
+> **Dev:** "Does `mini-mas` edit my project's `.gitignore` when it creates `.mini-mas/`?"
+> **Domain expert:** "No. Version-control ignore policy belongs to the user project; MAS only creates its workspace state directory."
+
 ## Flagged Ambiguities
 
 - "Agent" can mean both a MAS participant and the Python agent implementation class. Resolved: use **Agent** for the MAS participant, and say agent class, `DefaultAgent`, or agent implementation for Python code objects.
@@ -353,3 +380,4 @@ _Avoid_: Special case, bypass
 - "external CLI" can sound like operator superuser access. Resolved: naked external/operator query and control paths are not maintained in the current design; future terminal control should enter through an **Interactive Root Agent**.
 - "root" can sound like artifact scope or tree-wide authority. Resolved: **Root Agent** is the top-level **Parent Agent** for CLI-submitted work, while artifacts are scoped per **Agent** and authority remains governed by the **Authority Model**.
 - "Agent metadata" can sound like a place for query flags. Resolved: root discovery uses workflow parent structure and workflow type; **Agent Metadata** stays limited to identity and artifact description.
+- "system database" can sound like a user-facing configuration concept or a global mini-swe-agent database. Resolved: use **MAS Runtime State Store** for the MAS durable workflow/event/queue store, and keep it workspace-scoped by default.

@@ -1,6 +1,6 @@
 # Remove user-facing system database URL option
 
-Status: needs-triage
+Status: ready-for-agent
 
 ## Parent
 
@@ -9,19 +9,20 @@ Status: needs-triage
 
 ## What to build
 
-Remove the user-facing `--system-database-url` option from the External MAS CLI surface. DBOS system database configuration should come from environment/runtime configuration rather than ordinary command-line arguments, so users do not put sensitive database connection strings into shell history, process listings, or routine CLI workflows.
+Remove the user-facing `--system-database-url` option from the External MAS CLI surface and stop treating DBOS system database URLs as a MAS user configuration surface. Ordinary project-local `mini-mas` usage should use the default workspace-local **MAS Runtime State Store** at `.mini-mas/runtime/mini_mas_dbos.sqlite`.
 
-This slice should preserve the existing runtime ability to read `DBOS_SYSTEM_DATABASE_URL` from the process environment. It should not add a new configuration command, config file format, or secret manager integration.
+This slice should not add a new configuration command, config file format, environment-variable contract, secret manager integration, or alternate database configuration surface.
 
 ## Acceptance criteria
 
 - [ ] `mini-mas --help` does not expose `--system-database-url`.
 - [ ] `mini-mas status --help`, `mini-mas spawn --help`, and `mini-mas resume --help` do not expose `--system-database-url`.
 - [ ] Plain `mini-mas`, external `status`, external `spawn`, and external `resume` no longer accept `--system-database-url` as a user-facing option.
-- [ ] DBOS runtime configuration still uses `DBOS_SYSTEM_DATABASE_URL` from the process environment when no explicit internal runtime override is provided.
-- [ ] Runtime-level tests may continue to pass explicit `system_database_url` into internal helpers where useful, but CLI tests do not treat database URL argv passthrough as a user-facing contract.
-- [ ] CLI help and error text do not recommend passing database connection strings as command-line arguments.
-- [ ] No new `mini-mas config`, config file, secret manager, or alternate database configuration surface is added in this slice.
+- [ ] DBOS runtime configuration uses `.mini-mas/runtime/mini_mas_dbos.sqlite` as the default MAS Runtime State Store.
+- [ ] CLI help, error text, and ordinary usage documentation do not mention `system_database_url`, `DBOS_SYSTEM_DATABASE_URL`, or database connection strings.
+- [ ] Runtime-level tests no longer pass explicit `system_database_url` into internal helpers; tests should isolate runtime state by running in temporary working directories.
+- [ ] No new `mini-mas config`, config file, environment-variable contract, secret manager, or alternate database configuration surface is added in this slice.
+- [ ] Runtime creation of `.mini-mas/` does not create or edit `.gitignore` files in user projects.
 
 ## Blocked by
 
@@ -36,36 +37,40 @@ None - can start immediately
 **Category:** enhancement
 **Summary:** Remove the DBOS system database URL option from the user-facing External MAS CLI.
 
+Design resolved in `CONTEXT.md` and `docs/adr/0008-scope-mas-runtime-state-to-workspace.md`.
+
 **Current behavior:**
 The External MAS CLI currently exposes a `--system-database-url` option on the callback and subcommands. That option was introduced during implementation but is not part of the Interactive Root Agent CLI PRD/DESIGN surface. It allows users to pass DBOS system database connection strings through argv, which can leak sensitive credentials through shell history, process listings, logs, terminal recordings, or copied commands.
 
-The runtime already supports environment-based configuration through `DBOS_SYSTEM_DATABASE_URL`.
-
 **Desired behavior:**
-The External MAS CLI should not expose `--system-database-url` as a user-facing option. Users should configure the DBOS system database through environment/runtime configuration, with `DBOS_SYSTEM_DATABASE_URL` remaining the supported default path.
+The External MAS CLI should not expose `--system-database-url` as a user-facing option. Ordinary project-local `mini-mas` usage should use the default workspace-local MAS Runtime State Store at `.mini-mas/runtime/mini_mas_dbos.sqlite`. Users should not need to configure or know about DBOS system database URLs for the ordinary project workflow.
 
-The removal should apply consistently to plain `mini-mas`, `mini-mas status`, `mini-mas spawn`, and `mini-mas resume`. Help text should not advertise or recommend command-line database URLs. Existing internal runtime helpers may keep explicit `system_database_url` parameters for tests or non-CLI integration if they remain useful, but CLI-level tests should no longer assert argv passthrough for database URLs.
+The removal should apply consistently to plain `mini-mas`, `mini-mas status`, `mini-mas spawn`, and `mini-mas resume`. Help text should not advertise or recommend database URLs, environment variables, or connection strings. Internal runtime helpers should stop accepting explicit `system_database_url` parameters; tests should isolate state by running in temporary working directories, not by passing database URLs.
 
-This issue should not design or add a replacement configuration mechanism. A future `mini-mas config` command, project config file, user config file, or secret manager integration would be a separate design.
+This issue should not design or add a replacement configuration mechanism. A future deployment-oriented external database mode, `mini-mas config` command, project config file, user config file, or secret manager integration would be a separate design.
+
+This issue also should not add runtime `.gitignore` management. The mini-swe-agent development repository may ignore `.mini-mas/`, but installed `mini-mas` should not modify user project version-control policy.
 
 **Key interfaces:**
 - External MAS CLI callback and commands - should remove user-facing database URL options from Typer signatures and help output.
-- Runtime DBOS configuration helper - should continue to read `DBOS_SYSTEM_DATABASE_URL` from the process environment.
+- Runtime DBOS configuration helper - should construct the default workspace-local SQLite MAS Runtime State Store URL for `.mini-mas/runtime/mini_mas_dbos.sqlite`.
 - CLI tests - should assert the option is absent from help and not part of command behavior.
-- Runtime tests - may keep direct internal helper overrides where needed, because this issue targets the user-facing CLI surface.
+- Runtime tests - should use temporary working directories for isolation instead of explicit database URL parameters.
 
 **Acceptance criteria:**
 - [ ] `mini-mas --help` does not expose `--system-database-url`.
 - [ ] `mini-mas status --help`, `mini-mas spawn --help`, and `mini-mas resume --help` do not expose `--system-database-url`.
 - [ ] Plain `mini-mas`, external `status`, external `spawn`, and external `resume` no longer accept `--system-database-url` as a user-facing option.
-- [ ] DBOS runtime configuration still uses `DBOS_SYSTEM_DATABASE_URL` from the process environment when no explicit internal runtime override is provided.
-- [ ] Runtime-level tests may continue to pass explicit `system_database_url` into internal helpers where useful, but CLI tests do not treat database URL argv passthrough as a user-facing contract.
-- [ ] CLI help and error text do not recommend passing database connection strings as command-line arguments.
-- [ ] No new `mini-mas config`, config file, secret manager, or alternate database configuration surface is added in this slice.
+- [ ] DBOS runtime configuration uses `.mini-mas/runtime/mini_mas_dbos.sqlite` as the default MAS Runtime State Store.
+- [ ] CLI help, error text, and ordinary usage documentation do not mention `system_database_url`, `DBOS_SYSTEM_DATABASE_URL`, or database connection strings.
+- [ ] Runtime-level tests no longer pass explicit `system_database_url` into internal helpers; tests should isolate runtime state by running in temporary working directories.
+- [ ] No new `mini-mas config`, config file, environment-variable contract, secret manager, or alternate database configuration surface is added in this slice.
+- [ ] Runtime creation of `.mini-mas/` does not create or edit `.gitignore` files in user projects.
 
 **Out of scope:**
 - Lazy Root creation for plain `mini-mas`.
 - A new `mini-mas config` command.
 - A project-level or user-level MAS config file.
+- A deployment-oriented external MAS Runtime State Store mode.
 - Secret manager integration.
 - Changing DBOS itself or the DBOS environment variable contract.
