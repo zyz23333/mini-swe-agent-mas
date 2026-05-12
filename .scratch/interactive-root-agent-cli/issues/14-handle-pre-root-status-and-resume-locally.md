@@ -1,6 +1,6 @@
 # Handle pre-root status and resume locally in plain terminal
 
-Status: needs-triage
+Status: ready-for-agent
 
 ## Parent
 
