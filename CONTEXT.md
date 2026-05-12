@@ -84,6 +84,10 @@ _Avoid_: TTY agent, long-running worker
 A parent-to-child message that asks a **Remote Interactive Agent** to continue working from its existing trajectory.
 _Avoid_: New task command, resume event
 
+**Recovery Continuation Signal**:
+A parent-to-child message that explicitly authorizes an **Agent** in **Recovery Required** to leave the recovery block with recovery instructions.
+_Avoid_: Continuation Signal, retry command, mark completed
+
 **Root Command Signal**:
 An external-to-Root message carrying one bash-shaped command for an **Interactive Root Agent** to execute.
 _Avoid_: Parent direction signal, direct CLI execution
@@ -103,6 +107,10 @@ _Avoid_: Full telemetry, trajectory event
 **Waiting for Command**:
 An **Interactive Root Agent** lifecycle state meaning the Agent is idle and available for future **Resume**.
 _Avoid_: Closed, finished, waiting for parent
+
+**Recovery Required**:
+An **Agent** lifecycle state meaning automatic advancement is blocked because MAS detected an uncertain external side effect during recovery.
+_Avoid_: Waiting for Parent, Failed, retrying
 
 **First Observable Event**:
 A lightweight DBOS event set by a **Child Agent** when it first reaches a parent-actionable state.
@@ -234,8 +242,11 @@ _Avoid_: Special case, bypass
 - Ordinary bash actions entered in an **Interactive Root Agent** are recorded in that Root Agent's **Trajectory Artifact**.
 - Interactive Root terminal history is not stored in a separate prompt-history file and does not reuse the existing `mini` prompt history; the Root Agent's **Trajectory Artifact** is the durable command history.
 - A **Close Signal** ends a **Remote Interactive Agent** without judging whether the child output was accepted or rejected.
-- A **Child Status Event** reports coarse lifecycle states such as `running`, `waiting_for_parent`, `closed`, `failed`, and `limits_exceeded`.
-- A **First Observable Event** is set when a **Child Agent** first reaches `waiting_for_parent`, `failed`, or `limits_exceeded`.
+- A **Child Status Event** reports coarse lifecycle states such as `running`, `waiting_for_parent`, `recovery_required`, `closed`, `failed`, and `limits_exceeded`.
+- A **First Observable Event** is set when a **Child Agent** first reaches `waiting_for_parent`, `recovery_required`, `failed`, or `limits_exceeded`.
+- **Recovery Required** is not ordinary **Waiting for Parent**; it blocks automatic replay of an uncertain external side effect and requires an explicit recovery decision.
+- Ordinary `mini-mas continue` sends a **Continuation Signal** only to a direct **Child Agent** in `waiting_for_parent`.
+- `mini-mas continue --recovery <agent-id> "message"` sends a **Recovery Continuation Signal** only to a direct **Child Agent** in `recovery_required`.
 - The MVP exposes lightweight child events such as `status`, `latest_submission`, and `latest_error`; full trajectory data remains outside DBOS events.
 - **Trajectory Artifacts** live under **Agent Artifact Directories** keyed by **Agent ID**.
 - `mini-mas status` and `mini-mas wait` return the exact **Trajectory Artifact** path and **Agent Artifact Directory** for full history inspection.
