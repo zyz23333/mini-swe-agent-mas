@@ -19,12 +19,12 @@ The PRD describes the product behavior. This design describes the stable concept
 
 The External MAS CLI becomes an entrypoint into durable Interactive Root Agents.
 
-- `mini-mas` enters an unbound command terminal and creates a new Interactive Root Agent only when the first effective command is entered.
+- `mini-mas` enters an unbound command terminal and creates a new Interactive Root Agent only when the first non-local work command is entered.
 - `mini-mas spawn ...` creates a new Interactive Root Agent, submits one `mini-mas spawn ...` command through it, prints Child Agent metadata, then detaches.
 - `mini-mas status` lists existing Interactive Root Agents for discovery.
 - `mini-mas resume <root-agent-id>` re-enters an existing Interactive Root Agent only when it is Waiting for Command.
 
-The CLI process is not an Agent and does not perform MAS-governed actions directly. It only starts or discovers Root Agent workflows, sends Root Command Signals, waits for Root Command Results, and renders output.
+The CLI process is not an Agent and does not perform MAS-governed actions directly. It only starts or discovers Root Agent workflows, attaches to existing Root Agent workflows, sends Root Command Signals, waits for Root Command Results, and renders output.
 
 Root identity is structural:
 
@@ -112,7 +112,7 @@ These invariants should be enforced by tests and by small validation helpers.
 
 | External command | Behavior | Governance path | Root handling |
 | --- | --- | --- | --- |
-| `mini-mas` | Enter an unbound terminal; create and attach to a new Interactive Root Agent when the first effective command is entered | Effective commands go through Root Command Signal after lazy Root creation | No Root exists before the first effective command; new Root remains resumable after detach |
+| `mini-mas` | Enter an unbound terminal; run pre-root local `mini-mas status` and `mini-mas resume <root-agent-id>` with the same behavior as top-level external commands; create and attach to a new Interactive Root Agent when the first non-local work command is entered | Pre-root local status/resume stay outside MAS governance; other work commands go through Root Command Signal after lazy Root creation | No Root exists before work is submitted; successful pre-root resume attaches to an existing Root; new Root remains resumable after detach |
 | `mini-mas spawn ...` | Create a new Interactive Root Agent, submit initial spawn command, print Child metadata | Root executes `mini-mas spawn ...` internally | New Root remains resumable after command returns |
 | `mini-mas status` | List Interactive Root Agents only | External discovery; not a MAS governance command | Does not attach |
 | `mini-mas resume <root-agent-id>` | Enter terminal for an existing Root | User input goes through Root Command Signal | Allowed only when Root is Waiting for Command |
@@ -146,9 +146,11 @@ Before a Root Agent exists:
 - Empty and whitespace-only input is ignored.
 - `exit` and `quit` are local terminal control commands and exit without creating a Root Agent.
 - EOF exits without creating a Root Agent.
+- Standalone `mini-mas status` reuses the same External MAS CLI Root discovery behavior as top-level `mini-mas status`, prints the discovery output, does not create or attach to a Root Agent, and keeps the local terminal unbound for the next input.
+- Standalone `mini-mas resume <root-agent-id>` reuses the same External MAS CLI resume behavior as top-level `mini-mas resume <root-agent-id>`, does not create a new Root Agent, and either attaches to the existing Root on success or prints the same failure output and keeps the local terminal unbound.
 - The exact prompt format is deferred.
 
-The first effective command creates a new Interactive Root Agent, waits until it publishes `waiting_for_command`, claims the Root attachment, prints the Root metadata banner, sends the first command as a Root Command Signal, prints the Root Command Result, and keeps the terminal attached for later input.
+The first non-local work command creates a new Interactive Root Agent, waits until it publishes `waiting_for_command`, claims the Root attachment, prints the Root metadata banner, sends that command as a Root Command Signal, prints the Root Command Result, and keeps the terminal attached for later input.
 
 Expected high-level output after lazy Root creation and before the first command result:
 
@@ -166,6 +168,7 @@ After lazy Root creation, the terminal accepts bash-shaped input and behaves lik
 Terminal input rules:
 
 - A full standalone `mini-mas ...` command is handled as a MAS Command.
+- Pre-root local `mini-mas status` and `mini-mas resume <root-agent-id>` handling applies only while the plain terminal is unbound. After the terminal is attached to a Root, those inputs are sent to the attached Root like any other command.
 - Prefix-free shorthand such as `status` is not added in v1.
 - Ordinary bash commands are executed by the Root Agent and recorded in its Trajectory Artifact.
 - Composed commands containing `mini-mas`, such as `mini-mas status && echo done`, remain invalid for MAS interception.
@@ -647,7 +650,7 @@ In v1:
 
 - One Interactive Root Agent supports at most one active attachment.
 - Plain `mini-mas` has no attachment before lazy Root creation.
-- After the first effective command creates a Root, plain `mini-mas` claims the Root attachment and becomes its first terminal attachment.
+- After the first non-local work command creates a Root, plain `mini-mas` claims the Root attachment and becomes its first terminal attachment.
 - `mini-mas resume <root-agent-id>` creates a terminal attachment to an existing Root.
 - `mini-mas spawn ...` creates a one-shot attachment to its new Root.
 - The attachment ends when the terminal exits or the one-shot command returns.
@@ -700,11 +703,13 @@ User
 External CLI
   -> User: terminal input loop without Root creation
 User
-  -> External CLI: enters empty input, whitespace-only input, exit, quit, or EOF
+  -> External CLI: enters empty input, whitespace-only input, exit, quit, EOF, standalone mini-mas status, or standalone mini-mas resume <root-agent-id>
 External CLI
-  -> User: ignore empty/whitespace input, or exit locally for exit/quit/EOF without creating a Root
+  -> User: ignore empty/whitespace input, exit locally for exit/quit/EOF, print Root discovery, or attempt resume without creating a Root
+External CLI
+  -> User: if pre-root resume succeeds, continue as an attached terminal for the existing Root
 User
-  -> External CLI: enters first effective command
+  -> External CLI: enters first non-local work command
 External CLI
   -> DBOS: start interactive_root_agent_workflow with workflow_id mas-...
 Interactive Root Agent
@@ -736,6 +741,44 @@ External CLI
 ```
 
 After attach, command execution is identical to plain `mini-mas` after lazy Root creation.
+
+### Flow: Pre-root `mini-mas status` in Plain Terminal
+
+```text
+User
+  -> External CLI: mini-mas
+External CLI
+  -> User: terminal input loop without Root creation
+User
+  -> External CLI: mini-mas status
+External CLI
+  -> DBOS: list workflows with no parent
+  -> External CLI: filter Interactive Root workflow type/name
+  -> DBOS event: read each Root status snapshot
+  -> User: print Root discovery list
+  -> User: continue unbound terminal input loop
+```
+
+No Root Agent is created, no attachment is claimed, and no Root Command Signal is sent.
+
+### Flow: Pre-root `mini-mas resume <root-agent-id>` in Plain Terminal
+
+```text
+User
+  -> External CLI: mini-mas
+External CLI
+  -> User: terminal input loop without Root creation
+User
+  -> External CLI: mini-mas resume <root-agent-id>
+External CLI
+  -> DBOS: get workflow metadata for root-agent-id
+  -> DBOS: confirm no parent and Interactive Root workflow type
+  -> DBOS event: read latest Root lifecycle
+  -> Root attachment gate: claim attachment if waiting_for_command
+  -> User: print Root metadata banner or the same resume failure output as top-level resume
+```
+
+On success, command execution is identical to top-level `mini-mas resume <root-agent-id>`. On failure, the plain terminal remains unbound and continues waiting for input.
 
 ### Flow: External `mini-mas status`
 
@@ -1068,7 +1111,7 @@ The existing issues are already ordered as tracer-bullet slices. This is the rec
 8. One-shot waited spawn options.
 9. Single active Root attachment enforcement.
 10. Retire run-first external CLI behavior.
-11. Lazy plain terminal Root creation on first effective command.
+11. Lazy plain terminal Root creation on first non-local work command.
 
 The sequence is important because later CLI behavior depends on the Root command transport and artifact identity changes.
 
@@ -1092,9 +1135,14 @@ Cover:
 
 Cover:
 
-- Plain `mini-mas` does not create a parentless Interactive Root Agent before the first effective command.
-- Empty input, whitespace-only input, `exit`, `quit`, and EOF before the first effective command do not create a Root Agent.
-- The first effective plain-terminal command creates a parentless Interactive Root Agent.
+- Plain `mini-mas` does not create a parentless Interactive Root Agent before the first non-local work command.
+- Empty input, whitespace-only input, `exit`, `quit`, and EOF before Root creation do not create a Root Agent.
+- Pre-root `mini-mas status` in the unbound plain terminal reuses external Root discovery without creating a Root Agent, claiming an attachment, or sending a Root Command Signal.
+- Pre-root `mini-mas status` prints discovery output and keeps the plain terminal unbound for later input.
+- Pre-root `mini-mas resume <root-agent-id>` in the unbound plain terminal reuses top-level resume behavior without creating a new Root Agent.
+- Successful pre-root `mini-mas resume <root-agent-id>` attaches to the existing Root and then behaves like top-level resume.
+- Failed pre-root `mini-mas resume <root-agent-id>` prints the same failure output as top-level resume and keeps the plain terminal unbound for later input.
+- The first non-local work command in the plain terminal creates a parentless Interactive Root Agent.
 - The lazy-created plain terminal prints Root metadata after Root creation and before the first command result.
 - The lazy-created plain terminal claims the Root attachment and reuses resume-like attachment behavior for later commands.
 - Lazy Root creation failure exits visibly instead of leaving the terminal unbound.
