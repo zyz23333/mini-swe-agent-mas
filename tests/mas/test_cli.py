@@ -1,3 +1,5 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, call
 
 import pytest
@@ -7,11 +9,61 @@ from minisweagent.mas.cli import app
 from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 
 
+class FakeMasRuntimeSession:
+    def __init__(
+        self,
+        *,
+        start_root=None,
+        prepare_resume=None,
+        send_root_command=None,
+    ):
+        self.start_root_mock = start_root or Mock(side_effect=AssertionError("unexpected Root Agent startup"))
+        self.prepare_resume_mock = prepare_resume or Mock(side_effect=AssertionError("unexpected resume preparation"))
+        self.send_root_command_mock = send_root_command or Mock(side_effect=AssertionError("unexpected Root command"))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return None
+
+    async def start_interactive_root_agent_workflow(self, **kwargs):
+        return self.start_root_mock(**kwargs)
+
+    async def prepare_resume_root_agent(self, **kwargs):
+        return self.prepare_resume_mock(**kwargs)
+
+    async def send_root_command(self, **kwargs):
+        return self.send_root_command_mock(**kwargs)
+
+    async def one_shot_spawn_through_interactive_root(self, *, spawn_arguments, result_timeout_seconds=60):
+        root_result = self.start_root_mock()
+        root_agent_id = str(root_result["agent_id"])
+        command = " ".join(["mini-mas", "spawn", *spawn_arguments])
+        result_event = self.send_root_command_mock(
+            root_agent_id=root_agent_id,
+            command=command,
+            result_timeout_seconds=result_timeout_seconds,
+        )
+        return {
+            "kind": "one_shot_spawn",
+            "root_agent_id": root_agent_id,
+            "command": command,
+            "result": result_event["result"],
+            "returncode": result_event["result"].get("returncode", 0),
+        }
+
+
+def patch_runtime_session(monkeypatch, **kwargs):
+    session = FakeMasRuntimeSession(**kwargs)
+    monkeypatch.setattr("minisweagent.mas.cli.MasRuntimeSession", Mock(return_value=session))
+    return session
+
+
 def test_plain_mini_mas_exits_on_eof_without_creating_interactive_root(monkeypatch):
     start_root = Mock(side_effect=AssertionError("EOF before effective input must not start a Root Agent"))
     send_root_command = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, start_root=start_root, send_root_command=send_root_command)
 
     cli_result = CliRunner().invoke(app, [], input="")
 
@@ -26,8 +78,7 @@ def test_plain_mini_mas_ignores_empty_input_then_exits_locally_before_root_creat
     start_root = Mock(side_effect=AssertionError("local pre-root exit must not start a Root Agent"))
     send_root_command = Mock()
     release_attachment = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, start_root=start_root, send_root_command=send_root_command)
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
 
     cli_result = CliRunner().invoke(app, [], input=f"\n   \n{local_exit}\n")
@@ -61,17 +112,29 @@ def test_plain_mini_mas_lazily_creates_root_on_first_effective_command(monkeypat
         }
     )
     send_root_command = Mock(
-        return_value={
-            "kind": "root_command_result",
-            "command_id": "cmd-1111111111111111",
-            "root_agent_id": "mas-2222222222222222",
-            "command": "echo hello",
-            "result": {"output": "hello\n", "returncode": 0, "exception_info": "", "extra": {}},
-        }
+        side_effect=[
+            {
+                "kind": "root_command_result",
+                "command_id": "cmd-1111111111111111",
+                "root_agent_id": "mas-2222222222222222",
+                "command": "echo hello",
+                "result": {"output": "hello\n", "returncode": 0, "exception_info": "", "extra": {}},
+            },
+            {
+                "kind": "root_command_result",
+                "command_id": "cmd-2222222222222222",
+                "root_agent_id": "mas-2222222222222222",
+                "command": "mini-mas spawn test",
+                "result": {"output": "Detached spawn started\n", "returncode": 0, "exception_info": "", "extra": {}},
+            },
+        ]
     )
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(
+        monkeypatch,
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     release_attachment = Mock()
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
@@ -106,9 +169,11 @@ def test_plain_mini_mas_handles_pre_root_status_locally_then_stays_unbound(monke
         }
     )
     send_root_command = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.discover_interactive_root_agents", discover)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, start_root=start_root, send_root_command=send_root_command)
+    async def discover_async():
+        return discover()
+
+    monkeypatch.setattr("minisweagent.mas.cli.discover_interactive_root_agents_async", discover_async)
 
     cli_result = CliRunner().invoke(app, [], input="  mini-mas status  \nquit\n")
 
@@ -136,9 +201,7 @@ def test_plain_mini_mas_handles_pre_root_status_then_later_creates_root_for_work
             "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
         }
     )
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(
+    prepare_resume = Mock(
             return_value={
                 "kind": "resume_ready",
                 "root_agent_id": "mas-2222222222222222",
@@ -149,7 +212,6 @@ def test_plain_mini_mas_handles_pre_root_status_then_later_creates_root_for_work
                 "attachment_token": "att-1111111111111111",
                 "returncode": 0,
             }
-        ),
     )
     send_root_command = Mock(
         return_value={
@@ -160,9 +222,16 @@ def test_plain_mini_mas_handles_pre_root_status_then_later_creates_root_for_work
             "result": {"output": "inside-root status\n", "returncode": 0, "exception_info": "", "extra": {}},
         }
     )
-    monkeypatch.setattr("minisweagent.mas.cli.discover_interactive_root_agents", discover)
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    async def discover_async():
+        return discover()
+
+    monkeypatch.setattr("minisweagent.mas.cli.discover_interactive_root_agents_async", discover_async)
+    patch_runtime_session(
+        monkeypatch,
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", Mock())
 
@@ -205,9 +274,12 @@ def test_plain_mini_mas_handles_successful_pre_root_resume_without_creating_new_
         }
     )
     release_attachment = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(
+        monkeypatch,
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
 
@@ -276,9 +348,12 @@ def test_plain_mini_mas_handles_failed_pre_root_resume_then_stays_unbound(monkey
         }
     )
     release_attachment = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(
+        monkeypatch,
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
 
@@ -309,31 +384,25 @@ def test_plain_mini_mas_handles_failed_pre_root_resume_then_stays_unbound(monkey
 
 
 def test_plain_mini_mas_routes_status_and_resume_through_root_after_lazy_attachment(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.start_interactive_root_agent_workflow",
-        Mock(
-            return_value={
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-            }
-        ),
+    start_root = Mock(
+        return_value={
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+        }
     )
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(
-            return_value={
-                "kind": "resume_ready",
-                "root_agent_id": "mas-2222222222222222",
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-                "attachment_token": "att-1111111111111111",
-                "returncode": 0,
-            }
-        ),
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "attachment_token": "att-1111111111111111",
+            "returncode": 0,
+        }
     )
     discover = Mock(side_effect=AssertionError("attached status must not run local discovery"))
     send_root_command = Mock(
@@ -361,8 +430,16 @@ def test_plain_mini_mas_routes_status_and_resume_through_root_after_lazy_attachm
             },
         ]
     )
-    monkeypatch.setattr("minisweagent.mas.cli.discover_interactive_root_agents", discover)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    async def discover_async():
+        return discover()
+
+    monkeypatch.setattr("minisweagent.mas.cli.discover_interactive_root_agents_async", discover_async)
+    patch_runtime_session(
+        monkeypatch,
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", Mock())
 
@@ -384,43 +461,44 @@ def test_plain_mini_mas_routes_status_and_resume_through_root_after_lazy_attachm
 
 
 def test_plain_mini_mas_detaches_locally_on_exit_after_lazy_root_without_sending_exit(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.start_interactive_root_agent_workflow",
-        Mock(
-            return_value={
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-            }
-        ),
-    )
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(
-            return_value={
-                "kind": "resume_ready",
-                "root_agent_id": "mas-2222222222222222",
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-                "attachment_token": "att-1111111111111111",
-                "returncode": 0,
-            }
-        ),
-    )
-    send_root_command = Mock(
+    start_root = Mock(
         return_value={
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+        }
+    )
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "attachment_token": "att-1111111111111111",
+            "returncode": 0,
+        }
+    )
+    def send_root_command_result(**kwargs):
+        output = "Detached spawn started\n" if kwargs["command"].startswith("mini-mas spawn") else "hello\n"
+        return {
             "kind": "root_command_result",
             "command_id": "cmd-1111111111111111",
             "root_agent_id": "mas-2222222222222222",
-            "command": "echo hello",
-            "result": {"output": "hello\n", "returncode": 0, "exception_info": "", "extra": {}},
+            "command": kwargs["command"],
+            "result": {"output": output, "returncode": 0, "exception_info": "", "extra": {}},
         }
-    )
+
+    send_root_command = Mock(side_effect=send_root_command_result)
     release_attachment = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(
+        monkeypatch,
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
 
@@ -436,31 +514,25 @@ def test_plain_mini_mas_detaches_locally_on_exit_after_lazy_root_without_sending
 
 
 def test_plain_mini_mas_keeps_attached_after_nonzero_result_and_exits_with_last_returncode(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.start_interactive_root_agent_workflow",
-        Mock(
-            return_value={
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-            }
-        ),
+    start_root = Mock(
+        return_value={
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+        }
     )
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(
-            return_value={
-                "kind": "resume_ready",
-                "root_agent_id": "mas-2222222222222222",
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-                "attachment_token": "att-1111111111111111",
-                "returncode": 0,
-            }
-        ),
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "attachment_token": "att-1111111111111111",
+            "returncode": 0,
+        }
     )
     send_root_command = Mock(
         side_effect=[
@@ -480,7 +552,12 @@ def test_plain_mini_mas_keeps_attached_after_nonzero_result_and_exits_with_last_
             },
         ]
     )
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(
+        monkeypatch,
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", Mock())
 
@@ -495,8 +572,7 @@ def test_plain_mini_mas_keeps_attached_after_nonzero_result_and_exits_with_last_
 def test_plain_mini_mas_lazy_root_creation_failure_exits_visibly(monkeypatch):
     start_root = Mock(side_effect=RuntimeError("database unavailable"))
     send_root_command = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, start_root=start_root, send_root_command=send_root_command)
 
     cli_result = CliRunner().invoke(app, [], input="echo hello\n")
 
@@ -504,6 +580,83 @@ def test_plain_mini_mas_lazy_root_creation_failure_exits_visibly(monkeypatch):
     assert "Failed to create Interactive Root Agent" in cli_result.stdout
     assert "database unavailable" in cli_result.stdout
     send_root_command.assert_not_called()
+
+
+def test_plain_mini_mas_then_spawn_do_not_close_mas_default_executor(monkeypatch):
+    class RecordingExecutor(ThreadPoolExecutor):
+        def __init__(self):
+            super().__init__(max_workers=1)
+            self.shutdown_calls = 0
+
+        def shutdown(self, *args, **kwargs):
+            self.shutdown_calls += 1
+            return super().shutdown(*args, **kwargs)
+
+    executor = RecordingExecutor()
+
+    start_root = Mock(
+        return_value={
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+        }
+    )
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "attachment_token": "att-1111111111111111",
+            "returncode": 0,
+        }
+    )
+    def send_root_command_result(**kwargs):
+        output = "Detached spawn started\n" if kwargs["command"].startswith("mini-mas spawn") else "hello\n"
+        return {
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": "mas-2222222222222222",
+            "command": kwargs["command"],
+            "result": {"output": output, "returncode": 0, "exception_info": "", "extra": {}},
+        }
+
+    send_root_command = Mock(side_effect=send_root_command_result)
+
+    class ExecutorConfiguringSession(FakeMasRuntimeSession):
+        async def __aenter__(self):
+            asyncio.get_running_loop().set_default_executor(executor)
+            return self
+
+    session = ExecutorConfiguringSession(
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.MasRuntimeSession", Mock(return_value=session))
+    monkeypatch.setattr("minisweagent.mas.runtime.MasRuntimeSession", Mock(return_value=session))
+    monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
+    monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", Mock())
+
+    plain_result = CliRunner().invoke(app, [], input="echo hello\n")
+    spawn_cli_result = CliRunner().invoke(app, ["spawn", "test"])
+    shutdown_calls_before_cleanup = executor.shutdown_calls
+
+    try:
+        assert plain_result.exit_code == 0
+        assert "hello\n" in plain_result.stdout
+        assert spawn_cli_result.exit_code == 0
+        assert "Detached spawn started\n" in spawn_cli_result.stdout
+        assert shutdown_calls_before_cleanup == 0
+    finally:
+        from minisweagent.mas import runtime
+
+        if runtime._SYNC_ASYNC_LOOP is not None:
+            runtime._SYNC_ASYNC_LOOP.close()
+            runtime._SYNC_ASYNC_LOOP = None
 
 
 def test_mini_mas_help_presents_first_version_root_cli_surface_without_legacy_commands():
@@ -557,9 +710,10 @@ def test_mini_mas_help_does_not_expose_system_database_configuration(argv):
     ],
 )
 def test_mini_mas_does_not_accept_system_database_url_as_user_facing_option(argv, monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.start_interactive_root_agent_workflow",
-        Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
+    patch_runtime_session(
+        monkeypatch,
+        start_root=Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
+        prepare_resume=Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
     )
     monkeypatch.setattr(
         "minisweagent.mas.cli.discover_interactive_root_agents",
@@ -567,10 +721,6 @@ def test_mini_mas_does_not_accept_system_database_url_as_user_facing_option(argv
     )
     monkeypatch.setattr(
         "minisweagent.mas.cli.one_shot_spawn_through_interactive_root",
-        Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
-    )
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
         Mock(side_effect=AssertionError("removed database options must fail before runtime calls")),
     )
 
@@ -600,21 +750,15 @@ def test_mini_mas_agent_activate_prints_notice_and_runs_activation_without_promp
 def test_mini_mas_agent_activate_does_not_make_agent_lifecycle_or_governance_calls(monkeypatch):
     activate = Mock(return_value={"kind": "ai_agent_execution_deactivated", "queue_name": AI_AGENT_WORKFLOW_QUEUE_NAME})
     monkeypatch.setattr("minisweagent.mas.cli.activate_ai_agent_execution", activate)
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.start_interactive_root_agent_workflow",
-        Mock(side_effect=AssertionError("activation must not create an Agent")),
-    )
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(side_effect=AssertionError("activation must not continue or resume an Agent")),
+    patch_runtime_session(
+        monkeypatch,
+        start_root=Mock(side_effect=AssertionError("activation must not create an Agent")),
+        prepare_resume=Mock(side_effect=AssertionError("activation must not continue or resume an Agent")),
+        send_root_command=Mock(side_effect=AssertionError("activation must not accept, cancel, close, or delete Agents")),
     )
     monkeypatch.setattr(
         "minisweagent.mas.cli.one_shot_spawn_through_interactive_root",
         Mock(side_effect=AssertionError("activation must not create Child Agents")),
-    )
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.send_root_command",
-        Mock(side_effect=AssertionError("activation must not accept, cancel, close, or delete Agents")),
     )
     monkeypatch.setattr(
         "minisweagent.mas.cli.release_root_attachment",
@@ -946,8 +1090,7 @@ def test_mini_mas_resume_prints_metadata_once_and_sends_each_input_line(monkeypa
             },
         ]
     )
-    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, prepare_resume=prepare_resume, send_root_command=send_root_command)
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     release_attachment = Mock()
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
@@ -987,20 +1130,17 @@ def test_mini_mas_resume_prints_metadata_once_and_sends_each_input_line(monkeypa
 
 
 def test_mini_mas_resume_sends_prefix_free_input_as_ordinary_bash_without_rewriting(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(
-            return_value={
-                "kind": "resume_ready",
-                "root_agent_id": "mas-2222222222222222",
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-                "attachment_token": "att-1111111111111111",
-                "returncode": 0,
-            }
-        ),
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "attachment_token": "att-1111111111111111",
+            "returncode": 0,
+        }
     )
     send_root_command = Mock(
         return_value={
@@ -1011,7 +1151,7 @@ def test_mini_mas_resume_sends_prefix_free_input_as_ordinary_bash_without_rewrit
             "result": {"output": "bash status output\n", "returncode": 0, "exception_info": "", "extra": {}},
         }
     )
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, prepare_resume=prepare_resume, send_root_command=send_root_command)
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     release_attachment = Mock()
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
@@ -1033,34 +1173,29 @@ def test_mini_mas_resume_sends_prefix_free_input_as_ordinary_bash_without_rewrit
 
 
 def test_mini_mas_resume_exits_with_last_command_returncode(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(
-            return_value={
-                "kind": "resume_ready",
-                "root_agent_id": "mas-2222222222222222",
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-                "attachment_token": "att-1111111111111111",
-                "returncode": 0,
-            }
-        ),
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "attachment_token": "att-1111111111111111",
+            "returncode": 0,
+        }
     )
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.send_root_command",
-        Mock(
-            return_value={
-                "kind": "root_command_result",
-                "command_id": "cmd-1111111111111111",
-                "root_agent_id": "mas-2222222222222222",
-                "command": "false",
-                "result": {"output": "failed\n", "returncode": 7, "exception_info": "failed", "extra": {}},
-            }
-        ),
+    send_root_command = Mock(
+        return_value={
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": "mas-2222222222222222",
+            "command": "false",
+            "result": {"output": "failed\n", "returncode": 7, "exception_info": "failed", "extra": {}},
+        }
     )
+    patch_runtime_session(monkeypatch, prepare_resume=prepare_resume, send_root_command=send_root_command)
 
     cli_result = CliRunner().invoke(app, ["resume", "mas-2222222222222222"], input="false\n")
 
@@ -1069,20 +1204,17 @@ def test_mini_mas_resume_exits_with_last_command_returncode(monkeypatch):
 
 
 def test_mini_mas_resume_keeps_terminal_attached_after_nonzero_command(monkeypatch):
-    monkeypatch.setattr(
-        "minisweagent.mas.cli.prepare_resume_root_agent",
-        Mock(
-            return_value={
-                "kind": "resume_ready",
-                "root_agent_id": "mas-2222222222222222",
-                "agent_id": "mas-2222222222222222",
-                "lifecycle_state": "waiting_for_command",
-                "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
-                "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
-                "attachment_token": "att-1111111111111111",
-                "returncode": 0,
-            }
-        ),
+    prepare_resume = Mock(
+        return_value={
+            "kind": "resume_ready",
+            "root_agent_id": "mas-2222222222222222",
+            "agent_id": "mas-2222222222222222",
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-2222222222222222",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json",
+            "attachment_token": "att-1111111111111111",
+            "returncode": 0,
+        }
     )
     send_root_command = Mock(
         side_effect=[
@@ -1102,7 +1234,7 @@ def test_mini_mas_resume_keeps_terminal_attached_after_nonzero_command(monkeypat
             },
         ]
     )
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, prepare_resume=prepare_resume, send_root_command=send_root_command)
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     release_attachment = Mock()
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
@@ -1141,8 +1273,7 @@ def test_mini_mas_resume_prints_unavailable_error_without_entering_terminal(monk
         }
     )
     send_root_command = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, prepare_resume=prepare_resume, send_root_command=send_root_command)
 
     cli_result = CliRunner().invoke(app, ["resume", "mas-2222222222222222"], input="echo ignored\n")
 
@@ -1169,8 +1300,7 @@ def test_mini_mas_resume_detaches_on_eof_without_sending_close_or_using_prompt_h
     )
     send_root_command = Mock()
     prompt_history_prompt = Mock(side_effect=AssertionError("resume must not use prompt history"))
-    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    patch_runtime_session(monkeypatch, prepare_resume=prepare_resume, send_root_command=send_root_command)
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     release_attachment = Mock()
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)

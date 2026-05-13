@@ -21,6 +21,28 @@ ACTIVATION_STATE_KEYS = {
 }
 
 
+class FakeMasRuntimeSession:
+    def __init__(self, *, start_root, prepare_resume, send_root_command):
+        self.start_root_mock = start_root
+        self.prepare_resume_mock = prepare_resume
+        self.send_root_command_mock = send_root_command
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return None
+
+    async def start_interactive_root_agent_workflow(self, **kwargs):
+        return self.start_root_mock(**kwargs)
+
+    async def prepare_resume_root_agent(self, **kwargs):
+        return self.prepare_resume_mock(**kwargs)
+
+    async def send_root_command(self, **kwargs):
+        return self.send_root_command_mock(**kwargs)
+
+
 def assert_no_ai_agent_execution_activation_state(data):
     text = json.dumps(data, sort_keys=True).lower()
     for term in ACTIVATION_STATE_KEYS:
@@ -245,9 +267,12 @@ def test_external_mas_cli_governance_command_enters_through_interactive_root_age
         }
     )
     release_attachment = Mock()
-    monkeypatch.setattr("minisweagent.mas.cli.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.cli.prepare_resume_root_agent", prepare_resume)
-    monkeypatch.setattr("minisweagent.mas.cli.send_root_command", send_root_command)
+    session = FakeMasRuntimeSession(
+        start_root=start_root,
+        prepare_resume=prepare_resume,
+        send_root_command=send_root_command,
+    )
+    monkeypatch.setattr("minisweagent.mas.cli.MasRuntimeSession", Mock(return_value=session))
     monkeypatch.setattr("minisweagent.mas.cli._refresh_attachment_until_stopped", Mock())
     monkeypatch.setattr("minisweagent.mas.cli.release_root_attachment", release_attachment)
 

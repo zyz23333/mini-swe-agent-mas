@@ -138,6 +138,174 @@ def register_mas_agent_workflows() -> None:
     from minisweagent.mas import mas_agent as _mas_agent  # noqa: F401
 
 
+class MasRuntimeSession:
+    """Own one activated External MAS CLI runtime lifecycle."""
+
+    def __init__(self, dbos_module: Any | None = None):
+        self._dbos_module = dbos_module or load_dbos()
+        self._launched = False
+
+    async def __aenter__(self) -> MasRuntimeSession:
+        await self.activate_interactive_runtime()
+        return self
+
+    async def __aexit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        return None
+
+    async def activate_interactive_runtime(self) -> None:
+        """Launch DBOS once for ordinary External MAS CLI work."""
+        if self._launched:
+            return
+        register_mas_agent_workflows()
+        await launch_interactive_runtime_async(self._dbos_module)
+        self._launched = True
+
+    async def start_interactive_root_agent_workflow(
+        self,
+        *,
+        workflow_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Start an Interactive Root Agent inside this runtime session."""
+        from minisweagent.mas.mas_agent import interactive_root_agent_workflow
+
+        await self.activate_interactive_runtime()
+
+        assigned_workflow_id = validate_agent_id(workflow_id or make_agent_id())
+        with self._dbos_module.SetWorkflowID(assigned_workflow_id):
+            handle = await self._dbos_module.DBOS.enqueue_workflow_async(
+                INTERACTIVE_WORKFLOW_QUEUE_NAME,
+                interactive_root_agent_workflow,
+                assigned_workflow_id,
+                max_commands=None,
+            )
+
+        started_workflow_id = _handle_workflow_id(handle)
+        result = await self._dbos_module.DBOS.get_event_async(started_workflow_id, STATUS_EVENT_KEY, 60)
+        return _format_interactive_root_result(agent_id=started_workflow_id, result=result)
+
+    async def send_root_command(
+        self,
+        *,
+        root_agent_id: str,
+        command: str,
+        command_id: str | None = None,
+        result_timeout_seconds: float = 60,
+        attachment_token: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Submit one Root Command Signal and wait for its scoped result in this session."""
+        await self.activate_interactive_runtime()
+
+        root_agent_id = validate_agent_id(root_agent_id)
+        command_id = command_id or make_command_id()
+        claimed_token: str | None = None
+        if attachment_token is None:
+            snapshot = await self._dbos_module.DBOS.get_event_async(root_agent_id, STATUS_EVENT_KEY, 1)
+            if not isinstance(snapshot, Mapping):
+                return _attachment_unavailable_result(
+                    root_agent_id=root_agent_id,
+                    command=command,
+                    lifecycle_state="unknown",
+                    command_id=command_id,
+                )
+            lifecycle_state = str(normalize_agent_snapshot(dict(snapshot))["lifecycle_state"])
+            if lifecycle_state != "waiting_for_command":
+                return _attachment_unavailable_result(
+                    root_agent_id=root_agent_id,
+                    command=command,
+                    lifecycle_state=lifecycle_state,
+                    command_id=command_id,
+                )
+            lease = claim_root_attachment(
+                root_agent_id=root_agent_id,
+                ttl_seconds=max(result_timeout_seconds, 0.0) + ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS,
+            )
+            if not lease["claimed"]:
+                return _attachment_unavailable_result(
+                    root_agent_id=root_agent_id,
+                    command=command,
+                    lifecycle_state=lifecycle_state,
+                    command_id=command_id,
+                )
+            claimed_token = str(lease["attachment_token"])
+        elif not _attachment_token_is_active(root_agent_id=root_agent_id, attachment_token=attachment_token):
+            return _attachment_unavailable_result(
+                root_agent_id=root_agent_id,
+                command=command,
+                lifecycle_state="unknown",
+                command_id=command_id,
+            )
+
+        release_claimed_token = False
+        try:
+            signal = make_root_command_signal(
+                command_id=command_id,
+                root_agent_id=root_agent_id,
+                command=command,
+                source="external_cli",
+            )
+            await self._dbos_module.DBOS.send_async(root_agent_id, signal, ROOT_COMMAND_TOPIC)
+            event = await self._dbos_module.DBOS.get_event_async(
+                root_agent_id,
+                root_command_result_event_key(command_id),
+                result_timeout_seconds,
+            )
+            if not isinstance(event, Mapping):
+                return {
+                    "kind": "root_command_result_timeout",
+                    "command_id": command_id,
+                    "root_agent_id": root_agent_id,
+                    "command": command,
+                    "result": {
+                        "output": _root_command_result_timeout_output(root_agent_id),
+                        "returncode": 1,
+                        "exception_info": "root_command_result_timeout",
+                        "extra": {"mas_command_error": "root_command_result_timeout"},
+                    },
+                }
+            release_claimed_token = True
+            return event
+        finally:
+            if claimed_token is not None and release_claimed_token:
+                release_root_attachment(root_agent_id=root_agent_id, attachment_token=claimed_token)
+
+    async def prepare_resume_root_agent(
+        self,
+        *,
+        root_agent_id: str,
+    ) -> Mapping[str, Any]:
+        """Validate and claim an Interactive Root Agent attachment for this session."""
+        return await _prepare_resume_root_agent_async(root_agent_id=root_agent_id)
+
+    async def one_shot_spawn_through_interactive_root(
+        self,
+        *,
+        spawn_arguments: list[str],
+        result_timeout_seconds: float = 60,
+    ) -> Mapping[str, Any]:
+        """Create an Interactive Root Agent and submit external spawn in this session."""
+        root_result = await self.start_interactive_root_agent_workflow()
+        root_agent_id = str(root_result["agent_id"])
+        command = make_standalone_spawn_command(spawn_arguments)
+        result_event = await self.send_root_command(
+            root_agent_id=root_agent_id,
+            command=command,
+            result_timeout_seconds=result_timeout_seconds,
+        )
+        if result_event.get("kind") == "root_command_result_timeout":
+            return _format_one_shot_spawn_result_timeout(
+                root_agent_id=root_agent_id,
+                command=command,
+                result_event=result_event,
+            )
+        return {
+            "kind": "one_shot_spawn",
+            "root_agent_id": root_agent_id,
+            "command": command,
+            "result": result_event["result"],
+            "returncode": result_event["result"].get("returncode", 0),
+        }
+
+
 async def launch_dbos_with_queue_policy_async(dbos_module: Any, queue_names: list[str]) -> None:
     """Async variant for MAS runtime paths already running on an event loop."""
     queue_policy = _declare_dbos_queue_policy(dbos_module, queue_names)
@@ -361,25 +529,9 @@ async def _start_interactive_root_agent_workflow_async(
     *,
     workflow_id: str | None = None,
 ) -> Mapping[str, Any]:
-    """Async implementation for starting an Interactive Root Agent and waiting until it is idle."""
-    dbos_module = load_dbos()
-
-    from minisweagent.mas.mas_agent import interactive_root_agent_workflow
-
-    await launch_interactive_runtime_async(dbos_module)
-
-    assigned_workflow_id = validate_agent_id(workflow_id or make_agent_id())
-    with dbos_module.SetWorkflowID(assigned_workflow_id):
-        handle = await dbos_module.DBOS.enqueue_workflow_async(
-            INTERACTIVE_WORKFLOW_QUEUE_NAME,
-            interactive_root_agent_workflow,
-            assigned_workflow_id,
-            max_commands=None,
-        )
-
-    started_workflow_id = _handle_workflow_id(handle)
-    result = await dbos_module.DBOS.get_event_async(started_workflow_id, STATUS_EVENT_KEY, 60)
-    return _format_interactive_root_result(agent_id=started_workflow_id, result=result)
+    """Async compatibility wrapper for starting an Interactive Root Agent."""
+    async with MasRuntimeSession() as session:
+        return await session.start_interactive_root_agent_workflow(workflow_id=workflow_id)
 
 
 def start_interactive_root_agent_workflow(
@@ -402,82 +554,15 @@ async def _send_root_command_async(
     result_timeout_seconds: float = 60,
     attachment_token: str | None = None,
 ) -> Mapping[str, Any]:
-    """Async implementation for submitting one Root Command Signal and waiting for its scoped result."""
-    dbos_module = load_dbos()
-    await launch_interactive_runtime_async(dbos_module)
-
-    root_agent_id = validate_agent_id(root_agent_id)
-    command_id = command_id or make_command_id()
-    claimed_token: str | None = None
-    if attachment_token is None:
-        snapshot = await dbos_module.DBOS.get_event_async(root_agent_id, STATUS_EVENT_KEY, 1)
-        if not isinstance(snapshot, Mapping):
-            return _attachment_unavailable_result(
-                root_agent_id=root_agent_id,
-                command=command,
-                lifecycle_state="unknown",
-                command_id=command_id,
-            )
-        lifecycle_state = str(normalize_agent_snapshot(dict(snapshot))["lifecycle_state"])
-        if lifecycle_state != "waiting_for_command":
-            return _attachment_unavailable_result(
-                root_agent_id=root_agent_id,
-                command=command,
-                lifecycle_state=lifecycle_state,
-                command_id=command_id,
-            )
-        lease = claim_root_attachment(
-            root_agent_id=root_agent_id,
-            ttl_seconds=max(result_timeout_seconds, 0.0) + ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS,
-        )
-        if not lease["claimed"]:
-            return _attachment_unavailable_result(
-                root_agent_id=root_agent_id,
-                command=command,
-                lifecycle_state=lifecycle_state,
-                command_id=command_id,
-            )
-        claimed_token = str(lease["attachment_token"])
-    elif not _attachment_token_is_active(root_agent_id=root_agent_id, attachment_token=attachment_token):
-        return _attachment_unavailable_result(
+    """Async compatibility wrapper for submitting one Root Command Signal."""
+    async with MasRuntimeSession() as session:
+        return await session.send_root_command(
             root_agent_id=root_agent_id,
             command=command,
-            lifecycle_state="unknown",
             command_id=command_id,
+            result_timeout_seconds=result_timeout_seconds,
+            attachment_token=attachment_token,
         )
-
-    release_claimed_token = False
-    try:
-        signal = make_root_command_signal(
-            command_id=command_id,
-            root_agent_id=root_agent_id,
-            command=command,
-            source="external_cli",
-        )
-        await dbos_module.DBOS.send_async(root_agent_id, signal, ROOT_COMMAND_TOPIC)
-        event = await dbos_module.DBOS.get_event_async(
-            root_agent_id,
-            root_command_result_event_key(command_id),
-            result_timeout_seconds,
-        )
-        if not isinstance(event, Mapping):
-            return {
-                "kind": "root_command_result_timeout",
-                "command_id": command_id,
-                "root_agent_id": root_agent_id,
-                "command": command,
-                "result": {
-                    "output": _root_command_result_timeout_output(root_agent_id),
-                    "returncode": 1,
-                    "exception_info": "root_command_result_timeout",
-                    "extra": {"mas_command_error": "root_command_result_timeout"},
-                },
-            }
-        release_claimed_token = True
-        return event
-    finally:
-        if claimed_token is not None and release_claimed_token:
-            release_root_attachment(root_agent_id=root_agent_id, attachment_token=claimed_token)
 
 
 def send_root_command(
@@ -534,28 +619,16 @@ def one_shot_spawn_through_interactive_root(
     spawn_arguments: list[str],
     result_timeout_seconds: float = 60,
 ) -> Mapping[str, Any]:
-    """Create an Interactive Root Agent and submit external spawn through its Root command loop."""
-    root_result = start_interactive_root_agent_workflow()
-    root_agent_id = str(root_result["agent_id"])
-    command = make_standalone_spawn_command(spawn_arguments)
-    result_event = send_root_command(
-        root_agent_id=root_agent_id,
-        command=command,
-        result_timeout_seconds=result_timeout_seconds,
-    )
-    if result_event.get("kind") == "root_command_result_timeout":
-        return _format_one_shot_spawn_result_timeout(
-            root_agent_id=root_agent_id,
-            command=command,
-            result_event=result_event,
-        )
-    return {
-        "kind": "one_shot_spawn",
-        "root_agent_id": root_agent_id,
-        "command": command,
-        "result": result_event["result"],
-        "returncode": result_event["result"].get("returncode", 0),
-    }
+    """Compatibility wrapper for one-shot External MAS CLI spawn."""
+
+    async def run_session() -> Mapping[str, Any]:
+        async with MasRuntimeSession() as session:
+            return await session.one_shot_spawn_through_interactive_root(
+                spawn_arguments=spawn_arguments,
+                result_timeout_seconds=result_timeout_seconds,
+            )
+
+    return _run_mas_async(run_session())
 
 
 def _resume_invalid_agent_id_result(*, root_agent_id: str, error: ValueError) -> dict[str, Any]:
@@ -675,8 +748,13 @@ async def _discover_interactive_root_agents_async() -> Mapping[str, Any]:
     }
 
 
+async def discover_interactive_root_agents_async() -> Mapping[str, Any]:
+    """List parentless Interactive Root Agent workflows through the control plane."""
+    return await _discover_interactive_root_agents_async()
+
+
 def discover_interactive_root_agents() -> Mapping[str, Any]:
-    """Initialize DBOS and list parentless Interactive Root Agent workflows."""
+    """List parentless Interactive Root Agent workflows through the control plane."""
     return _run_mas_async(_discover_interactive_root_agents_async())
 
 

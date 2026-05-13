@@ -14,14 +14,14 @@ from minisweagent.mas.commands import validate_spawn_arguments
 from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import (
     MAS_RUNTIME_STATE_STORE_PATH,
+    MasRuntimeSession,
+    _run_mas_async,
     activate_ai_agent_execution,
     discover_interactive_root_agents,
+    discover_interactive_root_agents_async,
     one_shot_spawn_through_interactive_root,
-    prepare_resume_root_agent,
     refresh_root_attachment,
     release_root_attachment,
-    send_root_command,
-    start_interactive_root_agent_workflow,
 )
 
 app = typer.Typer(
@@ -163,31 +163,42 @@ def resume(
         typer.Option("--result-timeout", help="Maximum seconds to wait for each Root Command Result."),
     ] = 60,
 ) -> dict[str, Any]:
-    resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id))
-    if resume_result["returncode"] != 0:
-        console.print(resume_result["output"], end="")
-        raise typer.Exit(code=resume_result["returncode"])
+    async def run_session() -> tuple[dict[str, Any], int]:
+        async with MasRuntimeSession() as session:
+            resume_result = dict(await session.prepare_resume_root_agent(root_agent_id=root_agent_id))
+            if resume_result["returncode"] != 0:
+                return resume_result, int(resume_result["returncode"])
 
-    _print_root_metadata_banner(resume_result)
-    last_result, last_returncode = _run_attached_terminal(
-        root_agent_id=root_agent_id,
-        attachment_token=str(resume_result["attachment_token"]),
-        result_timeout_seconds=result_timeout_seconds,
-    )
-    if last_result is None:
-        last_result = resume_result
+            _print_root_metadata_banner(resume_result)
+            last_result, last_returncode = await _run_attached_terminal_async(
+                session=session,
+                root_agent_id=root_agent_id,
+                attachment_token=str(resume_result["attachment_token"]),
+                result_timeout_seconds=result_timeout_seconds,
+            )
+            return (last_result or resume_result), last_returncode
+
+    final_result, last_returncode = _run_mas_async(run_session())
+    if final_result.get("kind") == "resume_unavailable":
+        console.print(final_result["output"], end="")
+        raise typer.Exit(code=final_result["returncode"])
+
     if last_returncode != 0:
         raise typer.Exit(code=last_returncode)
-    return last_result
+    return final_result
 
 
 def _run_lazy_plain_terminal(*, result_timeout_seconds: float = 60) -> int:
+    return int(_run_mas_async(_run_lazy_plain_terminal_async(result_timeout_seconds=result_timeout_seconds)))
+
+
+async def _run_lazy_plain_terminal_async(*, result_timeout_seconds: float = 60) -> int:
     for command_text in _iter_terminal_input():
         if _is_local_terminal_exit(command_text):
             return 0
         if command_text.strip() == "":
             continue
-        local_result = _handle_pre_root_local_command(
+        local_result = await _handle_pre_root_local_command_async(
             command_text,
             result_timeout_seconds=result_timeout_seconds,
         )
@@ -197,28 +208,43 @@ def _run_lazy_plain_terminal(*, result_timeout_seconds: float = 60) -> int:
             continue
 
         try:
-            root_result = dict(start_interactive_root_agent_workflow())
+            async with MasRuntimeSession() as session:
+                root_result = dict(await session.start_interactive_root_agent_workflow())
+                root_agent_id = str(root_result["agent_id"])
+                resume_result = dict(await session.prepare_resume_root_agent(root_agent_id=root_agent_id))
+                if resume_result["returncode"] != 0:
+                    console.print(resume_result.get("output", ""), end="")
+                    return int(resume_result["returncode"])
+
+                _print_root_metadata_banner(resume_result)
+                _last_result, last_returncode = await _run_attached_terminal_async(
+                    session=session,
+                    root_agent_id=root_agent_id,
+                    attachment_token=str(resume_result["attachment_token"]),
+                    result_timeout_seconds=result_timeout_seconds,
+                    initial_command=command_text,
+                )
+                return last_returncode
         except Exception as exc:
             console.print(f"Failed to create Interactive Root Agent: {exc}")
             return 1
-        root_agent_id = str(root_result["agent_id"])
-        resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id))
-        if resume_result["returncode"] != 0:
-            console.print(resume_result.get("output", ""), end="")
-            return int(resume_result["returncode"])
-
-        _print_root_metadata_banner(resume_result)
-        _last_result, last_returncode = _run_attached_terminal(
-            root_agent_id=root_agent_id,
-            attachment_token=str(resume_result["attachment_token"]),
-            result_timeout_seconds=result_timeout_seconds,
-            initial_command=command_text,
-        )
-        return last_returncode
     return 0
 
 
 def _handle_pre_root_local_command(
+    command_text: str,
+    *,
+    result_timeout_seconds: float,
+) -> dict[str, bool | int]:
+    return _run_mas_async(
+        _handle_pre_root_local_command_async(
+            command_text,
+            result_timeout_seconds=result_timeout_seconds,
+        )
+    )
+
+
+async def _handle_pre_root_local_command_async(
     command_text: str,
     *,
     result_timeout_seconds: float,
@@ -229,23 +255,25 @@ def _handle_pre_root_local_command(
 
     command_name, command_args = parsed_command
     if command_name == "status" and not command_args:
-        result = dict(discover_interactive_root_agents())
+        result = dict(await discover_interactive_root_agents_async())
         console.print(result["output"], end="")
         return {"handled": True, "attached": False, "returncode": int(result.get("returncode", 0))}
 
     if command_name == "resume" and len(command_args) == 1:
         root_agent_id = command_args[0]
-        resume_result = dict(prepare_resume_root_agent(root_agent_id=root_agent_id))
-        if resume_result["returncode"] != 0:
-            console.print(resume_result["output"], end="")
-            return {"handled": True, "attached": False, "returncode": int(resume_result["returncode"])}
+        async with MasRuntimeSession() as session:
+            resume_result = dict(await session.prepare_resume_root_agent(root_agent_id=root_agent_id))
+            if resume_result["returncode"] != 0:
+                console.print(resume_result["output"], end="")
+                return {"handled": True, "attached": False, "returncode": int(resume_result["returncode"])}
 
-        _print_root_metadata_banner(resume_result)
-        _last_result, last_returncode = _run_attached_terminal(
-            root_agent_id=root_agent_id,
-            attachment_token=str(resume_result["attachment_token"]),
-            result_timeout_seconds=result_timeout_seconds,
-        )
+            _print_root_metadata_banner(resume_result)
+            _last_result, last_returncode = await _run_attached_terminal_async(
+                session=session,
+                root_agent_id=root_agent_id,
+                attachment_token=str(resume_result["attachment_token"]),
+                result_timeout_seconds=result_timeout_seconds,
+            )
         return {"handled": True, "attached": True, "returncode": last_returncode}
 
     return {"handled": False, "attached": False, "returncode": 0}
@@ -268,6 +296,27 @@ def _run_attached_terminal(
     result_timeout_seconds: float,
     initial_command: str | None = None,
 ) -> tuple[dict[str, Any] | None, int]:
+    async def run_session() -> tuple[dict[str, Any] | None, int]:
+        async with MasRuntimeSession() as session:
+            return await _run_attached_terminal_async(
+                session=session,
+                root_agent_id=root_agent_id,
+                attachment_token=attachment_token,
+                result_timeout_seconds=result_timeout_seconds,
+                initial_command=initial_command,
+            )
+
+    return _run_mas_async(run_session())
+
+
+async def _run_attached_terminal_async(
+    *,
+    session: MasRuntimeSession,
+    root_agent_id: str,
+    attachment_token: str,
+    result_timeout_seconds: float,
+    initial_command: str | None = None,
+) -> tuple[dict[str, Any] | None, int]:
     last_result: dict[str, Any] | None = None
     last_returncode = 0
     stop_heartbeat = threading.Event()
@@ -285,7 +334,7 @@ def _run_attached_terminal(
             if command_text == "":
                 continue
             last_result = dict(
-                send_root_command(
+                await session.send_root_command(
                     root_agent_id=root_agent_id,
                     command=command_text,
                     result_timeout_seconds=result_timeout_seconds,

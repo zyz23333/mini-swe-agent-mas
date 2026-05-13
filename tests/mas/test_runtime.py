@@ -32,6 +32,41 @@ DEFAULT_RUNTIME_DBOS_CONFIG = {
 }
 
 
+class FakeMasRuntimeSession:
+    def __init__(self, *, start_root, send_root_command):
+        self.start_root_mock = start_root
+        self.send_root_command_mock = send_root_command
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+        return None
+
+    async def one_shot_spawn_through_interactive_root(self, *, spawn_arguments, result_timeout_seconds=60):
+        root_result = self.start_root_mock()
+        root_agent_id = str(root_result["agent_id"])
+        command = make_standalone_spawn_command(spawn_arguments)
+        result_event = self.send_root_command_mock(
+            root_agent_id=root_agent_id,
+            command=command,
+            result_timeout_seconds=result_timeout_seconds,
+        )
+        if result_event.get("kind") == "root_command_result_timeout":
+            return runtime._format_one_shot_spawn_result_timeout(
+                root_agent_id=root_agent_id,
+                command=command,
+                result_event=result_event,
+            )
+        return {
+            "kind": "one_shot_spawn",
+            "root_agent_id": root_agent_id,
+            "command": command,
+            "result": result_event["result"],
+            "returncode": result_event["result"].get("returncode", 0),
+        }
+
+
 class DurableWorkflowQueue:
     def __init__(self, name):
         self.name = name
@@ -608,8 +643,8 @@ def test_one_shot_spawn_creates_interactive_root_then_sends_standalone_spawn_com
             },
         }
     )
-    monkeypatch.setattr("minisweagent.mas.runtime.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.runtime.send_root_command", send_command)
+    session = FakeMasRuntimeSession(start_root=start_root, send_root_command=send_command)
+    monkeypatch.setattr("minisweagent.mas.runtime.MasRuntimeSession", Mock(return_value=session))
 
     result = one_shot_spawn_through_interactive_root(
         spawn_arguments=["task A"],
@@ -706,6 +741,62 @@ def test_one_shot_spawn_uses_root_command_signal_result_flow(tmp_path, monkeypat
     assert result["root_agent_id"] == "mas-1111111111111111"
     assert result["result"]["extra"]["child_agent_id"] == "mas-2222222222222222"
     assert result["result"]["extra"]["parent_agent_id"] == "mas-1111111111111111"
+
+
+def test_one_shot_spawn_uses_one_synchronous_runtime_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
+    handle = AsyncMockHandle("mas-1111111111111111")
+
+    async def enqueue_workflow_async(*_args, **_kwargs):
+        return handle
+
+    async def send_async(_destination_id, _message, topic=None):
+        return None
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        if key == "mini_mas_status":
+            return {
+                "agent_id": workflow_id,
+                "lifecycle_state": "waiting_for_command",
+                "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+                "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+            }
+        return {
+            "kind": "root_command_result",
+            "command_id": "cmd-1111111111111111",
+            "root_agent_id": workflow_id,
+            "command": "mini-mas spawn 'task A'",
+            "result": {"output": "Detached spawn started\n", "returncode": 0, "exception_info": "", "extra": {}},
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.enqueue_workflow_async = Mock(side_effect=enqueue_workflow_async)
+    dbos_module.DBOS.send_async = Mock(side_effect=send_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    real_run_mas_async = runtime._run_mas_async
+    sync_boundary_count = 0
+
+    def counting_run_mas_async(awaitable):
+        nonlocal sync_boundary_count
+        sync_boundary_count += 1
+        return real_run_mas_async(awaitable)
+
+    try:
+        with (
+            patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+            patch("minisweagent.mas.runtime._run_mas_async", side_effect=counting_run_mas_async),
+            patch("minisweagent.mas.runtime.make_agent_id", return_value="mas-1111111111111111"),
+            patch("minisweagent.mas.runtime.make_command_id", return_value="cmd-1111111111111111"),
+        ):
+            result = one_shot_spawn_through_interactive_root(spawn_arguments=["task A"], result_timeout_seconds=5)
+    finally:
+        if runtime._SYNC_ASYNC_LOOP is not None:
+            runtime._SYNC_ASYNC_LOOP.close()
+            runtime._SYNC_ASYNC_LOOP = None
+
+    assert result["kind"] == "one_shot_spawn"
+    assert sync_boundary_count == 1
 
 
 def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadata(tmp_path, monkeypatch):
@@ -844,8 +935,8 @@ def test_one_shot_spawn_result_timeout_reports_resumable_root_without_cleanup(mo
             },
         }
     )
-    monkeypatch.setattr("minisweagent.mas.runtime.start_interactive_root_agent_workflow", start_root)
-    monkeypatch.setattr("minisweagent.mas.runtime.send_root_command", send_command)
+    session = FakeMasRuntimeSession(start_root=start_root, send_root_command=send_command)
+    monkeypatch.setattr("minisweagent.mas.runtime.MasRuntimeSession", Mock(return_value=session))
 
     result = one_shot_spawn_through_interactive_root(
         spawn_arguments=["task A"],
