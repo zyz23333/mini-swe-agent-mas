@@ -797,10 +797,10 @@ async def _prepare_resume_root_agent_async(
             exception_info="not_parentless_interactive_root_agent",
             output=(
                 "Resume target is not a parentless Interactive Root Agent.\n"
-                f"root_agent_id: {root_agent_id}\n"
+                f"target_agent_id: {root_agent_id}\n"
                 "lifecycle_state: unknown\n"
                 f"parent_agent_id: {parent_workflow_id}\n"
-                f"{_resume_retry_guidance(root_agent_id)}"
+                "Use mini-mas status to inspect Root Agents, then resume a listed Root Agent ID.\n"
             ),
         )
 

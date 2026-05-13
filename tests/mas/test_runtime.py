@@ -1007,7 +1007,10 @@ def test_resume_preparation_rejects_child_agent_ids():
 
     assert result["returncode"] == 2
     assert "not a parentless Interactive Root Agent" in result["output"]
+    assert "target_agent_id: mas-2222222222222222" in result["output"]
+    assert "root_agent_id: mas-2222222222222222" not in result["output"]
     assert "parent_agent_id: mas-1111111111111111" in result["output"]
+    assert "mini-mas resume mas-2222222222222222 later" not in result["output"]
 
 
 def test_resume_preparation_rejects_parentless_non_interactive_workflows():
