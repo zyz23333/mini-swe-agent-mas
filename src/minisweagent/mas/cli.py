@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import shlex
 import threading
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 from rich.console import Console
 
 from minisweagent.mas.commands import validate_spawn_arguments
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import (
+    MAS_RUNTIME_STATE_STORE_PATH,
+    activate_ai_agent_execution,
     discover_interactive_root_agents,
     one_shot_spawn_through_interactive_root,
     prepare_resume_root_agent,
@@ -33,6 +37,8 @@ UNSUPPORTED_EXTERNAL_GOVERNANCE_OUTPUT = (
     "mini-mas resume <root-agent-id>.\n"
 )
 UNSUPPORTED_EXTERNAL_GOVERNANCE_RETURNCODE = 2
+agent_app = typer.Typer(help="AI Agent Execution.")
+app.add_typer(agent_app, name="agent")
 
 
 @app.callback()
@@ -55,6 +61,26 @@ def _print_root_metadata_banner(result: dict[str, Any]) -> None:
 def _reject_external_governance_command() -> None:
     console.print(UNSUPPORTED_EXTERNAL_GOVERNANCE_OUTPUT, end="")
     raise typer.Exit(code=UNSUPPORTED_EXTERNAL_GOVERNANCE_RETURNCODE)
+
+
+def _format_ai_agent_activation_notice(
+    *,
+    active_workspace: Path | str,
+    runtime_state_store: Path | str,
+    queue_name: str,
+) -> str:
+    lines = [
+        "AI Agent Execution activation",
+        f"active_workspace: {active_workspace}",
+        f"mas_runtime_state_store: {runtime_state_store}",
+        f"ai_agent_queue: {queue_name}",
+        (
+            "side_effect_warning: Queued AI Agent work may call models, execute bash actions, "
+            "and modify the Shared Workspace."
+        ),
+        "Press Ctrl-C to deactivate AI Agent Execution without closing, accepting, cancelling, or deleting Agents.",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 @app.command(hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
@@ -80,6 +106,17 @@ def status(
 @app.command(hidden=True, context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def command(_ctx: typer.Context) -> None:
     _reject_external_governance_command()
+
+
+@agent_app.command(help="Activate foreground AI Agent Execution for queued AI Agent work.")
+def activate() -> dict[str, Any]:
+    notice = _format_ai_agent_activation_notice(
+        active_workspace=Path.cwd(),
+        runtime_state_store=MAS_RUNTIME_STATE_STORE_PATH,
+        queue_name=AI_AGENT_WORKFLOW_QUEUE_NAME,
+    )
+    console.print(notice, end="")
+    return dict(activate_ai_agent_execution())
 
 
 @app.command(

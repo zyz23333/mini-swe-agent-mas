@@ -4,6 +4,7 @@ import pytest
 
 from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME, INTERACTIVE_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import (
+    activate_ai_agent_execution,
     discover_interactive_root_agents,
     launch_interactive_runtime,
     make_standalone_spawn_command,
@@ -214,6 +215,54 @@ def test_interactive_runtime_launch_reuses_existing_interactive_policy_and_rejec
 
     with pytest.raises(RuntimeError, match="non-interactive MAS queue policy"):
         launch_dbos_with_queue_policy(dbos_module, [AI_AGENT_WORKFLOW_QUEUE_NAME])
+
+
+def test_ai_agent_activation_runtime_listens_only_to_ai_workflows_before_launch():
+    dbos_module = _mock_dbos_module()
+    stop_event = Mock()
+    stop_event.wait.return_value = True
+    activation_order = []
+    register_workflows = Mock(side_effect=lambda: activation_order.append("register_workflows"))
+    dbos_module.DBOS.listen_queues.side_effect = lambda _queue_names: activation_order.append("listen")
+    dbos_module.DBOS.launch.side_effect = lambda: activation_order.append("launch")
+
+    with (
+        patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),
+        patch("minisweagent.mas.runtime.register_mas_agent_workflows", register_workflows),
+    ):
+        result = activate_ai_agent_execution(stop_event=stop_event, wait_interval_seconds=0.01)
+
+    dbos_module.DBOS.assert_called_once_with(config=DEFAULT_RUNTIME_DBOS_CONFIG)
+    register_workflows.assert_called_once_with()
+    assert activation_order.index("register_workflows") < activation_order.index("launch")
+    assert activation_order.index("listen") < activation_order.index("launch")
+    assert dbos_module.DBOS.listen_queues.call_args == call([AI_AGENT_WORKFLOW_QUEUE_NAME])
+    assert INTERACTIVE_WORKFLOW_QUEUE_NAME not in dbos_module.DBOS.listen_queues.call_args.args[0]
+    assert dbos_module.DBOS.mock_calls.index(call.listen_queues([AI_AGENT_WORKFLOW_QUEUE_NAME])) < (
+        dbos_module.DBOS.mock_calls.index(call.launch())
+    )
+    dbos_module.DBOS.register_queue.assert_called_once_with(AI_AGENT_WORKFLOW_QUEUE_NAME)
+    dbos_module.DBOS.register_queue_async.assert_not_called()
+    stop_event.wait.assert_called_once_with(0.01)
+    assert result == {
+        "kind": "ai_agent_execution_deactivated",
+        "queue_name": AI_AGENT_WORKFLOW_QUEUE_NAME,
+    }
+
+
+def test_ai_agent_activation_remains_foreground_when_no_work_is_queued():
+    dbos_module = _mock_dbos_module()
+    stop_event = Mock()
+    stop_event.wait.side_effect = [False, False, True]
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        activate_ai_agent_execution(stop_event=stop_event, wait_interval_seconds=0.01)
+
+    assert stop_event.wait.call_args_list == [call(0.01), call(0.01), call(0.01)]
+    dbos_module.DBOS.enqueue_workflow.assert_not_called()
+    dbos_module.DBOS.enqueue_workflow_async.assert_not_called()
+    dbos_module.DBOS.start_workflow.assert_not_called()
+    dbos_module.DBOS.start_workflow_async.assert_not_called()
 
 
 def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result(tmp_path, monkeypatch):

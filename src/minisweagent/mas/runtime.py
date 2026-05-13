@@ -6,6 +6,7 @@ import asyncio
 import os
 import secrets
 import shlex
+import threading
 import time
 import weakref
 from collections.abc import Mapping
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from minisweagent.mas.artifacts import make_agent_id, make_artifact_metadata, validate_agent_id
-from minisweagent.mas.queues import INTERACTIVE_WORKFLOW_QUEUE_NAME
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME, INTERACTIVE_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.signals import (
     ROOT_COMMAND_TOPIC,
     make_root_command_signal,
@@ -70,6 +71,16 @@ def launch_interactive_runtime(dbos_module: Any) -> None:
     launch_dbos_with_queue_policy(dbos_module, [INTERACTIVE_WORKFLOW_QUEUE_NAME])
 
 
+def launch_ai_agent_runtime(dbos_module: Any) -> None:
+    """Launch DBOS for explicit AI Agent Execution with AI-agent-only queue authorization."""
+    launch_dbos_with_queue_policy(dbos_module, [AI_AGENT_WORKFLOW_QUEUE_NAME])
+
+
+def register_mas_agent_workflows() -> None:
+    """Import MAS Agent workflow definitions so DBOS can run queued Agent work."""
+    from minisweagent.mas import mas_agent as _mas_agent  # noqa: F401
+
+
 async def launch_dbos_with_queue_policy_async(dbos_module: Any, queue_names: list[str]) -> None:
     """Async variant for MAS runtime paths already running on an event loop."""
     queue_policy = _declare_dbos_queue_policy(dbos_module, queue_names)
@@ -81,6 +92,28 @@ async def launch_dbos_with_queue_policy_async(dbos_module: Any, queue_names: lis
 async def launch_interactive_runtime_async(dbos_module: Any) -> None:
     """Launch DBOS for ordinary async mini-mas work with interactive-only queue authorization."""
     await launch_dbos_with_queue_policy_async(dbos_module, [INTERACTIVE_WORKFLOW_QUEUE_NAME])
+
+
+def activate_ai_agent_execution(
+    *,
+    stop_event: threading.Event | None = None,
+    wait_interval_seconds: float = 1.0,
+) -> Mapping[str, Any]:
+    """Activate foreground AI Agent Execution until interrupted or stopped by the caller."""
+    dbos_module = load_dbos()
+    register_mas_agent_workflows()
+    launch_ai_agent_runtime(dbos_module)
+
+    stop_event = stop_event or threading.Event()
+    try:
+        while not stop_event.wait(wait_interval_seconds):
+            pass
+    except KeyboardInterrupt:
+        pass
+    return {
+        "kind": "ai_agent_execution_deactivated",
+        "queue_name": AI_AGENT_WORKFLOW_QUEUE_NAME,
+    }
 
 
 def _handle_workflow_id(handle: Any) -> str:

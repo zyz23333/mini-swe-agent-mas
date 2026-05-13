@@ -4,6 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from minisweagent.mas.cli import app
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 
 
 def test_plain_mini_mas_exits_on_eof_without_creating_interactive_root(monkeypatch):
@@ -511,6 +512,7 @@ def test_mini_mas_help_presents_first_version_root_cli_surface_without_legacy_co
     assert cli_result.exit_code == 0
     assert "Interactive Root Agent" in cli_result.stdout
     assert "mini-mas" in cli_result.stdout
+    assert "agent" in cli_result.stdout
     assert "spawn" in cli_result.stdout
     assert "status" in cli_result.stdout
     assert "resume" in cli_result.stdout
@@ -531,6 +533,7 @@ def test_mini_mas_help_presents_first_version_root_cli_surface_without_legacy_co
         ["status", "--help"],
         ["spawn", "--help"],
         ["resume", "--help"],
+        ["agent", "activate", "--help"],
     ],
 )
 def test_mini_mas_help_does_not_expose_system_database_configuration(argv):
@@ -574,6 +577,54 @@ def test_mini_mas_does_not_accept_system_database_url_as_user_facing_option(argv
     cli_result = CliRunner().invoke(app, argv, input="")
 
     assert cli_result.exit_code != 0
+
+
+def test_mini_mas_agent_activate_prints_notice_and_runs_activation_without_prompt(monkeypatch):
+    activate = Mock(return_value={"kind": "ai_agent_execution_deactivated", "queue_name": AI_AGENT_WORKFLOW_QUEUE_NAME})
+    monkeypatch.setattr("minisweagent.mas.cli.activate_ai_agent_execution", activate)
+    monkeypatch.setattr("minisweagent.mas.cli.Path.cwd", Mock(return_value="/workspace/project"))
+
+    cli_result = CliRunner().invoke(app, ["agent", "activate"], input="unexpected\n")
+
+    assert cli_result.exit_code == 0
+    assert "AI Agent Execution activation" in cli_result.stdout
+    assert "active_workspace: /workspace/project" in cli_result.stdout
+    assert "mas_runtime_state_store: .mini-mas/runtime/mini_mas_dbos.sqlite" in cli_result.stdout
+    assert f"ai_agent_queue: {AI_AGENT_WORKFLOW_QUEUE_NAME}" in cli_result.stdout
+    assert "may call models, execute bash actions, and modify the Shared Workspace" in cli_result.stdout
+    assert "Press Ctrl-C to deactivate AI Agent Execution" in cli_result.stdout
+    assert "confirm" not in cli_result.stdout.lower()
+    activate.assert_called_once()
+
+
+def test_mini_mas_agent_activate_does_not_make_agent_lifecycle_or_governance_calls(monkeypatch):
+    activate = Mock(return_value={"kind": "ai_agent_execution_deactivated", "queue_name": AI_AGENT_WORKFLOW_QUEUE_NAME})
+    monkeypatch.setattr("minisweagent.mas.cli.activate_ai_agent_execution", activate)
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.start_interactive_root_agent_workflow",
+        Mock(side_effect=AssertionError("activation must not create an Agent")),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.prepare_resume_root_agent",
+        Mock(side_effect=AssertionError("activation must not continue or resume an Agent")),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.one_shot_spawn_through_interactive_root",
+        Mock(side_effect=AssertionError("activation must not create Child Agents")),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.send_root_command",
+        Mock(side_effect=AssertionError("activation must not accept, cancel, close, or delete Agents")),
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.cli.release_root_attachment",
+        Mock(side_effect=AssertionError("activation must not close or detach an Agent")),
+    )
+
+    cli_result = CliRunner().invoke(app, ["agent", "activate"])
+
+    assert cli_result.exit_code == 0
+    activate.assert_called_once()
 
 
 def test_mini_mas_status_cli_lists_interactive_root_agents(monkeypatch):
