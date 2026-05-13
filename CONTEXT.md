@@ -56,6 +56,22 @@ _Avoid_: Workflow Tree ID, path, tree position
 Self-describing identity and artifact information for one **Agent**.
 _Avoid_: Root index, role flags, mode flags
 
+**Agent Execution Config**:
+The durable, secret-free configuration snapshot fixed when an autonomous **Agent** is spawned.
+_Avoid_: current global config, activation config, live environment, model object, shell state
+
+**Local Agent Environment**:
+The MVP execution environment where an autonomous **Agent** runs bash actions in the spawn workspace without a durable external sandbox session.
+_Avoid_: Docker session, remote sandbox, activation shell
+
+**Action Environment Variables**:
+The secret-free environment variables fixed in an **Agent Execution Config** and applied to bash actions in a **Local Agent Environment**.
+_Avoid_: process environment, runtime environment, API keys, shell state
+
+**Runtime Process Environment**:
+The process-local operating-system environment visible to a running mini-mas process during DBOS step execution.
+_Avoid_: Agent Execution Config, Action Environment Variables, durable config
+
 **MAS Command**:
 A bash command beginning with `mini-mas` that an agent emits to request a MAS-governed **Agent Interaction**.
 _Avoid_: Tool call, DBOS command
@@ -189,6 +205,51 @@ _Avoid_: Special case, bypass
 - **Agent Artifacts** are scoped to individual **Agents**, not to **Root Agents** or runs.
 - **Agent IDs** use the `mas-<random-hex>` shape and do not encode root identity, parent identity, sibling order, or tree position.
 - **Agent Metadata** records stable Agent identity and artifact fields such as Agent ID, optional Parent Agent ID, Agent Artifact Directory, and Trajectory Artifact path.
+- An **Interactive Root Agent** records its **Shared Workspace** for later Spawn config resolution and diagnosis.
+- An autonomous **Child Agent** receives an **Agent Execution Config** as DBOS workflow input when it is spawned.
+- An **Agent Execution Config** includes a schema version so durable queued Agents can validate config compatibility.
+- During the MVP, **Agent Execution Config** describes mini-equivalent agent, model, and **Local Agent Environment** settings only.
+- During the MVP, the detailed Agent Execution Config schema, validation rules, and failure codes are recorded in ADR 0010.
+- An **Interactive Root Agent** does not require an **Agent Execution Config** to exist.
+- A **Local Agent Environment** uses the absolute **Shared Workspace** path fixed when the **Child Agent** is spawned.
+- During the MVP, Spawn rejects attempts to override the **Local Agent Environment** working directory.
+- External Spawn resolves the current **Shared Workspace** from the External MAS CLI working directory.
+- Workflow-layer Spawn from an **Interactive Root Agent** resolves the current **Shared Workspace** from that Root Agent's MAS workspace.
+- Workflow-layer Spawn from an autonomous **Agent** resolves the current **Shared Workspace** from that Agent's **Agent Execution Config**.
+- **Action Environment Variables** may be stored in an **Agent Execution Config** and passed to bash execution steps.
+- During the MVP, **Action Environment Variables** come only from resolved mini environment configuration, not from copying a **Runtime Process Environment**.
+- During the MVP, Spawn rejects **Agent Execution Config** content that would violate the secret-free workflow input contract.
+- A **Runtime Process Environment** may provide secrets to DBOS steps but is not stored in an **Agent Execution Config**, **Child Status Event**, or **Trajectory Artifact**.
+- During the MVP, local bash actions may still inherit the step process's **Runtime Process Environment** at execution time.
+- During the MVP, model provider credentials are read from the **Runtime Process Environment** inside model query steps rather than represented as secret references in an **Agent Execution Config**.
+- During the MVP, Spawn may perform lightweight credential preflight against the current **Runtime Process Environment** when the model provider's required credential variable is obvious.
+- During the MVP, credential preflight failure prevents Spawn from creating a **Child Agent**.
+- DBOS workflow bodies use an **Agent Execution Config** for deterministic control flow and validation, while model and environment objects are created and used inside DBOS steps.
+- During the MVP, Spawn command handling builds the Child **Agent Execution Config** in a DBOS step because config file reads and **Runtime Process Environment** reads are non-deterministic.
+- During the MVP, Child workflow bodies defensive-validate the **Agent Execution Config**, drive lifecycle transitions, and orchestrate DBOS steps, but do not read config files, read `os.environ`, or call mini object factories such as `get_model()` and `get_environment()`.
+- During the MVP, a Child workflow does not accept live model or environment objects as normal workflow input.
+- During the MVP, the existing `model=None` or `env=None` Child workflow path is treated as invalid config behavior rather than a normal `started` state.
+- During the MVP, autonomous MAS prompt rendering uses **Agent Execution Config** data and does not include the **Runtime Process Environment**.
+- During the MVP, autonomous prompt rendering does not call `LocalEnvironment.get_template_vars()` because that helper merges the current process environment.
+- During the MVP, autonomous MAS prompt rendering uses a dedicated safe template variable set instead of merging all mini agent, model, and environment template variables.
+- During the MVP, the `env` prompt template variable comes only from **Action Environment Variables** in the **Agent Execution Config**.
+- **Detached Spawn** and **Waited Spawn** fail before creating a **Child Agent** when they cannot build a valid **Agent Execution Config**.
+- Spawn validation failure is reported as a **MAS Command** error and does not fail the **Parent Agent**.
+- A **Child Agent** without a valid **Agent Execution Config** reaches `failed` instead of remaining `running`.
+- Runtime model credential or **Runtime Process Environment** validation failures make the **Child Agent** reach `failed`, not `recovery_required`.
+- During the MVP, external and workflow-layer **Detached Spawn** and **Waited Spawn** may build a Child **Agent Execution Config** from mini-compatible `-c/--config` and `-m/--model` options.
+- During the MVP, `-c/--config` options in external and workflow-layer Spawn are resolved relative to the current **Shared Workspace** using mini-compatible config resolution.
+- During the MVP, Spawn without explicit `-c/--config` uses mini-compatible default config resolution: `MSWEA_MINI_CONFIG_PATH` from the current **Runtime Process Environment** if present, otherwise the built-in `mini.yaml`.
+- During the MVP, `MSWEA_CONFIG_DIR` from the current **Runtime Process Environment** may participate in mini-compatible `-c/--config` file lookup at Spawn time.
+- Runtime Process Environment variables that participate in Spawn config resolution affect only the newly frozen **Agent Execution Config**; they are not stored as runtime variables and are not consulted later by **AI Agent Execution**.
+- During the MVP, autonomous Agent Spawn uses the current Agent's **Agent Execution Config** as the base config for its Child Agent.
+- During the MVP, `-c/--config` and `-m/--model` Spawn overrides do not require an additional **Authority Grant** or confirmation.
+- During the MVP, Spawn rejects an **Agent Execution Config** whose environment is not a **Local Agent Environment**.
+- During the MVP, a workflow-layer **Detached Spawn** or **Waited Spawn** without config overrides inherits the current autonomous **Agent**'s **Agent Execution Config** or, for an **Interactive Root Agent**, builds from the current mini config.
+- A **Child Status Event** does not include an **Agent Execution Config**.
+- A **Trajectory Artifact** may include the non-secret **Agent Execution Config** for diagnosis.
+- A **Trajectory Artifact** redacts **Action Environment Variables** values when recording an **Agent Execution Config**.
+- **AI Agent Execution** consumes queued autonomous Agent work but does not choose or mutate an **Agent Execution Config**.
 - Multi-spawn command result ordering may be used for immediate display, but sibling order is not durable Agent metadata.
 - A **Standalone MAS Command** issued inside an **Agent** is handled through **MAS Command Interception**.
 - An **External MAS CLI** command is used outside an **Agent** and enters MAS governance through a **Root Agent**.
