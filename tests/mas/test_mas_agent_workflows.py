@@ -2,9 +2,10 @@ import asyncio
 import importlib
 import inspect
 import json
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from minisweagent.mas import status_events as mas_status_events
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.signals import (
     PARENT_DIRECTION_TOPIC,
     PARENT_DIRECTION_WAIT_TIMEOUT_SECONDS,
@@ -19,7 +20,7 @@ from .helpers import (
     _mock_dbos_module,
     _mock_recording_dbos_module,
     _observation_text,
-    _recording_child_queue,
+    _recording_workflow_queue,
 )
 
 
@@ -354,8 +355,8 @@ def test_interactive_root_agent_waited_spawn_result_uses_existing_waited_shape_a
     from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX, ROOT_COMMAND_TOPIC
 
     published = []
-    child_queue = _recording_child_queue()
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    ai_agent_queue = _recording_workflow_queue()
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
     monkeypatch.setattr(workflows.agent_interactions, "make_agent_id", lambda: "mas-1111111111111111")
     monkeypatch.setattr(workflows._dbos.DBOS, "asyncio_wait", Mock(wraps=asyncio.wait))
@@ -398,7 +399,7 @@ def test_interactive_root_agent_waited_spawn_result_uses_existing_waited_shape_a
 
     assert result["lifecycle_state"] == "waiting_for_command"
     env.execute.assert_not_called()
-    assert [call["args"][0] for call in child_queue.enqueued] == ["mas-1111111111111111"]
+    assert [call["args"][0] for call in ai_agent_queue.enqueued] == ["mas-1111111111111111"]
 
     events_by_key = {key: value for key, value in published if key.startswith(ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX)}
     event = events_by_key[f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-waited-spawn"]
@@ -546,6 +547,21 @@ def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
         importlib.reload(minisweagent.mas.mas_agent)
 
     dbos_module.DBOS.workflow.assert_called()
+
+def test_ai_agent_workflow_queue_is_registered_for_child_agent_startup_when_module_loads():
+    """Spawned autonomous Child Agents are queued on the AI Agent workflow queue."""
+    dbos_module = _mock_dbos_module()
+    queue = MagicMock()
+    dbos_module.Queue.return_value = queue
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        import minisweagent.mas.mas_agent
+
+        importlib.reload(minisweagent.mas.mas_agent)
+
+    assert dbos_module.Queue.call_args_list
+    assert {call.args[0] for call in dbos_module.Queue.call_args_list} == {AI_AGENT_WORKFLOW_QUEUE_NAME}
+    assert minisweagent.mas.mas_agent.ai_agent_workflow_queue is queue
 
 def test_agent_workflows_are_async_dbos_workflows():
     import minisweagent.mas.mas_agent as workflows

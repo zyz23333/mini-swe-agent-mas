@@ -72,11 +72,11 @@ def current_workflow_id() -> str | None:
 async def enqueue_child_agent_workflow(
     *, parent_agent_id: str, child_agent_id: str, task: str
 ) -> None:
-    """Start a Child Agent through the configured DBOS child queue."""
+    """Queue autonomous Child Agent work behind explicit AI Agent Execution activation."""
     from minisweagent.mas import mas_agent
 
     with _dbos.SetWorkflowID(child_agent_id):
-        await mas_agent.child_agent_queue.enqueue_async(
+        await mas_agent.ai_agent_workflow_queue.enqueue_async(
             mas_agent.child_agent_workflow,
             child_agent_id,
             task,

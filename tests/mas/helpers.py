@@ -1,6 +1,8 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, Mock
 
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
+
 
 def _mock_dbos_module() -> MagicMock:
     dbos_module = MagicMock()
@@ -35,9 +37,10 @@ def _call_root_agent_workflow(workflow_func, *args, **kwargs):
         workflow_func = workflow_func.__wrapped__
     return asyncio.run(workflow_func(*args, **kwargs))
 
-def _recording_child_queue():
-    class RecordingChildQueue:
+def _recording_workflow_queue(name: str = AI_AGENT_WORKFLOW_QUEUE_NAME):
+    class RecordingWorkflowQueue:
         def __init__(self):
+            self.name = name
             self.enqueued = []
 
         async def enqueue_async(self, workflow_func, *args, **kwargs):
@@ -54,7 +57,7 @@ def _recording_child_queue():
             )
             return handle
 
-    return RecordingChildQueue()
+    return RecordingWorkflowQueue()
 
 def _child_metadata(workflow_id: str, task: str = "task") -> dict[str, str]:
     return {

@@ -19,7 +19,7 @@ from minisweagent.mas.commands import (
     MasCommandKind,
     classify_mas_command,
 )
-from minisweagent.mas.queues import LEGACY_CHILD_AGENT_WORKFLOW_QUEUE_NAME
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.signals import (
     PARENT_DIRECTION_TOPIC,
@@ -38,7 +38,7 @@ from .status_events import LifecycleState
 
 _dbos = load_dbos()
 agent_interactions._dbos = _dbos
-child_agent_queue = _dbos.Queue(LEGACY_CHILD_AGENT_WORKFLOW_QUEUE_NAME)
+ai_agent_workflow_queue = _dbos.Queue(AI_AGENT_WORKFLOW_QUEUE_NAME)
 ROOT_COMMAND_WAIT_TIMEOUT_SECONDS = 60 * 60 * 24 * 30
 
 
@@ -772,7 +772,7 @@ async def child_agent_workflow(
     step_limit: int = 0,
     initial_messages: list[dict] | None = None,
 ) -> dict:
-    """Child Agent DBOS workflow started by detached spawn through the child queue."""
+    """Autonomous Child Agent DBOS workflow started through the AI Agent queue."""
     agent_id = validate_agent_id(agent_id)
     parent_agent_id = validate_agent_id(parent_agent_id)
     return await _run_agent_workflow(

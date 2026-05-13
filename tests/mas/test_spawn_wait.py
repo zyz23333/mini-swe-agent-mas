@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from minisweagent.mas import status_events as mas_status_events
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 from minisweagent.models.test_models import (
     DeterministicModel,
     make_output,
@@ -15,7 +16,7 @@ from .helpers import (
     _call_root_agent_workflow,
     _mock_direct_child_status_events,
     _observation_text,
-    _recording_child_queue,
+    _recording_workflow_queue,
     _set_agent_workflow_context,
 )
 
@@ -29,11 +30,11 @@ def _patch_agent_ids(
     monkeypatch.setattr(workflows.agent_interactions, "make_agent_id", lambda: next(iterator))
 
 
-def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, monkeypatch):
+def test_detached_spawn_returns_child_metadata_and_uses_ai_agent_queue(tmp_path, monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
-    child_queue = _recording_child_queue()
+    ai_agent_queue = _recording_workflow_queue()
     set_workflow_ids = []
 
     class RecordingSetWorkflowID:
@@ -47,9 +48,9 @@ def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, mo
         def __exit__(self, exc_type, exc_value, traceback):
             return False
 
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", RecordingSetWorkflowID)
-    child_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
+    ai_agent_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
 
     model = DeterministicModel(outputs=[make_output("delegate", [{"command": 'mini-mas spawn "inspect api"'}], cost=0.1)])
     env = Mock()
@@ -69,8 +70,9 @@ def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, mo
     assert re.fullmatch(r"mas-[0-9a-f]{16}", child_agent_id)
     assert child_agent_id != "mas-0123456789abcdef"
     assert not re.search(r"-c[0-9]{3}(?:\\Z|-)", child_agent_id)
-    assert len(child_queue.enqueued) == 1
-    child_call = child_queue.enqueued[0]
+    assert ai_agent_queue.name == AI_AGENT_WORKFLOW_QUEUE_NAME
+    assert len(ai_agent_queue.enqueued) == 1
+    child_call = ai_agent_queue.enqueued[0]
     assert child_call["workflow_func"].__name__ == "child_agent_workflow"
     assert child_call["args"][:2] == (
         child_agent_id,
@@ -87,12 +89,14 @@ def test_detached_spawn_returns_child_metadata_and_uses_child_queue(tmp_path, mo
     assert f"agent_artifact_directory: .mini-mas/agents/{child_agent_id}" in observation
     assert f"trajectory_artifact_path: .mini-mas/agents/{child_agent_id}/trajectory.traj.json" in observation
     assert "run_directory" not in observation
+    assert "queued" not in observation.lower()
+    assert "queue" not in observation.lower()
 
 def test_detached_spawn_allocates_opaque_child_ids_without_duplicate_enqueue(tmp_path, monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
-    child_queue = _recording_child_queue()
+    ai_agent_queue = _recording_workflow_queue()
 
     class NoopSetWorkflowID:
         def __init__(self, workflow_id):
@@ -104,9 +108,9 @@ def test_detached_spawn_allocates_opaque_child_ids_without_duplicate_enqueue(tmp
         def __exit__(self, exc_type, exc_value, traceback):
             return False
 
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
-    child_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
+    ai_agent_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
 
     first_message = make_output("delegate first", [{"command": 'mini-mas spawn "first task"'}], cost=0.1)
     second_message = make_output("delegate second", [{"command": 'mini-mas spawn "second task"'}], cost=0.1)
@@ -124,14 +128,15 @@ def test_detached_spawn_allocates_opaque_child_ids_without_duplicate_enqueue(tmp
     )
 
     assert result["terminal_state"] == "limits_exceeded"
-    child_agent_ids = [call["args"][0] for call in child_queue.enqueued]
+    assert ai_agent_queue.name == AI_AGENT_WORKFLOW_QUEUE_NAME
+    child_agent_ids = [call["args"][0] for call in ai_agent_queue.enqueued]
     assert len(child_agent_ids) == 2
     assert len(set(child_agent_ids)) == 2
     assert all(re.fullmatch(r"mas-[0-9a-f]{16}", agent_id) for agent_id in child_agent_ids)
     assert all(not re.search(r"-c[0-9]{3}(?:\\Z|-)", agent_id) for agent_id in child_agent_ids)
 
-    replay_queue = _recording_child_queue()
-    monkeypatch.setattr(workflows, "child_agent_queue", replay_queue)
+    replay_queue = _recording_workflow_queue()
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", replay_queue)
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
     replay_observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
@@ -143,6 +148,7 @@ def test_detached_spawn_allocates_opaque_child_ids_without_duplicate_enqueue(tmp
     )
 
     replay_child_agent_ids = [call["args"][0] for call in replay_queue.enqueued]
+    assert replay_queue.name == AI_AGENT_WORKFLOW_QUEUE_NAME
     assert len(replay_child_agent_ids) == 1
     assert re.fullmatch(r"mas-[0-9a-f]{16}", replay_child_agent_ids[0])
     assert not re.search(r"-c[0-9]{3}(?:\\Z|-)", replay_child_agent_ids[0])
@@ -152,7 +158,7 @@ def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_pat
     import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
-    child_queue = _recording_child_queue()
+    ai_agent_queue = _recording_workflow_queue()
 
     class NoopSetWorkflowID:
         def __init__(self, workflow_id):
@@ -164,7 +170,7 @@ def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_pat
         def __exit__(self, exc_type, exc_value, traceback):
             return False
 
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
     _patch_agent_ids(monkeypatch, workflows, ("mas-3333333333333333", "mas-4444444444444444"))
     monkeypatch.setattr(
@@ -189,7 +195,8 @@ def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_pat
     )
 
     assert result["terminal_state"] == "limits_exceeded"
-    enqueued_args = [call["args"][:2] for call in child_queue.enqueued]
+    assert ai_agent_queue.name == AI_AGENT_WORKFLOW_QUEUE_NAME
+    enqueued_args = [call["args"][:2] for call in ai_agent_queue.enqueued]
     child_agent_ids = [args[0] for args in enqueued_args]
     assert enqueued_args == [
         ("mas-3333333333333333", "task A"),
@@ -212,7 +219,7 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
     import minisweagent.mas.mas_agent as workflows
 
     monkeypatch.chdir(tmp_path)
-    child_queue = _recording_child_queue()
+    ai_agent_queue = _recording_workflow_queue()
 
     class NoopSetWorkflowID:
         def __init__(self, workflow_id):
@@ -224,7 +231,7 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
         def __exit__(self, exc_type, exc_value, traceback):
             return False
 
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
     _patch_agent_ids(monkeypatch, workflows, ("mas-3333333333333333", "mas-4444444444444444"))
     model = DeterministicModel(
@@ -244,7 +251,8 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
     )
 
     assert result["terminal_state"] == "limits_exceeded"
-    assert [call["args"][:2] for call in child_queue.enqueued] == [
+    assert ai_agent_queue.name == AI_AGENT_WORKFLOW_QUEUE_NAME
+    assert [call["args"][:2] for call in ai_agent_queue.enqueued] == [
         ("mas-3333333333333333", "task A"),
         ("mas-4444444444444444", "task B"),
     ]
@@ -261,16 +269,16 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
 def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
-    first_queue = _recording_child_queue()
-    monkeypatch.setattr(workflows, "child_agent_queue", first_queue)
+    first_queue = _recording_workflow_queue()
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", first_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     _patch_agent_ids(monkeypatch, workflows, ("mas-3333333333333333", "mas-4444444444444444"))
 
     for parent_workflow_id, queue in [
         ("mas-1111111111111111", first_queue),
-        ("mas-2222222222222222", _recording_child_queue()),
+        ("mas-2222222222222222", _recording_workflow_queue()),
     ]:
-        monkeypatch.setattr(workflows, "child_agent_queue", queue)
+        monkeypatch.setattr(workflows, "ai_agent_workflow_queue", queue)
         _set_agent_workflow_context(monkeypatch, workflows, parent_workflow_id)
         asyncio.run(
             workflows.execute_agent_workflow_actions(
@@ -287,8 +295,8 @@ def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
-    child_queue = _recording_child_queue()
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    ai_agent_queue = _recording_workflow_queue()
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     _patch_agent_ids(monkeypatch, workflows)
     monkeypatch.setattr(
@@ -334,7 +342,8 @@ def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
         )
     )
 
-    assert [call["args"][0] for call in child_queue.enqueued] == [
+    assert ai_agent_queue.name == AI_AGENT_WORKFLOW_QUEUE_NAME
+    assert [call["args"][0] for call in ai_agent_queue.enqueued] == [
         "mas-1111111111111111",
         "mas-2222222222222222",
     ]
@@ -350,8 +359,8 @@ def test_waited_spawn_all_and_partial_timeout(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
-    child_queue = _recording_child_queue()
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    ai_agent_queue = _recording_workflow_queue()
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     _patch_agent_ids(monkeypatch, workflows)
     monkeypatch.setattr(
@@ -403,8 +412,8 @@ def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
     import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
-    child_queue = _recording_child_queue()
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    ai_agent_queue = _recording_workflow_queue()
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     _patch_agent_ids(monkeypatch, workflows)
     monkeypatch.setattr(workflows._dbos.DBOS, "asyncio_wait", Mock(wraps=asyncio.wait))
@@ -434,7 +443,8 @@ def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
     assert "wait_mode: any" in text
     assert "ready_child_count: 0" in text
     assert "still_running_child_agent_ids: mas-1111111111111111, mas-2222222222222222" in text
-    assert [call["args"][0] for call in child_queue.enqueued] == [
+    assert ai_agent_queue.name == AI_AGENT_WORKFLOW_QUEUE_NAME
+    assert [call["args"][0] for call in ai_agent_queue.enqueued] == [
         "mas-1111111111111111",
         "mas-2222222222222222",
     ]
@@ -443,9 +453,9 @@ def test_waited_spawn_publishes_waiting_for_child_status_and_restores_running_on
     import minisweagent.mas.mas_agent as workflows
 
     _set_agent_workflow_context(monkeypatch, workflows, "mas-0123456789abcdef")
-    child_queue = _recording_child_queue()
+    ai_agent_queue = _recording_workflow_queue()
     published = []
-    monkeypatch.setattr(workflows, "child_agent_queue", child_queue)
+    monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", lambda _agent_id: patch("builtins.id"))
     _patch_agent_ids(monkeypatch, workflows)
 
