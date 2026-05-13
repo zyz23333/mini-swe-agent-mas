@@ -673,6 +673,9 @@ def test_mini_mas_status_cli_lists_interactive_root_agents(monkeypatch):
     assert "lifecycle_state: failed" in cli_result.stdout
     assert "Child Agent" not in cli_result.stdout
     assert "latest_" not in cli_result.stdout
+    assert "AI Agent" not in cli_result.stdout
+    assert "activation" not in cli_result.stdout.lower()
+    assert "queue" not in cli_result.stdout.lower()
     discover.assert_called_once_with()
 
 
@@ -960,6 +963,8 @@ def test_mini_mas_resume_prints_metadata_once_and_sends_each_input_line(monkeypa
     assert "lifecycle_state: waiting_for_command" in cli_result.stdout
     assert "hello\n" in cli_result.stdout
     assert "status output\n" in cli_result.stdout
+    assert "AI Agent Execution" not in cli_result.stdout
+    assert "ai_agent_queue" not in cli_result.stdout
     prepare_resume.assert_called_once_with(root_agent_id="mas-2222222222222222")
     assert send_root_command.call_args_list == [
         call(

@@ -36,6 +36,41 @@ def load_dbos():
     return dbos
 
 
+class RuntimeControlPlane:
+    """Read MAS runtime metadata without launching a DBOS executor."""
+
+    def __init__(self, dbos_module: Any):
+        self._client = dbos_module.DBOSClient(system_database_url=make_dbos_config()["system_database_url"])
+
+    async def list_interactive_root_workflows(self) -> list[Any]:
+        return await self._client.list_workflows_async(
+            name="interactive_root_agent_workflow",
+            has_parent=False,
+            load_input=False,
+            load_output=False,
+        )
+
+    async def get_workflow_status(self, workflow_id: str) -> Any | None:
+        workflow_statuses = await self._client.list_workflows_async(
+            workflow_ids=[workflow_id],
+            load_input=False,
+            load_output=False,
+        )
+        return workflow_statuses[0] if workflow_statuses else None
+
+    async def get_event(self, workflow_id: str, key: str, timeout_seconds: float) -> Any:
+        return await self._client.get_event_async(workflow_id, key, timeout_seconds)
+
+    def close(self) -> None:
+        destroy = getattr(self._client, "destroy", None)
+        if destroy is not None:
+            destroy()
+
+
+def open_runtime_control_plane() -> RuntimeControlPlane:
+    return RuntimeControlPlane(load_dbos())
+
+
 def make_dbos_config() -> dict[str, str]:
     """Build the minimal DBOS configuration for the external MAS CLI."""
     MAS_RUNTIME_STATE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -592,26 +627,22 @@ def _format_root_discovery(snapshots: list[Mapping[str, Any]]) -> str:
 
 async def _discover_interactive_root_agents_async() -> Mapping[str, Any]:
     """Async implementation for external Interactive Root Agent discovery."""
-    dbos_module = load_dbos()
-    await launch_interactive_runtime_async(dbos_module)
+    control_plane = open_runtime_control_plane()
+    try:
+        workflow_statuses = await control_plane.list_interactive_root_workflows()
 
-    workflow_statuses = await dbos_module.DBOS.list_workflows_async(
-        name="interactive_root_agent_workflow",
-        has_parent=False,
-        load_input=False,
-        load_output=False,
-    )
-
-    snapshots: list[dict[str, Any]] = []
-    for workflow_status in workflow_statuses:
-        if _parent_workflow_id(workflow_status) is not None or not _is_interactive_root_workflow(workflow_status):
-            continue
-        workflow_id = validate_agent_id(str(getattr(workflow_status, "workflow_id", "")))
-        snapshot = await dbos_module.DBOS.get_event_async(workflow_id, STATUS_EVENT_KEY, 1)
-        if not isinstance(snapshot, Mapping):
-            msg = f"Missing lifecycle status event for Interactive Root Agent: {workflow_id}"
-            raise RuntimeError(msg)
-        snapshots.append(_root_discovery_snapshot(snapshot))
+        snapshots: list[dict[str, Any]] = []
+        for workflow_status in workflow_statuses:
+            if _parent_workflow_id(workflow_status) is not None or not _is_interactive_root_workflow(workflow_status):
+                continue
+            workflow_id = validate_agent_id(str(getattr(workflow_status, "workflow_id", "")))
+            snapshot = await control_plane.get_event(workflow_id, STATUS_EVENT_KEY, 1)
+            if not isinstance(snapshot, Mapping):
+                msg = f"Missing lifecycle status event for Interactive Root Agent: {workflow_id}"
+                raise RuntimeError(msg)
+            snapshots.append(_root_discovery_snapshot(snapshot))
+    finally:
+        control_plane.close()
 
     snapshots = sorted(snapshots, key=lambda snapshot: snapshot["agent_id"])
     return {
@@ -637,10 +668,13 @@ async def _prepare_resume_root_agent_async(
     except ValueError as exc:
         return _resume_invalid_agent_id_result(root_agent_id=root_agent_id, error=exc)
 
-    dbos_module = load_dbos()
-    await launch_interactive_runtime_async(dbos_module)
-
-    workflow_status = await dbos_module.DBOS.get_workflow_status_async(root_agent_id)
+    workflow_status = None
+    control_plane = open_runtime_control_plane()
+    try:
+        workflow_status = await control_plane.get_workflow_status(root_agent_id)
+    finally:
+        if workflow_status is None:
+            control_plane.close()
     if workflow_status is None:
         return _resume_unavailable_result(
             root_agent_id=root_agent_id,
@@ -656,6 +690,7 @@ async def _prepare_resume_root_agent_async(
 
     parent_workflow_id = _parent_workflow_id(workflow_status)
     if parent_workflow_id is not None:
+        control_plane.close()
         return _resume_unavailable_result(
             root_agent_id=root_agent_id,
             lifecycle_state="unknown",
@@ -670,6 +705,7 @@ async def _prepare_resume_root_agent_async(
         )
 
     if not _is_interactive_root_workflow(workflow_status):
+        control_plane.close()
         return _resume_unavailable_result(
             root_agent_id=root_agent_id,
             lifecycle_state="unknown",
@@ -683,7 +719,10 @@ async def _prepare_resume_root_agent_async(
             ),
         )
 
-    snapshot = await dbos_module.DBOS.get_event_async(root_agent_id, STATUS_EVENT_KEY, 1)
+    try:
+        snapshot = await control_plane.get_event(root_agent_id, STATUS_EVENT_KEY, 1)
+    finally:
+        control_plane.close()
     if not isinstance(snapshot, Mapping):
         return _resume_unavailable_lifecycle_result(root_agent_id=root_agent_id, lifecycle_state="unknown")
 

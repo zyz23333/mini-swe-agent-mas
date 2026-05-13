@@ -7,6 +7,7 @@ from minisweagent.mas.runtime import (
     activate_ai_agent_execution,
     discover_interactive_root_agents,
     launch_interactive_runtime,
+    make_dbos_config,
     make_standalone_spawn_command,
     one_shot_spawn_through_interactive_root,
     prepare_resume_root_agent,
@@ -193,14 +194,6 @@ def test_interactive_root_startup_is_queued_on_interactive_workflow_queue():
 
 def test_ordinary_runtime_entrypoints_apply_interactive_queue_policy_before_launch(monkeypatch, tmp_path):
     monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
-    root_status = _workflow_status_record("mas-1111111111111111")
-    root_status.name = "interactive_root_agent_workflow"
-
-    async def list_workflows_async(**_kwargs):
-        return [root_status]
-
-    async def get_workflow_status_async(_workflow_id):
-        return root_status
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
         if key == "mini_mas_root_command_result:cmd-1111111111111111":
@@ -221,29 +214,72 @@ def test_ordinary_runtime_entrypoints_apply_interactive_queue_policy_before_laun
     async def send_async(_destination_id, _message, topic=None):
         return None
 
-    for run_entrypoint in [
-        lambda: send_root_command(
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+    dbos_module.DBOS.send_async = Mock(side_effect=send_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        send_root_command(
             root_agent_id="mas-1111111111111111",
             command="echo hello",
             command_id="cmd-1111111111111111",
-        ),
-        lambda: discover_interactive_root_agents(),
-        lambda: prepare_resume_root_agent(root_agent_id="mas-1111111111111111"),
-    ]:
-        dbos_module = _mock_dbos_module()
-        dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
-        dbos_module.DBOS.get_workflow_status_async = Mock(side_effect=get_workflow_status_async)
-        dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
-        dbos_module.DBOS.send_async = Mock(side_effect=send_async)
-
-        with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
-            run_entrypoint()
-
-        assert dbos_module.DBOS.listen_queues.call_args == call([INTERACTIVE_WORKFLOW_QUEUE_NAME])
-        assert AI_AGENT_WORKFLOW_QUEUE_NAME not in dbos_module.DBOS.listen_queues.call_args.args[0]
-        assert dbos_module.DBOS.mock_calls.index(call.listen_queues([INTERACTIVE_WORKFLOW_QUEUE_NAME])) < (
-            dbos_module.DBOS.mock_calls.index(call.launch())
         )
+
+    assert dbos_module.DBOS.listen_queues.call_args == call([INTERACTIVE_WORKFLOW_QUEUE_NAME])
+    assert AI_AGENT_WORKFLOW_QUEUE_NAME not in dbos_module.DBOS.listen_queues.call_args.args[0]
+    assert dbos_module.DBOS.mock_calls.index(call.listen_queues([INTERACTIVE_WORKFLOW_QUEUE_NAME])) < (
+        dbos_module.DBOS.mock_calls.index(call.launch())
+    )
+
+
+def test_status_and_resume_metadata_paths_do_not_launch_dbos_executor(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
+    root_status = _workflow_status_record("mas-1111111111111111")
+    root_status.name = "interactive_root_agent_workflow"
+
+    async def list_workflows_async(**_kwargs):
+        return [root_status]
+
+    async def get_workflow_status_async(_workflow_id):
+        return root_status
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        assert key == "mini_mas_status"
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+
+    dbos_module = _mock_dbos_module()
+    control_plane = Mock()
+    control_plane.list_workflows_async = Mock(side_effect=list_workflows_async)
+    control_plane.get_workflow_status_async = Mock(side_effect=get_workflow_status_async)
+    control_plane.get_event_async = Mock(side_effect=get_event_async)
+    control_plane.destroy = Mock()
+    dbos_module.DBOSClient.return_value = control_plane
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        status_result = discover_interactive_root_agents()
+        resume_result = prepare_resume_root_agent(root_agent_id="mas-1111111111111111")
+
+    dbos_module.DBOS.assert_not_called()
+    dbos_module.DBOS.listen_queues.assert_not_called()
+    dbos_module.DBOS.launch.assert_not_called()
+    dbos_module.DBOS.register_queue.assert_not_called()
+    dbos_module.DBOS.register_queue_async.assert_not_called()
+    assert dbos_module.DBOSClient.call_args_list == [
+        call(system_database_url=make_dbos_config()["system_database_url"]),
+        call(system_database_url=make_dbos_config()["system_database_url"]),
+    ]
+    assert control_plane.destroy.call_count == 2
+    assert status_result["roots"][0]["agent_id"] == "mas-1111111111111111"
+    assert resume_result["kind"] == "resume_ready"
+    release_root_attachment(
+        root_agent_id="mas-1111111111111111",
+        attachment_token=resume_result["attachment_token"],
+    )
 
 
 def test_interactive_runtime_launch_reuses_existing_interactive_policy_and_rejects_mismatched_policy():
@@ -819,8 +855,9 @@ def test_resume_preparation_rejects_unknown_root_agent_id():
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         result = prepare_resume_root_agent(root_agent_id="mas-1111111111111111")
 
-    dbos_module.DBOS.assert_called_once()
-    dbos_module.DBOS.launch.assert_called_once_with()
+    dbos_module.DBOS.assert_not_called()
+    dbos_module.DBOS.launch.assert_not_called()
+    dbos_module.DBOSClient.assert_called_once_with(system_database_url=make_dbos_config()["system_database_url"])
     assert result["returncode"] == 2
     assert "Unknown Root Agent ID: mas-1111111111111111" in result["output"]
     assert "lifecycle_state: unknown" in result["output"]
@@ -1060,8 +1097,9 @@ def test_external_status_discovers_parentless_interactive_root_agents_only():
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         result = discover_interactive_root_agents()
 
-    dbos_module.DBOS.assert_called_once_with(config=DEFAULT_RUNTIME_DBOS_CONFIG)
-    dbos_module.DBOS.launch.assert_called_once_with()
+    dbos_module.DBOS.assert_not_called()
+    dbos_module.DBOS.launch.assert_not_called()
+    dbos_module.DBOSClient.assert_called_once_with(system_database_url=make_dbos_config()["system_database_url"])
     dbos_module.DBOS.get_event_async.assert_called_once_with("mas-1111111111111111", "mini_mas_status", 1)
     assert result["kind"] == "interactive_root_discovery"
     assert result["returncode"] == 0
@@ -1080,6 +1118,11 @@ def test_external_status_discovers_parentless_interactive_root_agents_only():
     assert "mas-3333333333333333" not in result["output"]
     assert "Child Agent" not in result["output"]
     assert "latest_" not in result["output"]
+    assert "AI Agent" not in result["output"]
+    assert "activation" not in result["output"].lower()
+    assert "queue" not in result["output"].lower()
+    assert "ai_agent_execution_active" not in result["output"].lower()
+    assert "ai_agent_execution_inactive" not in result["output"].lower()
 
 
 def test_external_status_lists_non_resumable_root_agents_with_lifecycle_state():
@@ -1128,7 +1171,7 @@ def test_external_status_dbos_errors_propagate_visibly():
 
 def test_external_status_dbos_configuration_errors_propagate_visibly():
     dbos_module = _mock_dbos_module()
-    dbos_module.DBOS.side_effect = RuntimeError("dbos config failed")
+    dbos_module.DBOSClient.side_effect = RuntimeError("dbos config failed")
 
     with (
         patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module),

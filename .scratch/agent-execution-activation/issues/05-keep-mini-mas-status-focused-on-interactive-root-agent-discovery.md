@@ -1,6 +1,6 @@
 # Keep `mini-mas status` focused on Interactive Root Agent discovery
 
-Status: ready-for-agent
+Status: done
 Category: enhancement
 
 ## What to build
@@ -9,12 +9,12 @@ Keep `mini-mas status` as a lightweight Interactive Root Agent discovery command
 
 ## Acceptance criteria
 
-- [ ] `mini-mas status` lists Interactive Root Agents only.
-- [ ] `mini-mas status` does not report queued AI Agent work.
-- [ ] `mini-mas status` does not report whether AI Agent Execution is active.
-- [ ] The interactive prompt does not show a persistent AI Agent Execution indicator.
-- [ ] Status and resume-validation paths avoid launching a DBOS executor when they only need metadata, where feasible behind a stable control-plane adapter.
-- [ ] Tests prove status output remains focused on Interactive Root Agent discovery and excludes activation liveness and AI Agent queue state.
+- [x] `mini-mas status` lists Interactive Root Agents only.
+- [x] `mini-mas status` does not report queued AI Agent work.
+- [x] `mini-mas status` does not report whether AI Agent Execution is active.
+- [x] The interactive prompt does not show a persistent AI Agent Execution indicator.
+- [x] Status and resume-validation paths avoid launching a DBOS executor when they only need metadata, where feasible behind a stable control-plane adapter.
+- [x] Tests prove status output remains focused on Interactive Root Agent discovery and excludes activation liveness and AI Agent queue state.
 
 ## Blocked by
 
@@ -49,16 +49,16 @@ Keep `mini-mas status` as a lightweight Interactive Root Agent discovery command
 > - AI Agent Execution activation notice - remains the place where activation liveness and side-effect risk are communicated at startup.
 >
 > **Acceptance criteria:**
-> - [ ] `mini-mas status` lists Interactive Root Agents only.
-> - [ ] `mini-mas status` output does not include Child Agent counts, Child Agent status, queued AI Agent work, AI Agent queue names, or AI Agent queue depth.
-> - [ ] `mini-mas status` output does not report whether AI Agent Execution is active or inactive.
-> - [ ] `mini-mas status` output does not include activation liveness, activation process state, runtime dashboard fields, or activation guidance beyond existing Root discovery/resume guidance.
-> - [ ] Interactive terminal prompts do not show a persistent AI Agent Execution indicator.
-> - [ ] Status discovery uses read-only or control-plane metadata access without launching a DBOS executor when feasible behind a stable adapter.
-> - [ ] Resume validation uses read-only or control-plane metadata access without launching a DBOS executor when feasible behind the same or equivalent stable adapter.
-> - [ ] If executor-free metadata access is not fully feasible with the current DBOS integration, tests pin the adapter behavior and prove inspection paths do not listen to or expose the AI Agent workflow queue.
-> - [ ] Tests prove status output remains focused on Interactive Root Agent discovery and excludes activation liveness and AI Agent queue state.
-> - [ ] Existing behavior for `mini-mas agent activate`, one-shot spawn, Interactive Root resume, and Direct Child Authority remains unchanged.
+> - [x] `mini-mas status` lists Interactive Root Agents only.
+> - [x] `mini-mas status` output does not include Child Agent counts, Child Agent status, queued AI Agent work, AI Agent queue names, or AI Agent queue depth.
+> - [x] `mini-mas status` output does not report whether AI Agent Execution is active or inactive.
+> - [x] `mini-mas status` output does not include activation liveness, activation process state, runtime dashboard fields, or activation guidance beyond existing Root discovery/resume guidance.
+> - [x] Interactive terminal prompts do not show a persistent AI Agent Execution indicator.
+> - [x] Status discovery uses read-only or control-plane metadata access without launching a DBOS executor when feasible behind a stable adapter.
+> - [x] Resume validation uses read-only or control-plane metadata access without launching a DBOS executor when feasible behind the same or equivalent stable adapter.
+> - [x] If executor-free metadata access is not fully feasible with the current DBOS integration, tests pin the adapter behavior and prove inspection paths do not listen to or expose the AI Agent workflow queue.
+> - [x] Tests prove status output remains focused on Interactive Root Agent discovery and excludes activation liveness and AI Agent queue state.
+> - [x] Existing behavior for `mini-mas agent activate`, one-shot spawn, Interactive Root resume, and Direct Child Authority remains unchanged.
 >
 > **Out of scope:**
 > - Adding a runtime dashboard for queues or activation liveness.
@@ -69,3 +69,13 @@ Keep `mini-mas status` as a lightweight Interactive Root Agent discovery command
 > - Changing Child Agent queueing or AI Agent Execution activation semantics.
 > - Changing Direct Child Authority Policy or adding broader Authority Grants.
 > - Solving DBOS exactly-once side-effect recovery, model-call replay safety, bash replay safety, spawn recovery semantics, or Workspace Isolation.
+
+> *This was generated by AI during execution.*
+>
+> Implemented a read-only MAS runtime control-plane adapter backed by `DBOSClient` for external Interactive Root Agent discovery and resume validation. `mini-mas status` and resume preparation now read workflow metadata and status events without launching a DBOS executor, listening to queues, or registering execution capacity. Execution-capable paths such as Root command submission, Interactive Root startup, and `mini-mas agent activate` retain their explicit queue-listening runtime boundaries.
+>
+> Added tests proving status and resume metadata paths do not call `DBOS(...)`, `listen_queues`, `launch`, or queue registration; status output remains limited to Interactive Root discovery fields; and CLI status/resume prompt output excludes AI Agent Execution activation and AI Agent queue indicators. Existing MAS runtime and CLI behavior remains covered by the full MAS test suite.
+>
+> Verification:
+> - `.venv/bin/pytest tests/mas -q` passed with 181 tests.
+> - `.venv/bin/ruff check src/minisweagent/mas tests/mas` passed.

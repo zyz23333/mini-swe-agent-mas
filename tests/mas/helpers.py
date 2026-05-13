@@ -9,6 +9,27 @@ def _mock_dbos_module() -> MagicMock:
     dbos_module.DBOS.register_queue_async = AsyncMock()
     dbos_module.DBOS.workflow.return_value = lambda func: func
     dbos_module.DBOS.step.return_value = lambda func: func
+
+    control_plane = MagicMock()
+
+    async def list_workflows_async(**kwargs):
+        workflow_ids = kwargs.get("workflow_ids")
+        if workflow_ids is not None and dbos_module.DBOS.get_workflow_status_async.side_effect is not None:
+            statuses = []
+            for workflow_id in workflow_ids:
+                status = await dbos_module.DBOS.get_workflow_status_async(workflow_id)
+                if status is not None:
+                    statuses.append(status)
+            return statuses
+        return await dbos_module.DBOS.list_workflows_async(**kwargs)
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return await dbos_module.DBOS.get_event_async(workflow_id, key, timeout_seconds)
+
+    control_plane.list_workflows_async = Mock(side_effect=list_workflows_async)
+    control_plane.get_event_async = Mock(side_effect=get_event_async)
+    control_plane.destroy = Mock()
+    dbos_module.DBOSClient.return_value = control_plane
     return dbos_module
 
 def _mock_recording_dbos_module() -> MagicMock:
