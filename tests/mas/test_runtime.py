@@ -1,9 +1,13 @@
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
+from minisweagent.mas import runtime
 from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME, INTERACTIVE_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import (
+    _run_mas_async,
     activate_ai_agent_execution,
     discover_interactive_root_agents,
     launch_interactive_runtime,
@@ -124,6 +128,38 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
         "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
     }
+
+
+def test_sync_mas_async_runner_reuses_loop_without_shutting_down_default_executor():
+    class RecordingExecutor(ThreadPoolExecutor):
+        def __init__(self):
+            super().__init__(max_workers=1)
+            self.shutdown_calls = 0
+
+        def shutdown(self, *args, **kwargs):
+            self.shutdown_calls += 1
+            return super().shutdown(*args, **kwargs)
+
+    async def configure_default_executor(executor):
+        asyncio.get_running_loop().set_default_executor(executor)
+        return "configured"
+
+    async def still_uses_same_loop():
+        return id(asyncio.get_running_loop())
+
+    executor = RecordingExecutor()
+
+    try:
+        assert _run_mas_async(configure_default_executor(executor)) == "configured"
+        first_loop_id = _run_mas_async(still_uses_same_loop())
+        second_loop_id = _run_mas_async(still_uses_same_loop())
+
+        assert first_loop_id == second_loop_id
+        assert executor.shutdown_calls == 0
+    finally:
+        if runtime._SYNC_ASYNC_LOOP is not None:
+            runtime._SYNC_ASYNC_LOOP.close()
+            runtime._SYNC_ASYNC_LOOP = None
 
 
 def test_plain_mini_mas_runtime_listens_only_to_interactive_workflows_before_launch():

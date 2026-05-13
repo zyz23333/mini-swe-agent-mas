@@ -9,7 +9,7 @@ import shlex
 import threading
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,8 @@ MAS_RUNTIME_STATE_STORE_PATH = Path(".mini-mas") / "runtime" / "mini_mas_dbos.sq
 ATTACHMENT_LEASE_TOKEN_PREFIX = "att-"
 ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS = 300.0
 _DECLARED_DBOS_QUEUE_POLICIES: weakref.WeakKeyDictionary[Any, tuple[str, ...]] = weakref.WeakKeyDictionary()
+_SYNC_ASYNC_LOOP_LOCK = threading.Lock()
+_SYNC_ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 def load_dbos():
@@ -34,6 +36,26 @@ def load_dbos():
     import dbos
 
     return dbos
+
+
+def _run_mas_async(awaitable: Awaitable[Any]) -> Any:
+    """Run a MAS async runtime operation without shutting down DBOS' default executor."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        close = getattr(awaitable, "close", None)
+        if close is not None:
+            close()
+        msg = "MAS synchronous runtime APIs cannot be called from a running asyncio event loop"
+        raise RuntimeError(msg)
+
+    global _SYNC_ASYNC_LOOP
+    with _SYNC_ASYNC_LOOP_LOCK:
+        if _SYNC_ASYNC_LOOP is None or _SYNC_ASYNC_LOOP.is_closed():
+            _SYNC_ASYNC_LOOP = asyncio.new_event_loop()
+        return _SYNC_ASYNC_LOOP.run_until_complete(awaitable)
 
 
 class RuntimeControlPlane:
@@ -365,7 +387,7 @@ def start_interactive_root_agent_workflow(
     workflow_id: str | None = None,
 ) -> Mapping[str, Any]:
     """Initialize DBOS and start the minimal Interactive Root Agent path."""
-    return asyncio.run(
+    return _run_mas_async(
         _start_interactive_root_agent_workflow_async(
             workflow_id=workflow_id,
         )
@@ -467,7 +489,7 @@ def send_root_command(
     attachment_token: str | None = None,
 ) -> Mapping[str, Any]:
     """Initialize DBOS, send one Root command, and wait on the command-id-scoped result event."""
-    return asyncio.run(
+    return _run_mas_async(
         _send_root_command_async(
             root_agent_id=root_agent_id,
             command=command,
@@ -655,7 +677,7 @@ async def _discover_interactive_root_agents_async() -> Mapping[str, Any]:
 
 def discover_interactive_root_agents() -> Mapping[str, Any]:
     """Initialize DBOS and list parentless Interactive Root Agent workflows."""
-    return asyncio.run(_discover_interactive_root_agents_async())
+    return _run_mas_async(_discover_interactive_root_agents_async())
 
 
 async def _prepare_resume_root_agent_async(
@@ -760,7 +782,7 @@ def prepare_resume_root_agent(
     root_agent_id: str,
 ) -> Mapping[str, Any]:
     """Validate an Interactive Root Agent before the resume terminal attaches."""
-    return asyncio.run(
+    return _run_mas_async(
         _prepare_resume_root_agent_async(
             root_agent_id=root_agent_id,
         )
