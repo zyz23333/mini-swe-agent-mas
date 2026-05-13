@@ -80,6 +80,34 @@ def _recording_workflow_queue(name: str = AI_AGENT_WORKFLOW_QUEUE_NAME):
 
     return RecordingWorkflowQueue()
 
+
+def _agent_execution_config(tmp_path, *, outputs=None, step_limit: int = 0, env: dict[str, str] | None = None) -> dict:
+    return {
+        "schema_version": 1,
+        "agent": {
+            "system_template": "System",
+            "instance_template": "Task {{task}}",
+            "step_limit": step_limit,
+            "cost_limit": 3.0,
+        },
+        "model": {
+            "model_class": "deterministic",
+            "model_name": "deterministic",
+            "outputs": list(outputs or []),
+            "observation_template": (
+                "{% if output.exception_info %}<exception>{{output.exception_info}}</exception>\n{% endif %}"
+                "<returncode>{{output.returncode}}</returncode>\n<output>\n{{output.output}}</output>"
+            ),
+        },
+        "environment": {
+            "environment_class": "local",
+            "cwd": tmp_path.resolve().as_posix(),
+            "env": dict(env or {}),
+            "timeout": 30,
+        },
+    }
+
+
 def _child_metadata(workflow_id: str, task: str = "task") -> dict[str, str]:
     return {
         "task": task,

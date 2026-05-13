@@ -6,6 +6,8 @@ import asyncio
 from inspect import isawaitable
 from typing import Any
 
+from jinja2 import StrictUndefined, Template
+
 from minisweagent.exceptions import InterruptAgentFlow
 from minisweagent.mas import agent_interactions
 from minisweagent.mas.artifacts import (
@@ -18,6 +20,13 @@ from minisweagent.mas.commands import (
     MasCommandHandler,
     MasCommandKind,
     classify_mas_command,
+)
+from minisweagent.mas.execution_config import (
+    ERROR_AGENT_EXECUTION_RUNTIME_FAILED,
+    AgentExecutionConfigError,
+    redact_agent_execution_config,
+    safe_prompt_template_vars,
+    validate_agent_execution_config,
 )
 from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import load_dbos
@@ -161,16 +170,132 @@ async def query_model_step(model, messages: list[dict]) -> dict:
     return await asyncio.to_thread(model.query, messages)
 
 
+def _get_model_from_config(model_config: dict):
+    from minisweagent.models import get_model
+
+    return get_model(config=model_config)
+
+
+def _get_environment_from_config(environment_config: dict):
+    from minisweagent.environments import get_environment
+
+    return get_environment(environment_config, default_type="local")
+
+
+def _render_template(template: str, template_vars: dict[str, Any]) -> str:
+    return Template(template, undefined=StrictUndefined).render(**template_vars)
+
+
+@_dbos.DBOS.step()
+async def initial_messages_from_config_step(
+    agent_execution_config: dict,
+    *,
+    task: str,
+    agent_id: str,
+    parent_agent_id: str | None,
+) -> list[dict]:
+    """Render autonomous Child initial messages from Agent Execution Config inside a DBOS step."""
+
+    def build_messages() -> list[dict]:
+        config = validate_agent_execution_config(agent_execution_config, preflight_credentials=False)
+        model = _get_model_from_config(config["model"])
+        template_vars = safe_prompt_template_vars(
+            agent_execution_config=config,
+            task=task,
+            agent_id=agent_id,
+            parent_agent_id=parent_agent_id,
+            n_model_calls=0,
+            model_cost=0.0,
+        )
+        return [
+            model.format_message(
+                role="system",
+                content=_render_template(config["agent"]["system_template"], template_vars),
+            ),
+            model.format_message(
+                role="user",
+                content=_render_template(config["agent"]["instance_template"], template_vars),
+            ),
+        ]
+
+    return await asyncio.to_thread(build_messages)
+
+
+@_dbos.DBOS.step()
+async def query_model_from_config_step(model_config: dict, messages: list[dict], query_index: int) -> dict:
+    """Construct and query a model from serializable config inside a DBOS step."""
+
+    def query() -> dict:
+        config = dict(model_config)
+        if _is_deterministic_model_config(config) and isinstance(config.get("outputs"), list):
+            config["outputs"] = config["outputs"][query_index:]
+        return _get_model_from_config(config).query(messages)
+
+    return await asyncio.to_thread(query)
+
+
+@_dbos.DBOS.step()
+async def format_observation_messages_from_config_step(
+    model_config: dict,
+    message: dict,
+    outputs: list[dict],
+    template_vars: dict,
+) -> list[dict]:
+    """Format model observation messages from serializable config inside a DBOS step."""
+
+    def format_messages() -> list[dict]:
+        return _get_model_from_config(model_config).format_observation_messages(message, outputs, template_vars)
+
+    return await asyncio.to_thread(format_messages)
+
+
+@_dbos.DBOS.step()
+async def continuation_user_message_from_config_step(model_config: dict, signal: dict) -> dict:
+    """Format a parent continuation message from serializable model config inside a DBOS step."""
+
+    def format_message() -> dict:
+        return continuation_user_message(_get_model_from_config(model_config), signal)
+
+    return await asyncio.to_thread(format_message)
+
+
+@_dbos.DBOS.step()
+async def limits_exceeded_message_from_config_step(model_config: dict) -> dict:
+    """Format a limits-exceeded exit message from serializable model config inside a DBOS step."""
+
+    def format_message() -> dict:
+        return _limits_exceeded_message(_get_model_from_config(model_config))
+
+    return await asyncio.to_thread(format_message)
+
+
 @_dbos.DBOS.step()
 async def execute_bash_step(env, action: dict) -> dict:
     """Execute ordinary bash through a DBOS checkpointed step."""
     return await asyncio.to_thread(env.execute, action)
 
 
+@_dbos.DBOS.step()
+async def execute_bash_from_config_step(environment_config: dict, action: dict) -> dict:
+    """Construct and use a Local Agent Environment from serializable config inside a DBOS step."""
+
+    def execute() -> dict:
+        return _get_environment_from_config(environment_config).execute(action)
+
+    return await asyncio.to_thread(execute)
+
+
+def _is_deterministic_model_config(model_config: dict) -> bool:
+    model_class = str(model_config.get("model_class") or "")
+    model_name = str(model_config.get("model_name") or "")
+    return "deterministic" in model_class.lower() or model_name == "deterministic"
+
+
 async def _execute_agent_workflow_outputs(
     *,
     message: dict,
-    env,
+    env=None,
+    environment_config: dict | None = None,
     command_handler: MasCommandHandler,
 ) -> list[dict]:
     """Execute bash-shaped Agent actions with workflow-layer MAS interception."""
@@ -183,7 +308,10 @@ async def _execute_agent_workflow_outputs(
         elif classification.kind == MasCommandKind.INVALID:
             outputs.append(_reject_mas_shell_composition(classification))
         else:
-            outputs.append(await _maybe_await(execute_bash_step(env, action)))
+            if environment_config is not None:
+                outputs.append(await _maybe_await(execute_bash_from_config_step(environment_config, action)))
+            else:
+                outputs.append(await _maybe_await(execute_bash_step(env, action)))
     return outputs
 
 
@@ -191,17 +319,28 @@ async def execute_agent_workflow_actions(
     *,
     message: dict,
     model,
-    env,
+    env=None,
+    model_config: dict | None = None,
+    environment_config: dict | None = None,
     template_vars: dict | None = None,
     command_handler: MasCommandHandler | None = None,
 ) -> list[dict]:
     """Execute one model message and return model-specific observation messages."""
     template_vars = template_vars or {}
+    if command_handler is None:
+        agent_execution_config = template_vars.get("agent_execution_config")
+        command_handler = MasCommandHandler(
+            agent_execution_config=agent_execution_config,
+            shared_workspace=template_vars.get("cwd") or ".",
+        )
     outputs = await _execute_agent_workflow_outputs(
         message=message,
         env=env,
-        command_handler=command_handler or MasCommandHandler(),
+        environment_config=environment_config,
+        command_handler=command_handler,
     )
+    if model_config is not None:
+        return await _maybe_await(format_observation_messages_from_config_step(model_config, message, outputs, template_vars))
     return model.format_observation_messages(message, outputs, template_vars)
 
 
@@ -248,6 +387,24 @@ def _limits_exceeded_message(model) -> dict:
     )
 
 
+def _runtime_failed_message(model, content: str) -> dict:
+    message = {
+        "role": "exit",
+        "content": content,
+        "extra": {
+            "exit_status": "failed",
+            "submission": "",
+            "mas_error": {
+                "code": ERROR_AGENT_EXECUTION_RUNTIME_FAILED,
+                "message": content,
+            },
+        },
+    }
+    if model is None:
+        return message
+    return model.format_message(**message)
+
+
 def _initial_messages(model, task: str) -> list[dict]:
     return [
         model.format_message(role="system", content="You are a mini-swe-agent MAS Root Agent."),
@@ -263,30 +420,43 @@ class MasAgent:
         *,
         agent_id: str,
         parent_agent_id: str | None = None,
-        model,
-        env,
+        model=None,
+        env=None,
         step_limit: int,
+        agent_execution_config: dict[str, Any] | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.workflow_id = agent_id
         self.parent_agent_id = parent_agent_id
         self.model = model
         self.env = env
-        self.step_limit = step_limit
+        self.agent_execution_config = validate_agent_execution_config(agent_execution_config, preflight_credentials=False) if agent_execution_config is not None else None
+        self.step_limit = self._configured_step_limit(step_limit)
         self.task = ""
         self.messages: list[dict] = []
         self.cost = 0.0
         self.n_calls = 0
         self.first_observable_published = False
-        self.command_handler = MasCommandHandler()
+        self.command_handler = MasCommandHandler(
+            agent_execution_config=self.agent_execution_config,
+            shared_workspace=self._shared_workspace(),
+        )
 
     async def run(self, *, task: str = "", initial_messages: list[dict] | None = None) -> dict:
         """Run the MAS Agent until a terminal state or parent direction wait."""
         self.task = task
         if self.model is None or self.env is None:
-            return await self._record_started_workflow()
+            if self.agent_execution_config is None:
+                if self.parent_agent_id is not None:
+                    return await self._record_invalid_config_workflow(
+                        AgentExecutionConfigError(
+                            "missing_agent_execution_config",
+                            "Child Agent workflow did not receive Agent Execution Config",
+                        )
+                    )
+                return await self._record_started_workflow()
 
-        self.messages = list(initial_messages) if initial_messages is not None else _initial_messages(self.model, task)
+        self.messages = list(initial_messages) if initial_messages is not None else await self._initial_messages(task)
         while True:
             await self._publish_status("running")
             await self._run_until_terminal_message()
@@ -303,7 +473,7 @@ class MasAgent:
                 waiting_result = await self._wait_for_parent_after_submission(result)
                 parent_direction_signal = waiting_result.get("parent_direction_signal")
                 if is_continuation_signal(parent_direction_signal):
-                    self.add_messages(continuation_user_message(self.model, parent_direction_signal))
+                    self.add_messages(await self._continuation_user_message(parent_direction_signal))
                     self.first_observable_published = False
                     continue
                 if is_close_signal(parent_direction_signal):
@@ -338,7 +508,16 @@ class MasAgent:
     async def query(self) -> dict:
         """Query the model through the DBOS model step and append the model message."""
         self.n_calls += 1
-        message = await _maybe_await(query_model_step(self.model, self.messages))
+        if self.agent_execution_config is not None:
+            message = await _maybe_await(
+                query_model_from_config_step(
+                    self.agent_execution_config["model"],
+                    self.messages,
+                    self.n_calls - 1,
+                )
+            )
+        else:
+            message = await _maybe_await(query_model_step(self.model, self.messages))
         self.cost += message.get("extra", {}).get("cost", 0.0)
         self.add_messages(message)
         return message
@@ -349,6 +528,8 @@ class MasAgent:
             message=message,
             model=self.model,
             env=self.env,
+            model_config=self.agent_execution_config["model"] if self.agent_execution_config is not None else None,
+            environment_config=self.agent_execution_config["environment"] if self.agent_execution_config is not None else None,
             template_vars=self.get_template_vars(),
             command_handler=self.command_handler,
         )
@@ -360,6 +541,17 @@ class MasAgent:
         return list(messages)
 
     def get_template_vars(self, **kwargs) -> dict:
+        if self.agent_execution_config is not None:
+            data = safe_prompt_template_vars(
+                agent_execution_config=self.agent_execution_config,
+                task=self.task,
+                agent_id=self.agent_id,
+                parent_agent_id=self.parent_agent_id,
+                n_model_calls=self.n_calls,
+                model_cost=self.cost,
+            )
+            data |= kwargs
+            return data
         data = {}
         if hasattr(self.env, "get_template_vars"):
             data |= self.env.get_template_vars()
@@ -374,15 +566,48 @@ class MasAgent:
         data |= kwargs
         return data
 
+    async def _initial_messages(self, task: str) -> list[dict]:
+        if self.agent_execution_config is not None:
+            return await _maybe_await(
+                initial_messages_from_config_step(
+                    self.agent_execution_config,
+                    task=task,
+                    agent_id=self.agent_id,
+                    parent_agent_id=self.parent_agent_id,
+                )
+            )
+        return _initial_messages(self.model, task)
+
+    async def _continuation_user_message(self, signal: dict) -> dict:
+        if self.agent_execution_config is not None:
+            return await _maybe_await(
+                continuation_user_message_from_config_step(self.agent_execution_config["model"], signal)
+            )
+        return continuation_user_message(self.model, signal)
+
+    async def _limits_exceeded_message(self) -> dict:
+        if self.agent_execution_config is not None:
+            return await _maybe_await(limits_exceeded_message_from_config_step(self.agent_execution_config["model"]))
+        return _limits_exceeded_message(self.model)
+
     async def _run_until_terminal_message(self) -> None:
         while True:
             if 0 < self.step_limit <= self.n_calls:
-                self.add_messages(_limits_exceeded_message(self.model))
+                self.add_messages(await self._limits_exceeded_message())
                 return
             try:
                 await self.step()
             except InterruptAgentFlow as flow:
                 self.add_messages(*flow.messages)
+            except Exception as exc:
+                if self.parent_agent_id is None:
+                    raise
+                self.add_messages(
+                    _runtime_failed_message(
+                        self.model,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                )
             if self.messages and self.messages[-1].get("role") == "exit":
                 return
 
@@ -390,6 +615,33 @@ class MasAgent:
         await self._publish_status("running")
         metadata = await self._save_trajectory(status="started")
         return {"status": "started", "terminal_state": "started", **metadata}
+
+    async def _record_invalid_config_workflow(self, error: AgentExecutionConfigError) -> dict:
+        await self._publish_status("failed", latest_error=str(error))
+        await agent_interactions.publish_first_observable(
+            agent_id=self.agent_id,
+            parent_agent_id=self.parent_agent_id,
+            lifecycle_state="failed",
+            latest_error=str(error),
+        )
+        metadata = await self._save_trajectory(
+            status="failed",
+            model_stats={"instance_cost": 0.0, "api_calls": 0},
+            extra_info={
+                "mas_error": {
+                    "code": error.code,
+                    "message": error.message,
+                    **({"path": error.path} if error.path else {}),
+                },
+            },
+        )
+        return {
+            "status": "failed",
+            "terminal_state": "failed",
+            "latest_error": str(error),
+            "mas_error": {"code": error.code, "message": error.message},
+            **metadata,
+        }
 
     async def _publish_status(
         self,
@@ -412,7 +664,11 @@ class MasAgent:
         status: str,
         model_stats: dict | None = None,
         submission: str = "",
+        extra_info: dict | None = None,
     ) -> dict[str, str]:
+        extra_info = dict(extra_info or {})
+        if self.agent_execution_config is not None:
+            extra_info.setdefault("agent_execution_config", redact_agent_execution_config(self.agent_execution_config))
         return await _maybe_await(
             save_trajectory_artifact_step(
                 self.agent_id,
@@ -421,8 +677,25 @@ class MasAgent:
                 messages=self.messages or None,
                 model_stats=model_stats,
                 submission=submission,
+                extra_info=extra_info or None,
             )
         )
+
+    def _configured_step_limit(self, explicit_step_limit: int) -> int:
+        if explicit_step_limit:
+            return explicit_step_limit
+        if self.agent_execution_config is None:
+            return explicit_step_limit
+        return int(self.agent_execution_config.get("agent", {}).get("step_limit", 0))
+
+    def _shared_workspace(self) -> str | None:
+        if self.agent_execution_config is None:
+            env_config = getattr(self.env, "config", None)
+            cwd = getattr(env_config, "cwd", "")
+            if isinstance(cwd, str) and cwd:
+                return str(self.env.config.cwd)
+            return "."
+        return str(self.agent_execution_config.get("environment", {}).get("cwd") or ".")
 
     def _should_wait_for_parent_after_submission(self, result: dict[str, Any]) -> bool:
         return self.parent_agent_id is not None and result["terminal_state"] == "Submitted"
@@ -644,6 +917,7 @@ async def save_trajectory_artifact_step(
     messages: list[dict] | None = None,
     model_stats: dict | None = None,
     submission: str = "",
+    extra_info: dict | None = None,
 ) -> dict[str, str]:
     """Persist any Agent trajectory through one DBOS checkpointed step."""
     await asyncio.to_thread(
@@ -654,6 +928,7 @@ async def save_trajectory_artifact_step(
         messages=messages,
         model_stats=model_stats,
         submission=submission,
+        extra_info=extra_info,
     )
     return make_artifact_metadata(
         agent_id=agent_id,
@@ -670,6 +945,7 @@ async def _run_agent_workflow(
     task: str,
     step_limit: int,
     initial_messages: list[dict] | None,
+    agent_execution_config: dict[str, Any] | None = None,
 ) -> dict:
     original_workflow_id = _current_agent_workflow_id()
     if original_workflow_id is None:
@@ -683,6 +959,7 @@ async def _run_agent_workflow(
             task=task,
             step_limit=step_limit,
             initial_messages=initial_messages,
+            agent_execution_config=agent_execution_config,
         )
     finally:
         if original_workflow_id is None:
@@ -698,14 +975,18 @@ async def _run_agent_workflow_with_context(
     task: str,
     step_limit: int,
     initial_messages: list[dict] | None,
+    agent_execution_config: dict[str, Any] | None = None,
 ) -> dict:
-    agent = MasAgent(
-        agent_id=agent_id,
-        parent_agent_id=parent_agent_id,
-        model=model,
-        env=env,
-        step_limit=step_limit,
-    )
+    agent_kwargs = {
+        "agent_id": agent_id,
+        "parent_agent_id": parent_agent_id,
+        "model": model,
+        "env": env,
+        "step_limit": step_limit,
+    }
+    if agent_execution_config is not None:
+        agent_kwargs["agent_execution_config"] = agent_execution_config
+    agent = MasAgent(**agent_kwargs)
     return await agent.run(task=task, initial_messages=initial_messages)
 
 
@@ -767,20 +1048,38 @@ async def child_agent_workflow(
     task: str,
     *,
     parent_agent_id: str,
-    model=None,
-    env=None,
-    step_limit: int = 0,
-    initial_messages: list[dict] | None = None,
+    agent_execution_config: dict[str, Any] | None = None,
 ) -> dict:
     """Autonomous Child Agent DBOS workflow started through the AI Agent queue."""
     agent_id = validate_agent_id(agent_id)
     parent_agent_id = validate_agent_id(parent_agent_id)
+    try:
+        validated_config = validate_agent_execution_config(agent_execution_config, preflight_credentials=False)
+    except AgentExecutionConfigError as exc:
+        return await _record_child_workflow_config_failure(agent_id, parent_agent_id, exc)
     return await _run_agent_workflow(
         agent_id=agent_id,
         parent_agent_id=parent_agent_id,
-        model=model,
-        env=env,
+        model=None,
+        env=None,
         task=task,
-        step_limit=step_limit,
-        initial_messages=initial_messages,
+        step_limit=0,
+        initial_messages=None,
+        agent_execution_config=validated_config,
     )
+
+
+async def _record_child_workflow_config_failure(
+    agent_id: str,
+    parent_agent_id: str,
+    error: AgentExecutionConfigError,
+) -> dict:
+    """Record a terminal failed Child workflow when queued config is missing or invalid."""
+    agent = MasAgent(
+        agent_id=agent_id,
+        parent_agent_id=parent_agent_id,
+        model=None,
+        env=None,
+        step_limit=0,
+    )
+    return await agent._record_invalid_config_workflow(error)

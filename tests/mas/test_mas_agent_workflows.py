@@ -16,6 +16,7 @@ from minisweagent.models.test_models import (
 )
 
 from .helpers import (
+    _agent_execution_config,
     _call_root_agent_workflow,
     _mock_dbos_module,
     _mock_recording_dbos_module,
@@ -350,6 +351,7 @@ def test_interactive_root_agent_waited_spawn_result_uses_existing_waited_shape_a
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MSWEA_MODEL_NAME", "deterministic")
 
     import minisweagent.mas.mas_agent as workflows
     from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX, ROOT_COMMAND_TOPIC
@@ -511,7 +513,7 @@ def test_waiting_for_command_lifecycle_is_owned_by_mas_interactive_agent():
     assert callable(workflows.MasInteractiveAgent.run_until_idle)
 
 
-def test_child_agent_workflow_writes_artifact_under_root_agent_artifact_directory(tmp_path, monkeypatch):
+def test_child_agent_workflow_without_execution_config_fails_with_artifact(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     import minisweagent.mas.mas_agent as workflows
@@ -523,19 +525,68 @@ def test_child_agent_workflow_writes_artifact_under_root_agent_artifact_director
         parent_agent_id="mas-0123456789abcdef",
     )
 
-    assert result == {
-        "agent_id": "mas-1111111111111111",
-        "parent_agent_id": "mas-0123456789abcdef",
-        "status": "started",
-        "terminal_state": "started",
-        "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
-        "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
-    }
+    assert result["agent_id"] == "mas-1111111111111111"
+    assert result["parent_agent_id"] == "mas-0123456789abcdef"
+    assert result["status"] == "failed"
+    assert result["terminal_state"] == "failed"
+    assert result["mas_error"]["code"] == "missing_agent_execution_config"
+    assert result["agent_artifact_directory"] == ".mini-mas/agents/mas-1111111111111111"
+    assert result["trajectory_artifact_path"] == ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json"
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
     assert artifact["info"]["parent_agent_id"] == "mas-0123456789abcdef"
     assert artifact["info"]["agent_id"] == "mas-1111111111111111"
     assert "workflow_id" not in artifact["info"]
     assert artifact["info"]["agent_artifact_directory"] == ".mini-mas/agents/mas-1111111111111111"
+
+
+def test_child_agent_trajectory_redacts_agent_execution_config_env_values(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+
+    config = {
+        "schema_version": 1,
+        "agent": {
+            "system_template": "System",
+            "instance_template": "Task {{task}}",
+            "step_limit": 0,
+            "cost_limit": 3.0,
+        },
+        "model": {
+            "model_class": "deterministic",
+            "model_name": "deterministic",
+            "outputs": [
+                {
+                    "role": "exit",
+                    "content": "done",
+                    "extra": {"exit_status": "failed", "submission": ""},
+                }
+            ],
+            "observation_template": "{{output.output}}",
+            "format_error_template": "{{error}}",
+        },
+        "environment": {
+            "environment_class": "local",
+            "cwd": tmp_path.as_posix(),
+            "env": {"PAGER": "cat"},
+            "timeout": 30,
+        },
+    }
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-1111111111111111",
+        "hit limit",
+        parent_agent_id="mas-0123456789abcdef",
+        agent_execution_config=config,
+    )
+
+    assert result["terminal_state"] == "failed"
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    recorded_config = artifact["info"]["agent_execution_config"]
+    assert recorded_config["environment"]["env"] == {"PAGER": "<redacted>"}
+    assert config["environment"]["env"] == {"PAGER": "cat"}
+
 
 def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
     """The root workflow is defined inside the MAS subsystem boundary."""
@@ -571,7 +622,7 @@ def test_agent_workflows_are_async_dbos_workflows():
         getattr(workflows.child_agent_workflow, "__wrapped__", workflows.child_agent_workflow)
     )
 
-def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
+def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch, tmp_path):
     import minisweagent.mas.mas_agent as workflows
 
     mas_agent_class = workflows.MasAgent
@@ -579,12 +630,22 @@ def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
     run_calls = []
 
     class RecordingMasAgent:
-        def __init__(self, *, agent_id, parent_agent_id=None, model, env, step_limit):
+        def __init__(
+            self,
+            *,
+            agent_id,
+            parent_agent_id=None,
+            model,
+            env,
+            step_limit,
+            agent_execution_config=None,
+        ):
             self.agent_id = agent_id
             self.parent_agent_id = parent_agent_id
             self.model = model
             self.env = env
             self.step_limit = step_limit
+            self.agent_execution_config = agent_execution_config
             created_agents.append(self)
 
         async def run(self, *, task="", initial_messages=None):
@@ -630,16 +691,18 @@ def test_agent_workflow_entrypoints_delegate_to_plain_mas_agent(monkeypatch):
         "mas-1111111111111111",
         "child task",
         parent_agent_id="mas-0123456789abcdef",
-        model=Mock(),
-        env=Mock(),
-        step_limit=5,
+        agent_execution_config=_agent_execution_config(tmp_path, step_limit=5),
     )
 
     assert child_result["agent_id"] == "mas-1111111111111111"
     assert child_result["parent_agent_id"] == "mas-0123456789abcdef"
     assert child_result["task"] == "child task"
     assert len(created_agents) == 2
-    assert created_agents[1].step_limit == 5
+    assert created_agents[1].model is None
+    assert created_agents[1].env is None
+    assert created_agents[1].step_limit == 0
+    assert created_agents[1].agent_execution_config["model"]["model_name"] == "deterministic"
+    assert created_agents[1].agent_execution_config["agent"]["step_limit"] == 5
     assert run_calls[-1] == ("mas-1111111111111111", "child task", None)
     assert not hasattr(mas_agent_class, "__dbos_class_info__")
     for method_name in ("run", "step", "query", "execute_actions", "add_messages", "get_template_vars"):
@@ -796,15 +859,23 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
         Mock(side_effect=AssertionError("Child status must not use child-to-parent send")),
     )
 
-    model = DeterministicModel(outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)])
-    env = Mock()
-    env.get_template_vars.return_value = {}
-    env.execute.side_effect = Submitted(
-        {
-            "role": "exit",
-            "content": "child done",
-            "extra": {"exit_status": "Submitted", "submission": "child done"},
-        }
+    monkeypatch.setattr(
+        workflows,
+        "execute_bash_from_config_step",
+        Mock(
+            side_effect=Submitted(
+                {
+                    "role": "exit",
+                    "content": "child done",
+                    "extra": {"exit_status": "Submitted", "submission": "child done"},
+                }
+            )
+        ),
+    )
+    config = _agent_execution_config(
+        tmp_path,
+        outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)],
+        step_limit=3,
     )
 
     result = _call_root_agent_workflow(
@@ -812,9 +883,7 @@ def test_child_workflow_waits_after_first_submission_and_sets_first_observable_e
         "mas-1111111111111111",
         "submit once",
         parent_agent_id="mas-0123456789abcdef",
-        model=model,
-        env=env,
-        step_limit=3,
+        agent_execution_config=config,
     )
 
     assert result["terminal_state"] == "waiting_for_parent"
@@ -866,15 +935,23 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
         Mock(side_effect=AssertionError("Child close waiting must use recv_async")),
     )
 
-    model = DeterministicModel(outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)])
-    env = Mock()
-    env.get_template_vars.return_value = {}
-    env.execute.side_effect = Submitted(
-        {
-            "role": "exit",
-            "content": "child done",
-            "extra": {"exit_status": "Submitted", "submission": "child done"},
-        }
+    monkeypatch.setattr(
+        workflows,
+        "execute_bash_from_config_step",
+        Mock(
+            side_effect=Submitted(
+                {
+                    "role": "exit",
+                    "content": "child done",
+                    "extra": {"exit_status": "Submitted", "submission": "child done"},
+                }
+            )
+        ),
+    )
+    config = _agent_execution_config(
+        tmp_path,
+        outputs=[make_output("submit", [{"command": "submit"}], cost=0.1)],
+        step_limit=3,
     )
 
     result = _call_root_agent_workflow(
@@ -882,9 +959,7 @@ def test_child_workflow_receives_close_and_publishes_closed_status(monkeypatch, 
         "mas-1111111111111111",
         "submit once",
         parent_agent_id="mas-0123456789abcdef",
-        model=model,
-        env=env,
-        step_limit=3,
+        agent_execution_config=config,
     )
 
     assert result["status"] == "closed"
@@ -924,11 +999,7 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
         Mock(side_effect=AssertionError("Failed or limited child should not wait for parent direction")),
     )
 
-    model = DeterministicModel(outputs=[])
-    env = Mock()
-    env.get_template_vars.return_value = {}
-
-    async def failing_model(_model, _messages):
+    async def failing_model(_model_config, _messages, _query_index):
         raise InterruptAgentFlow(
             {
                 "role": "exit",
@@ -937,16 +1008,14 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
             }
         )
 
-    monkeypatch.setattr(workflows, "query_model_step", failing_model)
+    monkeypatch.setattr(workflows, "query_model_from_config_step", failing_model)
 
     _call_root_agent_workflow(
         workflows.child_agent_workflow,
         "mas-1111111111111111",
         "fail",
         parent_agent_id="mas-0123456789abcdef",
-        model=model,
-        env=env,
-        step_limit=3,
+        agent_execution_config=_agent_execution_config(tmp_path, step_limit=3),
     )
 
     first_observable = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
@@ -965,14 +1034,14 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
 
     published.clear()
 
-    async def replay_model_response(_model, _messages):
+    async def replay_model_response(_model_config, _messages, _query_index):
         return make_output("work", [{"command": "echo hi"}], cost=0.1)
 
-    monkeypatch.setattr(workflows, "query_model_step", replay_model_response)
+    monkeypatch.setattr(workflows, "query_model_from_config_step", replay_model_response)
     monkeypatch.setattr(
         workflows,
-        "execute_bash_step",
-        lambda _env, _action: {"output": "hi\n", "returncode": 0, "exception_info": ""},
+        "execute_bash_from_config_step",
+        lambda _environment_config, _action: {"output": "hi\n", "returncode": 0, "exception_info": ""},
     )
 
     _call_root_agent_workflow(
@@ -980,9 +1049,7 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
         "mas-2222222222222222",
         "hit limit",
         parent_agent_id="mas-0123456789abcdef",
-        model=model,
-        env=env,
-        step_limit=1,
+        agent_execution_config=_agent_execution_config(tmp_path, step_limit=1),
     )
 
     first_observable = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
@@ -1129,39 +1196,44 @@ def test_child_workflow_injects_continuation_and_resumes_existing_trajectory(mon
         Mock(side_effect=AssertionError("Child continuation waiting must use recv_async")),
     )
 
-    model = DeterministicModel(
+    bash_results = iter(
+        [
+            Submitted(
+                {
+                    "role": "exit",
+                    "content": "first submission",
+                    "extra": {"exit_status": "Submitted", "submission": "first submission"},
+                }
+            ),
+            Submitted(
+                {
+                    "role": "exit",
+                    "content": "second submission",
+                    "extra": {"exit_status": "Submitted", "submission": "second submission"},
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        workflows,
+        "execute_bash_from_config_step",
+        Mock(side_effect=bash_results),
+    )
+    config = _agent_execution_config(
+        tmp_path,
         outputs=[
             make_output("first", [{"command": "submit first"}], cost=0.1),
             make_output("second", [{"command": "submit second"}], cost=0.1),
-        ]
+        ],
+        step_limit=4,
     )
-    env = Mock()
-    env.get_template_vars.return_value = {}
-    env.execute.side_effect = [
-        Submitted(
-            {
-                "role": "exit",
-                "content": "first submission",
-                "extra": {"exit_status": "Submitted", "submission": "first submission"},
-            }
-        ),
-        Submitted(
-            {
-                "role": "exit",
-                "content": "second submission",
-                "extra": {"exit_status": "Submitted", "submission": "second submission"},
-            }
-        ),
-    ]
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
         "mas-1111111111111111",
         "submit once",
         parent_agent_id="mas-0123456789abcdef",
-        model=model,
-        env=env,
-        step_limit=4,
+        agent_execution_config=config,
     )
 
     assert result["terminal_state"] == "waiting_for_parent"
@@ -1216,18 +1288,25 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
     monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
     monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
 
-    model = DeterministicModel(outputs=[make_output("first", [{"command": "submit first"}], cost=0.1)])
-    env = Mock()
-    env.get_template_vars.return_value = {}
-    env.execute.side_effect = Submitted(
-        {
-            "role": "exit",
-            "content": "first submission",
-            "extra": {"exit_status": "Submitted", "submission": "first submission"},
-        }
+    monkeypatch.setattr(
+        workflows,
+        "execute_bash_from_config_step",
+        Mock(
+            side_effect=[
+                Submitted(
+                    {
+                        "role": "exit",
+                        "content": "first submission",
+                        "extra": {"exit_status": "Submitted", "submission": "first submission"},
+                    }
+                )
+            ]
+        ),
     )
 
-    async def query_model_step(_model, messages):
+    original_query_model_from_config_step = workflows.query_model_from_config_step
+
+    async def query_model_step(model_config, messages, query_index):
         if any(message.get("extra", {}).get("mas", {}).get("signal_type") == "mas_continuation" for message in messages):
             raise InterruptAgentFlow(
                 {
@@ -1236,18 +1315,21 @@ def test_child_workflow_publishes_terminal_status_after_continuation(monkeypatch
                     "extra": {"exit_status": "failed", "submission": ""},
                 }
             )
-        return _model.query(messages)
+        return await original_query_model_from_config_step(model_config, messages, query_index)
 
-    monkeypatch.setattr(workflows, "query_model_step", query_model_step)
+    monkeypatch.setattr(workflows, "query_model_from_config_step", query_model_step)
+    config = _agent_execution_config(
+        tmp_path,
+        outputs=[make_output("first", [{"command": "submit first"}], cost=0.1)],
+        step_limit=4,
+    )
 
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
         "mas-1111111111111111",
         "submit once",
         parent_agent_id="mas-0123456789abcdef",
-        model=model,
-        env=env,
-        step_limit=4,
+        agent_execution_config=config,
     )
 
     assert result["terminal_state"] == "failed"

@@ -421,7 +421,8 @@ def test_ai_agent_work_queued_before_activation_executes_only_after_activation(m
 
     queued_work = DurableWorkflowQueue(AI_AGENT_WORKFLOW_QUEUE_NAME)
 
-    async def child_agent_workflow(agent_id, task, *, parent_agent_id):
+    async def child_agent_workflow(agent_id, task, *, parent_agent_id, agent_execution_config):
+        assert agent_execution_config["schema_version"] == 1
         queued_work.artifacts[f".mini-mas/agents/{agent_id}/trajectory.traj.json"] = task
         return {"agent_id": agent_id, "parent_agent_id": parent_agent_id, "status": "started"}
 
@@ -448,6 +449,7 @@ def test_ai_agent_work_queued_before_activation_executes_only_after_activation(m
             parent_agent_id="mas-1111111111111111",
             child_agent_id="mas-2222222222222222",
             task="inspect staged work",
+            agent_execution_config={"schema_version": 1},
         )
     )
 
@@ -477,7 +479,8 @@ def test_ai_agent_activation_consumes_late_work_and_stops_execution_without_agen
     initial_agent_states = dict(queued_work.agent_states)
     initial_artifacts = dict(queued_work.artifacts)
 
-    async def child_agent_workflow(agent_id, task, *, parent_agent_id):
+    async def child_agent_workflow(agent_id, task, *, parent_agent_id, agent_execution_config):
+        assert agent_execution_config["schema_version"] == 1
         queued_work.agent_states[agent_id] = "started"
         queued_work.artifacts[f".mini-mas/agents/{agent_id}/trajectory.traj.json"] = task
         return {"agent_id": agent_id, "parent_agent_id": parent_agent_id, "status": "started"}
@@ -498,6 +501,7 @@ def test_ai_agent_activation_consumes_late_work_and_stops_execution_without_agen
                 parent_agent_id="mas-1111111111111111",
                 child_agent_id="mas-6666666666666666",
                 task="late work",
+                agent_execution_config={"schema_version": 1},
             )
         )
         return True
@@ -523,6 +527,7 @@ def test_ai_agent_activation_consumes_late_work_and_stops_execution_without_agen
             parent_agent_id="mas-1111111111111111",
             child_agent_id="mas-7777777777777777",
             task="post-shutdown work",
+            agent_execution_config={"schema_version": 1},
         )
     )
 

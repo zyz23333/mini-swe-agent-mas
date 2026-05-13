@@ -70,7 +70,7 @@ def current_workflow_id() -> str | None:
 
 
 async def enqueue_child_agent_workflow(
-    *, parent_agent_id: str, child_agent_id: str, task: str
+    *, parent_agent_id: str, child_agent_id: str, task: str, agent_execution_config: dict[str, Any]
 ) -> None:
     """Queue autonomous Child Agent work behind explicit AI Agent Execution activation."""
     from minisweagent.mas import mas_agent
@@ -81,6 +81,7 @@ async def enqueue_child_agent_workflow(
             child_agent_id,
             task,
             parent_agent_id=parent_agent_id,
+            agent_execution_config=agent_execution_config,
         )
 
 
@@ -246,6 +247,7 @@ async def spawn_children(
     *,
     parent_workflow_id: str,
     tasks: list[str],
+    agent_execution_config: dict[str, Any],
 ) -> SpawnChildrenResult:
     """Allocate opaque Child Agent IDs and enqueue Child Agents."""
     children = []
@@ -257,6 +259,7 @@ async def spawn_children(
             parent_agent_id=parent_workflow_id,
             child_agent_id=child_workflow_id,
             task=task,
+            agent_execution_config=agent_execution_config,
         )
         children.append({"task": task, **metadata})
     return SpawnChildrenResult(children=children)

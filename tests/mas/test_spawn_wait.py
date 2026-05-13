@@ -13,6 +13,7 @@ from minisweagent.models.test_models import (
 )
 
 from .helpers import (
+    _agent_execution_config,
     _call_root_agent_workflow,
     _mock_direct_child_status_events,
     _observation_text,
@@ -52,7 +53,7 @@ def test_detached_spawn_returns_child_metadata_and_uses_ai_agent_queue(tmp_path,
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", RecordingSetWorkflowID)
     ai_agent_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
 
-    model = DeterministicModel(outputs=[make_output("delegate", [{"command": 'mini-mas spawn "inspect api"'}], cost=0.1)])
+    model = DeterministicModel(outputs=[make_output("delegate", [{"command": 'mini-mas spawn -m deterministic "inspect api"'}], cost=0.1)])
     env = Mock()
     env.get_template_vars.return_value = {}
 
@@ -78,7 +79,9 @@ def test_detached_spawn_returns_child_metadata_and_uses_ai_agent_queue(tmp_path,
         child_agent_id,
         "inspect api",
     )
-    assert child_call["kwargs"] == {"parent_agent_id": "mas-0123456789abcdef"}
+    assert child_call["kwargs"]["parent_agent_id"] == "mas-0123456789abcdef"
+    assert child_call["kwargs"]["agent_execution_config"]["schema_version"] == 1
+    assert child_call["kwargs"]["agent_execution_config"]["environment"]["cwd"] == tmp_path.resolve().as_posix()
     assert result["terminal_state"] == "limits_exceeded"
 
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
@@ -112,8 +115,8 @@ def test_detached_spawn_allocates_opaque_child_ids_without_duplicate_enqueue(tmp
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
     ai_agent_queue.enqueue = Mock(side_effect=AssertionError("Detached spawn must use enqueue_async"))
 
-    first_message = make_output("delegate first", [{"command": 'mini-mas spawn "first task"'}], cost=0.1)
-    second_message = make_output("delegate second", [{"command": 'mini-mas spawn "second task"'}], cost=0.1)
+    first_message = make_output("delegate first", [{"command": 'mini-mas spawn -m deterministic "first task"'}], cost=0.1)
+    second_message = make_output("delegate second", [{"command": 'mini-mas spawn -m deterministic "second task"'}], cost=0.1)
     model = DeterministicModel(outputs=[first_message, second_message])
     env = Mock()
     env.get_template_vars.return_value = {}
@@ -143,7 +146,10 @@ def test_detached_spawn_allocates_opaque_child_ids_without_duplicate_enqueue(tmp
             message=first_message,
             model=model,
             env=env,
-            template_vars={"agent_id": "mas-0123456789abcdef"},
+            template_vars={
+                "agent_id": "mas-0123456789abcdef",
+                "agent_execution_config": _agent_execution_config(tmp_path),
+            },
         )
     )
 
@@ -180,7 +186,7 @@ def test_detached_multi_spawn_returns_all_child_metadata_without_waiting(tmp_pat
     )
 
     model = DeterministicModel(
-        outputs=[make_output("delegate many", [{"command": 'mini-mas spawn "task A" "task B"'}], cost=0.1)]
+        outputs=[make_output("delegate many", [{"command": 'mini-mas spawn -m deterministic "task A" "task B"'}], cost=0.1)]
     )
     env = Mock()
     env.get_template_vars.return_value = {}
@@ -234,20 +240,18 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
     monkeypatch.setattr(workflows, "ai_agent_workflow_queue", ai_agent_queue)
     monkeypatch.setattr(workflows._dbos, "SetWorkflowID", NoopSetWorkflowID)
     _patch_agent_ids(monkeypatch, workflows, ("mas-3333333333333333", "mas-4444444444444444"))
-    model = DeterministicModel(
-        outputs=[make_output("delegate to grandchildren", [{"command": 'mini-mas spawn "task A" "task B"'}], cost=0.1)]
-    )
-    env = Mock()
-    env.get_template_vars.return_value = {}
-
     result = _call_root_agent_workflow(
         workflows.child_agent_workflow,
         "mas-1111111111111111",
         "delegate recursively",
         parent_agent_id="mas-0123456789abcdef",
-        model=model,
-        env=env,
-        step_limit=1,
+        agent_execution_config=_agent_execution_config(
+            tmp_path,
+            outputs=[
+                make_output("delegate to grandchildren", [{"command": 'mini-mas spawn "task A" "task B"'}], cost=0.1)
+            ],
+            step_limit=1,
+        ),
     )
 
     assert result["terminal_state"] == "limits_exceeded"
@@ -266,7 +270,7 @@ def test_child_agent_workflow_can_spawn_grandchildren_with_parent_relative_ids(t
         in observation
     )
 
-def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatch):
+def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatch, tmp_path):
     import minisweagent.mas.mas_agent as workflows
 
     first_queue = _recording_workflow_queue()
@@ -281,12 +285,16 @@ def test_grandchildren_under_different_child_workflows_do_not_collide(monkeypatc
         monkeypatch.setattr(workflows, "ai_agent_workflow_queue", queue)
         _set_agent_workflow_context(monkeypatch, workflows, parent_workflow_id)
         asyncio.run(
-            workflows.execute_agent_workflow_actions(
-                message=make_output("delegate", [{"command": 'mini-mas spawn "task"'}]),
-                model=DeterministicModel(outputs=[]),
-                env=Mock(),
+                workflows.execute_agent_workflow_actions(
+                    message=make_output("delegate", [{"command": 'mini-mas spawn "task"'}]),
+                    model=DeterministicModel(outputs=[]),
+                    env=Mock(),
+                    template_vars={
+                        "agent_id": parent_workflow_id,
+                        "agent_execution_config": _agent_execution_config(tmp_path),
+                    },
+                )
             )
-        )
 
     assert [call["args"][0] for call in first_queue.enqueued] == ["mas-3333333333333333"]
     assert [call["args"][0] for call in queue.enqueued] == ["mas-4444444444444444"]
@@ -329,7 +337,7 @@ def test_waited_spawn_defaults_to_wait_any_first_observable_event(monkeypatch):
 
     monkeypatch.setattr(workflows._dbos.DBOS, "get_event_async", Mock(side_effect=get_event_async))
 
-    message = make_output("delegate", [{"command": 'mini-mas spawn --wait "task A" "task B"'}])
+    message = make_output("delegate", [{"command": 'mini-mas spawn -m deterministic --wait "task A" "task B"'}])
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
             message=message,
@@ -387,7 +395,7 @@ def test_waited_spawn_all_and_partial_timeout(monkeypatch):
 
     monkeypatch.setattr(workflows._dbos.DBOS, "get_event_async", Mock(side_effect=get_event_async))
 
-    message = make_output("delegate", [{"command": 'mini-mas spawn --wait --all --timeout 0.01 "task A" "task B"'}])
+    message = make_output("delegate", [{"command": 'mini-mas spawn -m deterministic --wait --all --timeout 0.01 "task A" "task B"'}])
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
             message=message,
@@ -428,7 +436,7 @@ def test_waited_spawn_wait_any_timeout_returns_running_children(monkeypatch):
 
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("delegate", [{"command": 'mini-mas spawn --wait --timeout 0.01 "task A" "task B"'}]),
+            message=make_output("delegate", [{"command": 'mini-mas spawn -m deterministic --wait --timeout 0.01 "task A" "task B"'}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={
@@ -474,7 +482,7 @@ def test_waited_spawn_publishes_waiting_for_child_status_and_restores_running_on
 
     observations = asyncio.run(
         workflows.execute_agent_workflow_actions(
-            message=make_output("delegate", [{"command": 'mini-mas spawn --wait --timeout 0.01 "task A" "task B"'}]),
+            message=make_output("delegate", [{"command": 'mini-mas spawn -m deterministic --wait --timeout 0.01 "task A" "task B"'}]),
             model=DeterministicModel(outputs=[]),
             env=Mock(),
             template_vars={

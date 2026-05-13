@@ -2,6 +2,31 @@ import asyncio
 from unittest.mock import Mock
 
 
+def _agent_execution_config():
+    return {
+        "schema_version": 1,
+        "agent": {
+            "system_template": "System",
+            "instance_template": "Task {{task}}",
+            "step_limit": 0,
+            "cost_limit": 3.0,
+        },
+        "model": {
+            "model_class": "deterministic",
+            "model_name": "deterministic",
+            "model_kwargs": {"outputs": []},
+            "observation_template": "{{output.output}}",
+            "format_error_template": "{{error}}",
+        },
+        "environment": {
+            "environment_class": "local",
+            "cwd": ".",
+            "env": {"PAGER": "cat"},
+            "timeout": 30,
+        },
+    }
+
+
 def test_mas_command_handler_accepts_classified_standalone_command():
     from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
 
@@ -27,8 +52,8 @@ def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypa
 
     calls = []
 
-    async def spawn_children(*, parent_workflow_id, tasks):
-        calls.append(("spawn", parent_workflow_id, tuple(tasks)))
+    async def spawn_children(*, parent_workflow_id, tasks, agent_execution_config):
+        calls.append(("spawn", parent_workflow_id, tuple(tasks), agent_execution_config["model"]["model_name"]))
         child_ids = ["mas-1111111111111111", "mas-2222222222222222"] if len(tasks) > 1 else ["mas-3333333333333333"]
         return SpawnChildrenResult(
             children=[
@@ -73,7 +98,7 @@ def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypa
     monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
     monkeypatch.setattr(commands.agent_interactions, "spawn_children", spawn_children)
     monkeypatch.setattr(commands.agent_interactions, "wait_for_children", wait_for_children)
-    handler = MasCommandHandler()
+    handler = MasCommandHandler(agent_execution_config=_agent_execution_config())
 
     result = asyncio.run(
         handler.execute(
@@ -87,6 +112,7 @@ def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypa
             "spawn",
             "mas-0123456789abcdef",
             ("task A", "task B"),
+            "deterministic",
         ),
         (
             "wait_children",
@@ -100,6 +126,7 @@ def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypa
             "spawn",
             "mas-0123456789abcdef",
             ("task C",),
+            "deterministic",
         ),
     ]
     assert result["extra"]["waited"] is True
@@ -115,6 +142,90 @@ def test_mas_command_handler_uses_agent_interaction_functions_for_spawn(monkeypa
     assert result["extra"]["still_running_child_agent_ids"] == ["mas-2222222222222222"]
     assert "Waited spawn timed out" in result["output"]
     assert "agent_id: mas-3333333333333333" in second_result["output"]
+
+
+def test_spawn_command_supports_config_and_model_overrides(monkeypatch, tmp_path):
+    import minisweagent.mas.commands as commands
+    from minisweagent.mas.agent_interactions import SpawnChildrenResult
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
+
+    calls = []
+    config_file = tmp_path / "child.yaml"
+    config_file.write_text(
+        """
+agent:
+  system_template: Override system
+model:
+  model_kwargs:
+    temperature: 0
+environment:
+  env:
+    PAGER: cat
+"""
+    )
+
+    async def spawn_children(*, parent_workflow_id, tasks, agent_execution_config):
+        calls.append((parent_workflow_id, tuple(tasks), agent_execution_config))
+        child_id = "mas-3333333333333333"
+        return SpawnChildrenResult(
+            children=[
+                {
+                    "task": tasks[0],
+                    "agent_id": child_id,
+                    "parent_agent_id": parent_workflow_id,
+                    "agent_artifact_directory": f".mini-mas/agents/{child_id}",
+                    "trajectory_artifact_path": f".mini-mas/agents/{child_id}/trajectory.traj.json",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.agent_interactions, "spawn_children", spawn_children)
+
+    handler = MasCommandHandler(agent_execution_config=_agent_execution_config(), shared_workspace=tmp_path)
+
+    result = asyncio.run(
+        handler.execute(
+            classify_mas_command(f'mini-mas spawn -c {config_file} -m deterministic "task C"'),
+        )
+    )
+
+    assert result["returncode"] == 0
+    assert result["extra"]["mas_command"] == [
+        "spawn",
+        "--config",
+        str(config_file),
+        "--model",
+        "deterministic",
+        "task C",
+    ]
+    assert calls[0][2]["agent"]["system_template"] == "Override system"
+    assert calls[0][2]["model"]["model_name"] == "deterministic"
+    assert calls[0][2]["model"]["model_kwargs"] == {"outputs": [], "temperature": 0}
+    assert calls[0][2]["environment"]["cwd"] == tmp_path.resolve().as_posix()
+
+
+def test_spawn_config_validation_error_does_not_create_child(monkeypatch):
+    import minisweagent.mas.commands as commands
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
+
+    async def spawn_children(**_kwargs):
+        raise AssertionError("invalid config must fail before Child creation")
+
+    monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.agent_interactions, "spawn_children", spawn_children)
+
+    handler = MasCommandHandler(agent_execution_config=_agent_execution_config())
+
+    result = asyncio.run(
+        handler.execute(
+            classify_mas_command('mini-mas spawn -c agent.mode=yolo "task C"'),
+        )
+    )
+
+    assert result["returncode"] == 2
+    assert result["extra"]["mas_command_error"] == "invalid_agent_execution_config"
+    assert "agent.mode" in result["output"]
 
 def test_explicit_parent_direction_commands_share_authority_policy_path(monkeypatch):
     import minisweagent.mas.commands as commands

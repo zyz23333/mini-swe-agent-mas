@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import shlex
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from minisweagent.mas import agent_interactions
 from minisweagent.mas.agent_interactions import ChildWaitResult
 from minisweagent.mas.artifacts import validate_agent_id
 from minisweagent.mas.authority import AuthorityCommandError, AuthorityPolicy, DirectChildAuthorityPolicy
+from minisweagent.mas.execution_config import (
+    AgentExecutionConfigBuildRequest,
+    AgentExecutionConfigError,
+    build_agent_execution_config,
+)
+from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.signals import PARENT_DIRECTION_TOPIC, make_close_signal, make_continuation_signal
 
 from .status_events import format_direct_child_statuses, format_specific_status, normalize_agent_snapshot
 
 MAS_COMMAND_NAME = "mini-mas"
+_dbos = load_dbos()
 STANDALONE_CORRECTION = "mini-mas must be issued as a standalone command, not inside shell composition."
 SHELL_CONTROL_TOKENS = frozenset(
     {
@@ -127,10 +136,16 @@ class SpawnCommandRequest:
     wait: bool = False
     wait_all: bool = False
     timeout_seconds: float | None = None
+    config_specs: tuple[str, ...] = ()
+    model_name: str | None = None
 
     def mas_command(self) -> list[str]:
         """Return the canonical MAS command arguments represented by this request."""
         command = ["spawn"]
+        for config_spec in self.config_specs:
+            command.extend(["--config", config_spec])
+        if self.model_name is not None:
+            command.extend(["--model", self.model_name])
         if self.wait:
             command.append("--wait")
         if self.wait_all:
@@ -195,6 +210,15 @@ class MasCommandResultFormatter:
             returncode=2,
             exception_info=exception_info,
             mas_command_error=mas_command_error,
+        )
+
+    def agent_execution_config_error(self, *, error: AgentExecutionConfigError, mas_command: list[str]) -> dict[str, Any]:
+        return self.error(
+            output=f"{error}\n",
+            returncode=2,
+            exception_info=str(error),
+            mas_command_error=error.code,
+            mas_command=mas_command,
         )
 
     def authority_error(self, result: dict[str, Any], *, mas_command: list[str]) -> dict[str, Any]:
@@ -386,9 +410,13 @@ class MasCommandHandler:
         *,
         authority: AuthorityPolicy | None = None,
         result_formatter: MasCommandResultFormatter | None = None,
+        agent_execution_config: dict[str, Any] | None = None,
+        shared_workspace: str | Path | None = None,
     ) -> None:
         self.authority = authority or DirectChildAuthorityPolicy()
         self.result_formatter = result_formatter or MasCommandResultFormatter()
+        self.agent_execution_config = agent_execution_config
+        self.shared_workspace = Path(shared_workspace or ".")
 
     async def execute(self, classification: MasCommandClassification) -> dict[str, Any]:
         if classification.kind != MasCommandKind.STANDALONE:
@@ -449,9 +477,19 @@ class MasCommandHandler:
                 exception_info=str(exc),
                 mas_command_error="invalid_spawn_arguments",
             )
+        try:
+            agent_execution_config = await build_agent_execution_config_step(
+                shared_workspace=self.shared_workspace.as_posix(),
+                config_specs=request.config_specs,
+                model_name=request.model_name,
+                base_agent_execution_config=self.agent_execution_config,
+            )
+        except AgentExecutionConfigError as exc:
+            return self.result_formatter.agent_execution_config_error(error=exc, mas_command=request.mas_command())
         spawn_result = await agent_interactions.spawn_children(
             parent_workflow_id=current_workflow_id,
             tasks=request.tasks,
+            agent_execution_config=agent_execution_config,
         )
         children = spawn_result.children
         if request.wait:
@@ -599,6 +637,24 @@ class MasCommandHandler:
             raise ValueError(f"Invalid Agent context for mini-mas {command_name}: {workflow_id}") from exc
 
 
+@_dbos.DBOS.step()
+async def build_agent_execution_config_step(
+    *,
+    shared_workspace: str,
+    config_specs: tuple[str, ...],
+    model_name: str | None,
+    base_agent_execution_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build Child Agent Execution Config inside a DBOS step."""
+    request = AgentExecutionConfigBuildRequest(
+        shared_workspace=Path(shared_workspace),
+        config_specs=config_specs,
+        model_name=model_name,
+        base_agent_execution_config=base_agent_execution_config,
+    )
+    return await asyncio.to_thread(build_agent_execution_config, request)
+
+
 def validate_spawn_arguments(arguments: list[str]) -> None:
     """Validate spawn arguments shared by external CLI and workflow-layer MAS commands."""
     _parse_spawn_arguments(["spawn", *arguments])
@@ -622,6 +678,8 @@ def _parse_spawn_arguments(arguments: list[str]) -> SpawnCommandRequest:
     wait = False
     wait_all = False
     timeout_seconds: float | None = None
+    config_specs: list[str] = []
+    model_name: str | None = None
     tasks = []
     index = 1
     while index < len(arguments):
@@ -640,7 +698,21 @@ def _parse_spawn_arguments(arguments: list[str]) -> SpawnCommandRequest:
             timeout_seconds = _parse_timeout_seconds(arguments[index + 1])
             index += 2
             continue
+        if argument in {"-c", "--config"}:
+            if index + 1 >= len(arguments):
+                raise ValueError("mini-mas spawn --config requires a config spec")
+            config_specs.append(arguments[index + 1])
+            index += 2
+            continue
+        if argument in {"-m", "--model"}:
+            if index + 1 >= len(arguments):
+                raise ValueError("mini-mas spawn --model requires a model name")
+            model_name = arguments[index + 1]
+            index += 2
+            continue
         if argument.startswith("--"):
+            raise ValueError(f"Unsupported spawn option: {argument}")
+        if argument.startswith("-"):
             raise ValueError(f"Unsupported spawn option: {argument}")
         tasks.append(argument)
         index += 1
@@ -651,7 +723,14 @@ def _parse_spawn_arguments(arguments: list[str]) -> SpawnCommandRequest:
         raise ValueError("mini-mas spawn --all requires --wait")
     if not tasks:
         raise ValueError('Usage: mini-mas spawn [--wait] [--all] [--timeout seconds] "task" [...]')
-    return SpawnCommandRequest(tasks=tasks, wait=wait, wait_all=wait_all, timeout_seconds=timeout_seconds)
+    return SpawnCommandRequest(
+        tasks=tasks,
+        wait=wait,
+        wait_all=wait_all,
+        timeout_seconds=timeout_seconds,
+        config_specs=tuple(config_specs),
+        model_name=model_name,
+    )
 
 
 def _parse_wait_arguments(arguments: list[str]) -> WaitCommandRequest:
