@@ -110,6 +110,8 @@ def activate_ai_agent_execution(
             pass
     except KeyboardInterrupt:
         pass
+    finally:
+        dbos_module.DBOS.destroy(workflow_completion_timeout_sec=0)
     return {
         "kind": "ai_agent_execution_deactivated",
         "queue_name": AI_AGENT_WORKFLOW_QUEUE_NAME,

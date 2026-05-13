@@ -27,6 +27,50 @@ DEFAULT_RUNTIME_DBOS_CONFIG = {
 }
 
 
+class DurableWorkflowQueue:
+    def __init__(self, name):
+        self.name = name
+        self.pending = []
+        self.executed = []
+        self.agent_states = {
+            "mas-3333333333333333": "running",
+            "mas-4444444444444444": "waiting_for_child",
+            "mas-5555555555555555": "recovery_required",
+        }
+        self.artifacts = {
+            ".mini-mas/agents/mas-2222222222222222/trajectory.traj.json": "{}",
+            ".mini-mas/agents/mas-3333333333333333/trajectory.traj.json": '{"status": "running"}',
+            ".mini-mas/agents/mas-4444444444444444/trajectory.traj.json": '{"status": "waiting"}',
+            ".mini-mas/agents/mas-5555555555555555/trajectory.traj.json": '{"status": "recovery"}',
+        }
+        self.listening_queues = set()
+
+    async def enqueue_async(self, workflow_func, *args, **kwargs):
+        work = {"workflow_func": workflow_func, "args": args, "kwargs": kwargs}
+        self.pending.append(work)
+        await self.drain_queue(self.name)
+        return AsyncMockHandle(args[0] if args else "mas-unknown")
+
+    async def drain_queue(self, queue_name):
+        if queue_name not in self.listening_queues:
+            return
+        runnable = list(self.pending)
+        self.pending.clear()
+        for work in runnable:
+            self.executed.append(work["args"][0])
+            await work["workflow_func"](*work["args"], **work["kwargs"])
+
+    def activate_queue(self, queue_name):
+        self.listening_queues.add(queue_name)
+        if queue_name == self.name:
+            import asyncio
+
+            asyncio.run(self.drain_queue(queue_name))
+
+    def deactivate_all(self, **_kwargs):
+        self.listening_queues.clear()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_runtime_state_workspace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -263,6 +307,129 @@ def test_ai_agent_activation_remains_foreground_when_no_work_is_queued():
     dbos_module.DBOS.enqueue_workflow_async.assert_not_called()
     dbos_module.DBOS.start_workflow.assert_not_called()
     dbos_module.DBOS.start_workflow_async.assert_not_called()
+
+
+def test_ai_agent_work_queued_before_activation_executes_only_after_activation(monkeypatch):
+    from minisweagent.mas import agent_interactions
+
+    queued_work = DurableWorkflowQueue(AI_AGENT_WORKFLOW_QUEUE_NAME)
+
+    async def child_agent_workflow(agent_id, task, *, parent_agent_id):
+        queued_work.artifacts[f".mini-mas/agents/{agent_id}/trajectory.traj.json"] = task
+        return {"agent_id": agent_id, "parent_agent_id": parent_agent_id, "status": "started"}
+
+    spawn_dbos_module = _mock_dbos_module()
+    ordinary_dbos_module = _mock_dbos_module()
+    activation_dbos_module = _mock_dbos_module()
+    ordinary_dbos_module.DBOS.register_queue.side_effect = queued_work.activate_queue
+    activation_dbos_module.DBOS.register_queue.side_effect = queued_work.activate_queue
+
+    monkeypatch.setattr(agent_interactions, "_dbos", spawn_dbos_module)
+    monkeypatch.setattr(
+        "minisweagent.mas.mas_agent.ai_agent_workflow_queue",
+        queued_work,
+    )
+    monkeypatch.setattr(
+        "minisweagent.mas.mas_agent.child_agent_workflow",
+        child_agent_workflow,
+    )
+
+    import asyncio
+
+    asyncio.run(
+        agent_interactions.enqueue_child_agent_workflow(
+            parent_agent_id="mas-1111111111111111",
+            child_agent_id="mas-2222222222222222",
+            task="inspect staged work",
+        )
+    )
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=ordinary_dbos_module):
+        assert queued_work.executed == []
+        assert [work["args"][0] for work in queued_work.pending] == ["mas-2222222222222222"]
+        launch_interactive_runtime(ordinary_dbos_module)
+        assert queued_work.executed == []
+        assert [work["args"][0] for work in queued_work.pending] == ["mas-2222222222222222"]
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=activation_dbos_module):
+        stop_event = Mock()
+        stop_event.wait.return_value = True
+        activate_ai_agent_execution(stop_event=stop_event, wait_interval_seconds=0.01)
+
+    assert queued_work.executed == ["mas-2222222222222222"]
+    assert queued_work.pending == []
+    assert queued_work.artifacts[".mini-mas/agents/mas-2222222222222222/trajectory.traj.json"] == (
+        "inspect staged work"
+    )
+
+
+def test_ai_agent_activation_consumes_late_work_and_stops_execution_without_agent_cleanup(monkeypatch):
+    from minisweagent.mas import agent_interactions
+
+    queued_work = DurableWorkflowQueue(AI_AGENT_WORKFLOW_QUEUE_NAME)
+    initial_agent_states = dict(queued_work.agent_states)
+    initial_artifacts = dict(queued_work.artifacts)
+
+    async def child_agent_workflow(agent_id, task, *, parent_agent_id):
+        queued_work.agent_states[agent_id] = "started"
+        queued_work.artifacts[f".mini-mas/agents/{agent_id}/trajectory.traj.json"] = task
+        return {"agent_id": agent_id, "parent_agent_id": parent_agent_id, "status": "started"}
+
+    spawn_dbos_module = _mock_dbos_module()
+    activation_dbos_module = _mock_dbos_module()
+    activation_dbos_module.DBOS.register_queue.side_effect = queued_work.activate_queue
+    activation_dbos_module.DBOS.destroy.side_effect = queued_work.deactivate_all
+    monkeypatch.setattr(agent_interactions, "_dbos", spawn_dbos_module)
+    monkeypatch.setattr("minisweagent.mas.mas_agent.ai_agent_workflow_queue", queued_work)
+    monkeypatch.setattr("minisweagent.mas.mas_agent.child_agent_workflow", child_agent_workflow)
+
+    import asyncio
+
+    def enqueue_late_work_then_stop(_wait_interval_seconds):
+        asyncio.run(
+            agent_interactions.enqueue_child_agent_workflow(
+                parent_agent_id="mas-1111111111111111",
+                child_agent_id="mas-6666666666666666",
+                task="late work",
+            )
+        )
+        return True
+
+    stop_event = Mock()
+    stop_event.wait.side_effect = enqueue_late_work_then_stop
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=activation_dbos_module):
+        activate_ai_agent_execution(stop_event=stop_event, wait_interval_seconds=0.01)
+
+    assert queued_work.executed == ["mas-6666666666666666"]
+    assert queued_work.pending == []
+    assert queued_work.agent_states == {
+        **initial_agent_states,
+        "mas-6666666666666666": "started",
+    }
+    assert queued_work.artifacts == {
+        **initial_artifacts,
+        ".mini-mas/agents/mas-6666666666666666/trajectory.traj.json": "late work",
+    }
+
+    asyncio.run(
+        agent_interactions.enqueue_child_agent_workflow(
+            parent_agent_id="mas-1111111111111111",
+            child_agent_id="mas-7777777777777777",
+            task="post-shutdown work",
+        )
+    )
+
+    assert queued_work.executed == ["mas-6666666666666666"]
+    assert [work["args"][0] for work in queued_work.pending] == ["mas-7777777777777777"]
+    assert queued_work.agent_states == {
+        **initial_agent_states,
+        "mas-6666666666666666": "started",
+    }
+    assert queued_work.artifacts == {
+        **initial_artifacts,
+        ".mini-mas/agents/mas-6666666666666666/trajectory.traj.json": "late work",
+    }
+    activation_dbos_module.DBOS.destroy.assert_called_once_with(workflow_completion_timeout_sec=0)
 
 
 def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result(tmp_path, monkeypatch):
