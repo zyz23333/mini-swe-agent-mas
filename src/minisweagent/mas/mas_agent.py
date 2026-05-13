@@ -19,6 +19,7 @@ from minisweagent.mas.commands import (
     MasCommandKind,
     classify_mas_command,
 )
+from minisweagent.mas.queues import LEGACY_CHILD_AGENT_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import load_dbos
 from minisweagent.mas.signals import (
     PARENT_DIRECTION_TOPIC,
@@ -37,7 +38,7 @@ from .status_events import LifecycleState
 
 _dbos = load_dbos()
 agent_interactions._dbos = _dbos
-child_agent_queue = _dbos.Queue("mini_mas_child_agent_workflows")
+child_agent_queue = _dbos.Queue(LEGACY_CHILD_AGENT_WORKFLOW_QUEUE_NAME)
 ROOT_COMMAND_WAIT_TIMEOUT_SECONDS = 60 * 60 * 24 * 30
 
 

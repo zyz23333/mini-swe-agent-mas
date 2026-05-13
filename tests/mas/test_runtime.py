@@ -1,9 +1,11 @@
-from unittest.mock import Mock, call, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
+from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME, INTERACTIVE_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import (
     discover_interactive_root_agents,
+    launch_interactive_runtime,
     make_standalone_spawn_command,
     one_shot_spawn_through_interactive_root,
     prepare_resume_root_agent,
@@ -32,7 +34,7 @@ def _isolate_runtime_state_workspace(tmp_path, monkeypatch):
 def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_idle_metadata(tmp_path):
     handle = AsyncMockHandle("mas-1111111111111111")
 
-    async def start_workflow_async(*_args, **_kwargs):
+    async def enqueue_workflow_async(*_args, **_kwargs):
         return handle
 
     async def get_event_async(workflow_id, key, timeout_seconds=60):
@@ -44,9 +46,12 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
         }
 
     dbos_module = _mock_dbos_module()
-    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.enqueue_workflow_async = Mock(side_effect=enqueue_workflow_async)
     dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
-    dbos_module.DBOS.start_workflow.side_effect = AssertionError("MAS runtime must use start_workflow_async")
+    dbos_module.DBOS.register_queue_async = AsyncMock()
+    dbos_module.DBOS.register_queue = Mock(side_effect=AssertionError("Async runtime must use register_queue_async"))
+    dbos_module.DBOS.start_workflow.side_effect = AssertionError("MAS runtime must use queued startup")
+    dbos_module.DBOS.start_workflow_async.side_effect = AssertionError("MAS runtime must use queued startup")
 
     with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
         result = start_interactive_root_agent_workflow(workflow_id="mas-1111111111111111")
@@ -54,15 +59,18 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
     dbos_module.DBOS.assert_called_once_with(config=DEFAULT_RUNTIME_DBOS_CONFIG)
     assert (tmp_path / ".mini-mas" / "runtime").is_dir()
     assert not (tmp_path / ".gitignore").exists()
+    dbos_module.DBOS.listen_queues.assert_called_once_with([INTERACTIVE_WORKFLOW_QUEUE_NAME])
     dbos_module.DBOS.launch.assert_called_once_with()
     dbos_module.SetWorkflowID.assert_called_once_with("mas-1111111111111111")
     dbos_module.DBOS.start_workflow.assert_not_called()
-    dbos_module.DBOS.start_workflow_async.assert_called_once()
+    dbos_module.DBOS.start_workflow_async.assert_not_called()
+    dbos_module.DBOS.enqueue_workflow_async.assert_called_once()
 
-    workflow_func = dbos_module.DBOS.start_workflow_async.call_args.args[0]
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.args[0] == INTERACTIVE_WORKFLOW_QUEUE_NAME
+    workflow_func = dbos_module.DBOS.enqueue_workflow_async.call_args.args[1]
     assert workflow_func.__name__ == "interactive_root_agent_workflow"
-    assert dbos_module.DBOS.start_workflow_async.call_args.args[1] == "mas-1111111111111111"
-    assert dbos_module.DBOS.start_workflow_async.call_args.kwargs == {"max_commands": None}
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.args[2] == "mas-1111111111111111"
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.kwargs == {"max_commands": None}
     dbos_module.DBOS.get_event_async.assert_called_once_with("mas-1111111111111111", "mini_mas_status", 60)
     assert result == {
         "agent_id": "mas-1111111111111111",
@@ -70,6 +78,142 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
         "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
     }
+
+
+def test_plain_mini_mas_runtime_listens_only_to_interactive_workflows_before_launch():
+    handle = AsyncMockHandle("mas-1111111111111111")
+
+    async def enqueue_workflow_async(*_args, **_kwargs):
+        return handle
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.enqueue_workflow_async = Mock(side_effect=enqueue_workflow_async)
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        start_interactive_root_agent_workflow(workflow_id="mas-1111111111111111")
+
+    assert dbos_module.DBOS.listen_queues.call_args == call([INTERACTIVE_WORKFLOW_QUEUE_NAME])
+    assert AI_AGENT_WORKFLOW_QUEUE_NAME not in dbos_module.DBOS.listen_queues.call_args.args[0]
+    assert dbos_module.DBOS.mock_calls.index(call.listen_queues([INTERACTIVE_WORKFLOW_QUEUE_NAME])) < (
+        dbos_module.DBOS.mock_calls.index(call.launch())
+    )
+    dbos_module.DBOS.register_queue.assert_not_called()
+    dbos_module.DBOS.register_queue_async.assert_called_once_with(INTERACTIVE_WORKFLOW_QUEUE_NAME)
+    assert dbos_module.DBOS.mock_calls.index(call.launch()) < (
+        dbos_module.DBOS.mock_calls.index(call.register_queue_async(INTERACTIVE_WORKFLOW_QUEUE_NAME))
+    )
+
+
+def test_interactive_root_startup_is_queued_on_interactive_workflow_queue():
+    handle = AsyncMockHandle("mas-1111111111111111")
+
+    async def enqueue_workflow_async(*_args, **_kwargs):
+        return handle
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+
+    dbos_module = _mock_dbos_module()
+    dbos_module.DBOS.enqueue_workflow_async = Mock(side_effect=enqueue_workflow_async)
+    dbos_module.DBOS.start_workflow_async = Mock(
+        side_effect=AssertionError("Interactive Root Agent startup must go through the interactive queue")
+    )
+    dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+
+    with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+        start_interactive_root_agent_workflow(workflow_id="mas-1111111111111111")
+
+    dbos_module.DBOS.start_workflow_async.assert_not_called()
+    dbos_module.DBOS.enqueue_workflow_async.assert_called_once()
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.args[0] == INTERACTIVE_WORKFLOW_QUEUE_NAME
+    workflow_func = dbos_module.DBOS.enqueue_workflow_async.call_args.args[1]
+    assert workflow_func.__name__ == "interactive_root_agent_workflow"
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.args[2] == "mas-1111111111111111"
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.kwargs == {"max_commands": None}
+
+
+def test_ordinary_runtime_entrypoints_apply_interactive_queue_policy_before_launch(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINI_MAS_ATTACHMENT_LEASE_DIR", str(tmp_path))
+    root_status = _workflow_status_record("mas-1111111111111111")
+    root_status.name = "interactive_root_agent_workflow"
+
+    async def list_workflows_async(**_kwargs):
+        return [root_status]
+
+    async def get_workflow_status_async(_workflow_id):
+        return root_status
+
+    async def get_event_async(workflow_id, key, timeout_seconds=60):
+        if key == "mini_mas_root_command_result:cmd-1111111111111111":
+            return {
+                "kind": "root_command_result",
+                "command_id": "cmd-1111111111111111",
+                "root_agent_id": workflow_id,
+                "command": "echo hello",
+                "result": {"output": "hello\n", "returncode": 0, "exception_info": "", "extra": {}},
+            }
+        return {
+            "agent_id": workflow_id,
+            "lifecycle_state": "waiting_for_command",
+            "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+            "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+        }
+
+    async def send_async(_destination_id, _message, topic=None):
+        return None
+
+    for run_entrypoint in [
+        lambda: send_root_command(
+            root_agent_id="mas-1111111111111111",
+            command="echo hello",
+            command_id="cmd-1111111111111111",
+        ),
+        lambda: discover_interactive_root_agents(),
+        lambda: prepare_resume_root_agent(root_agent_id="mas-1111111111111111"),
+    ]:
+        dbos_module = _mock_dbos_module()
+        dbos_module.DBOS.list_workflows_async = Mock(side_effect=list_workflows_async)
+        dbos_module.DBOS.get_workflow_status_async = Mock(side_effect=get_workflow_status_async)
+        dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
+        dbos_module.DBOS.send_async = Mock(side_effect=send_async)
+
+        with patch("minisweagent.mas.runtime.load_dbos", return_value=dbos_module):
+            run_entrypoint()
+
+        assert dbos_module.DBOS.listen_queues.call_args == call([INTERACTIVE_WORKFLOW_QUEUE_NAME])
+        assert AI_AGENT_WORKFLOW_QUEUE_NAME not in dbos_module.DBOS.listen_queues.call_args.args[0]
+        assert dbos_module.DBOS.mock_calls.index(call.listen_queues([INTERACTIVE_WORKFLOW_QUEUE_NAME])) < (
+            dbos_module.DBOS.mock_calls.index(call.launch())
+        )
+
+
+def test_interactive_runtime_launch_reuses_existing_interactive_policy_and_rejects_mismatched_policy():
+    from minisweagent.mas.runtime import launch_dbos_with_queue_policy
+
+    dbos_module = _mock_dbos_module()
+
+    launch_interactive_runtime(dbos_module)
+    launch_interactive_runtime(dbos_module)
+
+    dbos_module.DBOS.listen_queues.assert_called_once_with([INTERACTIVE_WORKFLOW_QUEUE_NAME])
+    assert dbos_module.DBOS.launch.call_count == 2
+
+    with pytest.raises(RuntimeError, match="non-interactive MAS queue policy"):
+        launch_dbos_with_queue_policy(dbos_module, [AI_AGENT_WORKFLOW_QUEUE_NAME])
 
 
 def test_runtime_sends_root_command_signal_and_waits_for_matching_command_result(tmp_path, monkeypatch):
@@ -202,7 +346,7 @@ def test_one_shot_spawn_uses_root_command_signal_result_flow(tmp_path, monkeypat
     sent = []
     handle = AsyncMockHandle("mas-1111111111111111")
 
-    async def start_workflow_async(*_args, **_kwargs):
+    async def enqueue_workflow_async(*_args, **_kwargs):
         return handle
 
     async def send_async(destination_id, message, topic=None):
@@ -242,7 +386,7 @@ def test_one_shot_spawn_uses_root_command_signal_result_flow(tmp_path, monkeypat
         }
 
     dbos_module = _mock_dbos_module()
-    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.enqueue_workflow_async = Mock(side_effect=enqueue_workflow_async)
     dbos_module.DBOS.send_async = Mock(side_effect=send_async)
     dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
 
@@ -255,7 +399,7 @@ def test_one_shot_spawn_uses_root_command_signal_result_flow(tmp_path, monkeypat
 
     from minisweagent.mas.signals import ROOT_COMMAND_TOPIC
 
-    workflow_func = dbos_module.DBOS.start_workflow_async.call_args.args[0]
+    workflow_func = dbos_module.DBOS.enqueue_workflow_async.call_args.args[1]
     assert workflow_func.__name__ == "interactive_root_agent_workflow"
     assert dbos_module.DBOS.get_event_async.call_args_list[0] == call("mas-1111111111111111", "mini_mas_status", 60)
     assert sent == [
@@ -281,7 +425,7 @@ def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadat
     sent = []
     handle = AsyncMockHandle("mas-1111111111111111")
 
-    async def start_workflow_async(*_args, **_kwargs):
+    async def enqueue_workflow_async(*_args, **_kwargs):
         return handle
 
     async def send_async(destination_id, message, topic=None):
@@ -347,7 +491,7 @@ def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadat
         }
 
     dbos_module = _mock_dbos_module()
-    dbos_module.DBOS.start_workflow_async = Mock(side_effect=start_workflow_async)
+    dbos_module.DBOS.enqueue_workflow_async = Mock(side_effect=enqueue_workflow_async)
     dbos_module.DBOS.send_async = Mock(side_effect=send_async)
     dbos_module.DBOS.get_event_async = Mock(side_effect=get_event_async)
 
@@ -364,7 +508,7 @@ def test_one_shot_multi_spawn_preserves_child_result_order_without_order_metadat
     assert result["kind"] == "one_shot_spawn"
     assert result["root_agent_id"] == "mas-1111111111111111"
     assert result["command"] == "mini-mas spawn 'task A' 'task B'"
-    dbos_module.DBOS.start_workflow_async.assert_called_once()
+    dbos_module.DBOS.enqueue_workflow_async.assert_called_once()
     assert sent[0][1]["command"] == "mini-mas spawn 'task A' 'task B'"
 
     extra = result["result"]["extra"]

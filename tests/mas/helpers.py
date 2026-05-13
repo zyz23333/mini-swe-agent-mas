@@ -1,15 +1,17 @@
 import asyncio
-from unittest.mock import MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 
 def _mock_dbos_module() -> MagicMock:
     dbos_module = MagicMock()
+    dbos_module.DBOS.register_queue_async = AsyncMock()
     dbos_module.DBOS.workflow.return_value = lambda func: func
     dbos_module.DBOS.step.return_value = lambda func: func
     return dbos_module
 
 def _mock_recording_dbos_module() -> MagicMock:
     dbos_module = MagicMock()
+    dbos_module.DBOS.register_queue_async = AsyncMock()
     dbos_module.registered_steps = []
     dbos_module.DBOS.workflow.return_value = lambda func: func
 

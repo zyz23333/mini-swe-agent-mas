@@ -7,11 +7,13 @@ import os
 import secrets
 import shlex
 import time
+import weakref
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from minisweagent.mas.artifacts import make_agent_id, make_artifact_metadata, validate_agent_id
+from minisweagent.mas.queues import INTERACTIVE_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.signals import (
     ROOT_COMMAND_TOPIC,
     make_root_command_signal,
@@ -23,6 +25,7 @@ MAS_APP_NAME = "mini-swe-agent-mas"
 MAS_RUNTIME_STATE_STORE_PATH = Path(".mini-mas") / "runtime" / "mini_mas_dbos.sqlite"
 ATTACHMENT_LEASE_TOKEN_PREFIX = "att-"
 ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS = 300.0
+_DECLARED_DBOS_QUEUE_POLICIES: weakref.WeakKeyDictionary[Any, tuple[str, ...]] = weakref.WeakKeyDictionary()
 
 
 def load_dbos():
@@ -39,6 +42,45 @@ def make_dbos_config() -> dict[str, str]:
         "name": MAS_APP_NAME,
         "system_database_url": f"sqlite:///{MAS_RUNTIME_STATE_STORE_PATH.as_posix()}",
     }
+
+
+def _declare_dbos_queue_policy(dbos_module: Any, queue_names: list[str]) -> tuple[str, ...]:
+    dbos_instance = dbos_module.DBOS(config=make_dbos_config())
+    queue_policy = tuple(queue_names)
+    declared_policy = _DECLARED_DBOS_QUEUE_POLICIES.get(dbos_instance)
+    if declared_policy is None:
+        dbos_module.DBOS.listen_queues(list(queue_policy))
+        _DECLARED_DBOS_QUEUE_POLICIES[dbos_instance] = queue_policy
+    elif declared_policy != queue_policy:
+        msg = "DBOS runtime is already configured for a non-interactive MAS queue policy"
+        raise RuntimeError(msg)
+    return queue_policy
+
+
+def launch_dbos_with_queue_policy(dbos_module: Any, queue_names: list[str]) -> None:
+    """Launch DBOS after applying the MAS queue-listening policy once per DBOS instance."""
+    queue_policy = _declare_dbos_queue_policy(dbos_module, queue_names)
+    dbos_module.DBOS.launch()
+    for queue_name in queue_policy:
+        dbos_module.DBOS.register_queue(queue_name)
+
+
+def launch_interactive_runtime(dbos_module: Any) -> None:
+    """Launch DBOS for ordinary mini-mas work with interactive-only queue authorization."""
+    launch_dbos_with_queue_policy(dbos_module, [INTERACTIVE_WORKFLOW_QUEUE_NAME])
+
+
+async def launch_dbos_with_queue_policy_async(dbos_module: Any, queue_names: list[str]) -> None:
+    """Async variant for MAS runtime paths already running on an event loop."""
+    queue_policy = _declare_dbos_queue_policy(dbos_module, queue_names)
+    dbos_module.DBOS.launch()
+    for queue_name in queue_policy:
+        await dbos_module.DBOS.register_queue_async(queue_name)
+
+
+async def launch_interactive_runtime_async(dbos_module: Any) -> None:
+    """Launch DBOS for ordinary async mini-mas work with interactive-only queue authorization."""
+    await launch_dbos_with_queue_policy_async(dbos_module, [INTERACTIVE_WORKFLOW_QUEUE_NAME])
 
 
 def _handle_workflow_id(handle: Any) -> str:
@@ -230,15 +272,14 @@ async def _start_interactive_root_agent_workflow_async(
     """Async implementation for starting an Interactive Root Agent and waiting until it is idle."""
     dbos_module = load_dbos()
 
-    dbos_module.DBOS(config=make_dbos_config())
-
     from minisweagent.mas.mas_agent import interactive_root_agent_workflow
 
-    dbos_module.DBOS.launch()
+    await launch_interactive_runtime_async(dbos_module)
 
     assigned_workflow_id = validate_agent_id(workflow_id or make_agent_id())
     with dbos_module.SetWorkflowID(assigned_workflow_id):
-        handle = await dbos_module.DBOS.start_workflow_async(
+        handle = await dbos_module.DBOS.enqueue_workflow_async(
+            INTERACTIVE_WORKFLOW_QUEUE_NAME,
             interactive_root_agent_workflow,
             assigned_workflow_id,
             max_commands=None,
@@ -271,8 +312,7 @@ async def _send_root_command_async(
 ) -> Mapping[str, Any]:
     """Async implementation for submitting one Root Command Signal and waiting for its scoped result."""
     dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config())
-    dbos_module.DBOS.launch()
+    await launch_interactive_runtime_async(dbos_module)
 
     root_agent_id = validate_agent_id(root_agent_id)
     command_id = command_id or make_command_id()
@@ -518,8 +558,7 @@ def _format_root_discovery(snapshots: list[Mapping[str, Any]]) -> str:
 async def _discover_interactive_root_agents_async() -> Mapping[str, Any]:
     """Async implementation for external Interactive Root Agent discovery."""
     dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config())
-    dbos_module.DBOS.launch()
+    await launch_interactive_runtime_async(dbos_module)
 
     workflow_statuses = await dbos_module.DBOS.list_workflows_async(
         name="interactive_root_agent_workflow",
@@ -564,8 +603,7 @@ async def _prepare_resume_root_agent_async(
         return _resume_invalid_agent_id_result(root_agent_id=root_agent_id, error=exc)
 
     dbos_module = load_dbos()
-    dbos_module.DBOS(config=make_dbos_config())
-    dbos_module.DBOS.launch()
+    await launch_interactive_runtime_async(dbos_module)
 
     workflow_status = await dbos_module.DBOS.get_workflow_status_async(root_agent_id)
     if workflow_status is None:
