@@ -1,6 +1,6 @@
 # Introduce explicit MAS Runtime Session lifecycle
 
-Status: needs-triage
+Status: ready-for-agent
 Category: enhancement
 Type: AFK
 
@@ -53,25 +53,40 @@ None - can start immediately.
 **Summary:** Introduce an explicit MAS Runtime Session lifecycle so DBOS and asyncio ownership is clear and multi-step External MAS CLI flows no longer depend on scattered synchronous wrappers.
 
 **Current behavior:**
-The MAS runtime exposes several synchronous functions that each wrap async DBOS work, including Interactive Root Agent startup, Root Command submission, Root Agent discovery, and resume preparation. These synchronous functions are composed by CLI flows such as one-shot `mini-mas spawn` and plain `mini-mas` lazy Root creation.
+The MAS runtime exposes several synchronous functions that each wrap async DBOS work, including Interactive Root Agent startup, Root Command submission, Root Agent discovery, and resume preparation. External MAS CLI flows compose those synchronous functions for user paths such as one-shot `mini-mas spawn`, plain `mini-mas` lazy Root creation, and `mini-mas resume`.
 
-This composition previously used separate `asyncio.run()` calls in the same process. DBOS async APIs configure the current asyncio loop's default executor to the DBOS executor. When `asyncio.run()` exits, Python shuts down that default executor. A later MAS operation can then reuse the already-launched DBOS runtime and fail when DBOS tries to schedule work onto the shutdown executor.
+This composition previously used separate event-loop lifecycles in the same process. DBOS async APIs configure the current asyncio loop's default executor to the DBOS executor. When a loop lifecycle exits and shuts down that default executor, a later MAS operation can reuse the already-launched DBOS runtime and fail when DBOS tries to schedule work onto the shutdown executor.
 
 An immediate fix may keep a process-local MAS event loop alive, but the broader design still leaves runtime lifecycle ownership implicit and scattered across helper functions.
 
 **Desired behavior:**
-External MAS CLI flows should use an explicit session lifecycle. A session should make it obvious which code owns DBOS launch, queue policy, queue registration, attachment lease boundaries, Root Command submission, result waiting, and cleanup. Multi-step flows should compose async operations directly inside the session instead of bouncing through multiple lower-level synchronous wrappers.
+External MAS CLI flows that perform Interactive Root Agent work should use an explicit session lifecycle. A session should make it obvious which code owns DBOS launch, queue policy, queue registration, attachment lease boundaries, Root Command submission, result waiting, and cleanup. Multi-step flows should compose async operations directly inside the session instead of bouncing through multiple lower-level synchronous wrappers.
 
-The design should be boring and narrow. It should not create a daemon, introduce a generic backend abstraction, change DBOS recovery semantics, expand authority, or change user-visible MAS behavior.
+The session should represent External MAS CLI runtime lifecycle only. It should not represent MAS Governance authority, create a daemon, introduce a generic backend abstraction, change DBOS recovery semantics, expand authority, or change user-visible MAS behavior.
 
 **Key interfaces:**
-- External MAS CLI command handlers in `src/minisweagent/mas/cli.py`.
-- MAS runtime lifecycle code in `src/minisweagent/mas/runtime.py`.
+- External MAS CLI command handlers for `mini-mas`, `mini-mas spawn`, `mini-mas resume`, `mini-mas status`, and `mini-mas agent activate`.
+- MAS runtime lifecycle APIs for Interactive Root Agent startup, Root Command submission, Root Agent discovery, resume preparation, attachment lease ownership, and queue activation.
+- Runtime control-plane reads backed by `DBOSClient` for side-effect-light discovery and validation paths.
 - Interactive queue activation via `mini_mas_interactive_workflows`.
 - AI Agent Execution activation via `mini_mas_ai_agent_workflows`.
 - Root Command Signal and Root Command Result event flow.
-- Runtime control-plane reads for `mini-mas status` and resume validation.
 - Attachment lease helpers for one-active-terminal enforcement.
+
+**Acceptance criteria:**
+- [ ] MAS has an explicit runtime session abstraction that owns DBOS launch, queue policy application, queue registration, and lifecycle cleanup boundaries for External MAS CLI work.
+- [ ] The External MAS CLI has a single clear synchronous-to-async boundary per CLI invocation or attached terminal session; runtime functions no longer call synchronous event-loop wrappers from inside lower-level MAS operations.
+- [ ] One-shot `mini-mas spawn "task"` performs Interactive Root Agent startup and Root Command submission within one async session while preserving existing output shape, return codes, timeout handling, and attachment behavior.
+- [ ] Plain `mini-mas` lazy Root creation performs Root startup, attachment preparation, first command submission, and later attached command submission within one session while preserving existing terminal behavior.
+- [ ] `mini-mas resume <root-agent-id>` performs resume validation, attachment lease ownership, command submission, heartbeat refresh, and release within one session while preserving the one-active-attachment rule.
+- [ ] `mini-mas status` continues to use the runtime control plane without launching a DBOS executor when discovery can be served by `DBOSClient`.
+- [ ] Queue authorization remains unchanged: ordinary `mini-mas` runtime activation listens only to `mini_mas_interactive_workflows`, and AI Agent Execution activation listens only to `mini_mas_ai_agent_workflows`.
+- [ ] DBOS workflow-control operations remain outside DBOS steps; model calls, ordinary bash execution, and trajectory persistence remain behind DBOS step boundaries.
+- [ ] The session design does not introduce a daemon, background AI Agent Execution, external operator authority, tree-wide Root Agent authority, or any broader Authority Model.
+- [ ] Regression coverage proves that startup followed by command submission in the same process does not close or reuse a shutdown DBOS executor.
+- [ ] Regression coverage proves both real user paths: `mini-mas spawn "test"` and plain `mini-mas` followed by `mini-mas spawn "test"` complete without `RuntimeError: cannot schedule new futures after shutdown`.
+- [ ] Existing MAS runtime, CLI, command, authority, status-event, parent-direction, spawn/wait, and workflow tests pass without weakening behavior assertions.
+- [ ] Any temporary compatibility wrapper around the old synchronous runtime functions is thin, documented, and not used internally to compose multi-step MAS flows.
 
 **Important constraints:**
 - Preserve **Interactive Root Agent** semantics from `CONTEXT.md`.
@@ -79,6 +94,7 @@ The design should be boring and narrow. It should not create a daemon, introduce
 - Preserve ADR-0005's async DBOS workflow-control boundary.
 - Preserve ADR-0009's separate interactive and AI Agent workflow queues.
 - Keep DBOS implementation terms at the DBOS boundary, while MAS-facing code and docs use Agent and Agent Interaction terminology.
+- Keep `RuntimeControlPlane`-style reads separate from activated runtime sessions when the user path only needs control-plane discovery.
 
 **Out of scope:**
 - Changing MAS command syntax.
