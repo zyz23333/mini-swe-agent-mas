@@ -78,7 +78,7 @@ class AgentExecutionConfigBuildRequest:
 
 def default_mini_config_spec() -> str:
     """Return the mini-compatible default config spec for Spawn-time config building."""
-    return str(Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini.yaml")))
+    return str(Path(os.getenv("MSWEA_MINI_CONFIG_PATH", builtin_config_dir / "mini-mas.yaml")))
 
 
 def build_agent_execution_config(request: AgentExecutionConfigBuildRequest) -> dict[str, Any]:

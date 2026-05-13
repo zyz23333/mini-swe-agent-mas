@@ -109,6 +109,44 @@ def test_redact_agent_execution_config_redacts_only_environment_values(tmp_path)
     assert redacted["model"]["model_kwargs"] == {"drop_params": True}
 
 
+def test_default_mini_config_spec_uses_mas_prompt_by_default(monkeypatch):
+    from minisweagent.config import builtin_config_dir
+    from minisweagent.mas.execution_config import default_mini_config_spec
+
+    monkeypatch.delenv("MSWEA_MINI_CONFIG_PATH", raising=False)
+
+    assert default_mini_config_spec() == str(builtin_config_dir / "mini-mas.yaml")
+
+
+def test_default_mini_config_spec_respects_existing_env_override(monkeypatch, tmp_path):
+    from minisweagent.mas.execution_config import default_mini_config_spec
+
+    custom_config = tmp_path / "custom.yaml"
+    monkeypatch.setenv("MSWEA_MINI_CONFIG_PATH", str(custom_config))
+
+    assert default_mini_config_spec() == str(custom_config)
+
+
+def test_build_agent_execution_config_without_specs_uses_mini_mas_default(monkeypatch, tmp_path):
+    from minisweagent.config import builtin_config_dir
+    from minisweagent.mas.execution_config import AgentExecutionConfigBuildRequest, build_agent_execution_config
+
+    expected_spec = str(builtin_config_dir / "mini-mas.yaml")
+    seen_specs = []
+
+    def fake_get_config_from_spec(spec):
+        seen_specs.append(spec)
+        return _base_config(tmp_path)
+
+    monkeypatch.delenv("MSWEA_MINI_CONFIG_PATH", raising=False)
+    monkeypatch.setattr("minisweagent.mas.execution_config.get_config_from_spec", fake_get_config_from_spec)
+
+    config = build_agent_execution_config(AgentExecutionConfigBuildRequest(shared_workspace=tmp_path))
+
+    assert seen_specs == [expected_spec]
+    assert config["environment"]["cwd"] == tmp_path.resolve().as_posix()
+
+
 def test_safe_prompt_template_vars_are_from_config_not_process_env(tmp_path, monkeypatch):
     from minisweagent.mas.execution_config import normalize_agent_execution_config, safe_prompt_template_vars
 
