@@ -32,6 +32,10 @@ _Avoid_: Root-only interactive agent, DBOS interactive workflow
 A parentless **Interactive Agent** that receives commands from the **External MAS CLI** and remains available as the parent authority context for its direct **Child Agents**.
 _Avoid_: ordinary root agent, terminal superuser, session process
 
+**Configured Interactive Root Agent**:
+An **Interactive Root Agent** that carries an **Agent Execution Config** for its ordinary bash actions and spawned **Child Agents**.
+_Avoid_: non-interactive Root Agent, Root Execution Config, host Root shim
+
 **AI Agent Execution**:
 The explicit runtime capability that lets queued autonomous **Agents** advance through model calls and bash actions.
 _Avoid_: background mode, daemon, worker start, run agent
@@ -48,6 +52,10 @@ _Avoid_: Nested process, recursive worker
 The recursive parent-child structure formed by **Agents** below one **Root Agent**.
 _Avoid_: Process tree
 
+**Collaborative Task Run**:
+A MAS work session in which one **Agent Tree** cooperates on one external task or benchmark instance.
+_Avoid_: per-Agent task, independent child task, benchmark batch
+
 **Agent ID**:
 A durable opaque identifier for one **Agent**.
 _Avoid_: Workflow Tree ID, path, tree position
@@ -60,12 +68,36 @@ _Avoid_: Root index, role flags, mode flags
 The durable, secret-free configuration snapshot fixed when an autonomous **Agent** is spawned.
 _Avoid_: current global config, activation config, live environment, model object, shell state
 
+**Action Environment Binding**:
+A named action execution target available to an **Agent** through its **Agent Execution Config**.
+_Avoid_: container pointer, shell session, tool runtime
+
+**Action Environment Provisioning**:
+The explicit creation and lifecycle management of a concrete action execution target for an **Action Environment Binding**.
+_Avoid_: bash execution, automatic executor startup, implicit container creation
+
+**Action Environment Lock**:
+A per-binding runtime lock that serializes ordinary bash actions targeting the same **Action Environment Binding**.
+_Avoid_: workflow queue, recovery ledger, workspace isolation
+
+**Action Environment ID**:
+The stable human-readable identifier for one **Action Environment Binding** within a **Collaborative Task Run**.
+_Avoid_: Docker container name, Agent ID, environment hash
+
 **Local Agent Environment**:
 The MVP execution environment where an autonomous **Agent** runs bash actions in the spawn workspace without a durable external sandbox session.
 _Avoid_: Docker session, remote sandbox, activation shell
 
+**Docker Action Environment**:
+An **Action Environment** where an autonomous **Agent** executes bash actions inside one persistent Docker container while model calls and MAS runtime work stay in the **Runtime Process Environment**.
+_Avoid_: Docker Agent Environment, containerized Agent, ProgramBench runner environment
+
+**Shared Action Environment**:
+An action execution environment intentionally shared by multiple **Agents** in the same **Collaborative Task Run**.
+_Avoid_: private Agent container, arbitrary shared container, global sandbox
+
 **Action Environment Variables**:
-The secret-free environment variables fixed in an **Agent Execution Config** and applied to bash actions in a **Local Agent Environment**.
+The secret-free environment variables fixed in an **Agent Execution Config** and applied when executing bash actions through an **Action Environment Binding**.
 _Avoid_: process environment, runtime environment, API keys, shell state
 
 **Runtime Process Environment**:
@@ -127,6 +159,10 @@ _Avoid_: Closed, finished, waiting for parent
 **Recovery Required**:
 An **Agent** lifecycle state meaning automatic advancement is blocked because MAS detected an uncertain external side effect during recovery.
 _Avoid_: Waiting for Parent, Failed, retrying
+
+**Execution Blocked**:
+An **Agent** lifecycle state meaning automatic advancement is blocked because a runtime dependency is unavailable, while the Agent itself remains durable and continuable.
+_Avoid_: Failed, Recovery Required, waiting for parent
 
 **First Observable Event**:
 A lightweight DBOS event set by a **Child Agent** when it first reaches a parent-actionable state.
@@ -193,6 +229,10 @@ _Avoid_: Special case, bypass
 - An **Agent** is backed by one DBOS workflow in the current implementation.
 - A **Parent Agent** can start zero or more **Child Agents**.
 - A **Child Agent** belongs to exactly one **Parent Agent** when started through **MAS Command Interception**.
+- A **Collaborative Task Run** is the work boundary for multiple **Agents** cooperating on one external task or benchmark instance.
+- A **Collaborative Task Run** may use a **Shared Action Environment** so multiple **Agents** can observe and modify the same task workspace.
+- A **Shared Action Environment** executes at most one bash action at a time across its participating **Agents**.
+- An **Action Environment Lock** enforces per-binding bash action serialization at runtime.
 - A **Parent Agent** directly controls only its direct **Child Agents**.
 - A **Descendant Agent** that is not a direct child is not treated as the parent's **Child Agent** under **Delegated Non-Transitive Authority**.
 - The current MVP uses the **Direct Child Authority Policy** and does not include broader **Authority Grants**.
@@ -207,17 +247,48 @@ _Avoid_: Special case, bypass
 - **Agent Metadata** records stable Agent identity and artifact fields such as Agent ID, optional Parent Agent ID, Agent Artifact Directory, and Trajectory Artifact path.
 - An **Interactive Root Agent** records its **Shared Workspace** for later Spawn config resolution and diagnosis.
 - An autonomous **Child Agent** receives an **Agent Execution Config** as DBOS workflow input when it is spawned.
+- A **Configured Interactive Root Agent** receives an **Agent Execution Config** as DBOS workflow input when it is created.
 - An **Agent Execution Config** includes a schema version so durable queued Agents can validate config compatibility.
-- During the MVP, **Agent Execution Config** describes mini-equivalent agent, model, and **Local Agent Environment** settings only.
-- During the MVP, the detailed Agent Execution Config schema, validation rules, and failure codes are recorded in ADR 0010.
+- An **Agent Execution Config** may carry one or more **Action Environment Bindings**.
+- An **Action Environment ID** identifies a binding intent and is not the Docker container name.
+- **Agent Execution Config** represents action execution through a canonical `default_action_environment_id` plus `action_environments` binding map; flat Docker environment config is not a supported compatibility shape.
+- An **Action Environment ID** uses only ASCII letters, digits, `_`, `.`, and `-`, starts with a letter or digit, and is at most 64 characters.
+- **Action Environment Provisioning** is performed by a runner or explicit provisioner, not by ordinary bash execution.
+- A fresh ProgramBench **Collaborative Task Run** provisions its Docker **Action Environment Binding** before creating the **Configured Interactive Root Agent**.
+- A fresh ProgramBench run creates a new **Configured Interactive Root Agent** and Docker **Action Environment Binding** by default rather than automatically reusing an existing Root or container.
+- ProgramBench resume or container reuse is an explicit recovery or diagnosis mode, not the default fresh-run behavior.
+- **Execution Blocked** is a recovery path for missing runtime dependencies, not the normal ProgramBench startup path.
+- The original **Agent Execution Config** MVP described mini-equivalent agent, model, and **Local Agent Environment** settings only.
+- ADR 0010 records the original **Agent Execution Config** MVP boundary; ADR 0011 extends that boundary for **Action Environment Bindings** and Docker execution.
 - An **Interactive Root Agent** does not require an **Agent Execution Config** to exist.
+- A **Configured Interactive Root Agent** uses its **Agent Execution Config** for ordinary bash actions and as the base config for spawned **Child Agents**.
+- A **Configured Interactive Root Agent** freezes its **Agent Execution Config** when it is created; **Resume** does not re-resolve or replace that config.
+- A **Configured Interactive Root Agent** may carry model configuration for spawned autonomous **Child Agents**, but Root command execution does not query that model.
+- Creating a **Configured Interactive Root Agent** validates config shape and action-environment binding shape but does not preflight model provider credentials.
+- A **Configured Interactive Root Agent** and its spawned **Child Agents** may share the same default **Action Environment Binding**.
+- The first **Docker Action Environment** implementation supports one effective default **Action Environment Binding** per autonomous **Agent**.
 - A **Local Agent Environment** uses the absolute **Shared Workspace** path fixed when the **Child Agent** is spawned.
-- During the MVP, Spawn rejects attempts to override the **Local Agent Environment** working directory.
+- The first **Action Environment Binding** schema supports `local/private` and `docker/shared` bindings only.
+- A `local/private` binding's `cwd` is the absolute host **Shared Workspace** path fixed by MAS.
+- A `docker/shared` binding's `cwd` is an absolute container-internal workspace path fixed by the binding config or provisioner.
+- A **Docker Action Environment** keeps model queries, provider credentials, workflow orchestration, and MAS Runtime State Store access in the **Runtime Process Environment**.
+- A **Docker Action Environment** may be a **Shared Action Environment** for the **Collaborative Task Run** instead of being private to one **Agent**.
+- Docker container identity, shared action serialization, cleanup, and workspace export are scoped by **Action Environment Binding** identity rather than by **Child Agent** identity.
+- The first **Action Environment Lock** implementation uses a process-local lock plus a POSIX file lock under the **MAS Workspace State Directory**.
+- MAS derives Docker container names from workspace/runtime namespace and **Action Environment ID** instead of exposing container names as user configuration.
+- MAS executors resolve a **Docker Action Environment** to an already-provisioned live container; they do not automatically create missing containers.
+- If a **Docker Action Environment** cannot be resolved to a live provisioned container, ordinary bash execution fails with an environment-unavailable error.
+- Within one **Collaborative Task Run**, the same **Action Environment ID** must resolve to the same normalized **Action Environment Binding**.
+- During the first **Docker Action Environment** implementation, Child Spawn inherits the current default **Action Environment Binding** and does not choose among multiple bindings.
+- During the first **Docker Action Environment** implementation, Child Spawn may override model or Agent behavior settings but may not override inherited **Action Environment Bindings**.
+- Shared action serialization is scoped to one bash action and does not provide full read-reason-write transaction isolation across multiple Agent turns.
+- Spawn rejects attempts to override the **Local Agent Environment** working directory.
 - External Spawn resolves the current **Shared Workspace** from the External MAS CLI working directory.
 - Workflow-layer Spawn from an **Interactive Root Agent** resolves the current **Shared Workspace** from that Root Agent's MAS workspace.
 - Workflow-layer Spawn from an autonomous **Agent** resolves the current **Shared Workspace** from that Agent's **Agent Execution Config**.
 - **Action Environment Variables** may be stored in an **Agent Execution Config** and passed to bash execution steps.
 - During the MVP, **Action Environment Variables** come only from resolved mini environment configuration, not from copying a **Runtime Process Environment**.
+- For `docker/shared`, **Action Environment Variables** are action-time variables applied to `docker exec`, not Docker provisioning variables applied to `docker run`.
 - During the MVP, Spawn rejects **Agent Execution Config** content that would violate the secret-free workflow input contract.
 - A **Runtime Process Environment** may provide secrets to DBOS steps but is not stored in an **Agent Execution Config**, **Child Status Event**, or **Trajectory Artifact**.
 - During the MVP, local bash actions may still inherit the step process's **Runtime Process Environment** at execution time.
@@ -236,7 +307,11 @@ _Avoid_: Special case, bypass
 - **Detached Spawn** and **Waited Spawn** fail before creating a **Child Agent** when they cannot build a valid **Agent Execution Config**.
 - Spawn validation failure is reported as a **MAS Command** error and does not fail the **Parent Agent**.
 - A **Child Agent** without a valid **Agent Execution Config** reaches `failed` instead of remaining `running`.
-- Runtime model credential or **Runtime Process Environment** validation failures make the **Child Agent** reach `failed`, not `recovery_required`.
+- **Agent** lifecycle is separated from runtime model and action-environment availability; losing a runtime dependency does not by itself mean the Agent has ended.
+- Runtime dependency unavailability after an **Agent** exists makes the Agent reach **Execution Blocked** rather than terminal `failed`.
+- Missing model provider credentials in the current **Runtime Process Environment**, unavailable model providers, and unavailable provisioned **Action Environment Bindings** are runtime dependency unavailability cases.
+- Invalid durable **Agent Execution Config** remains terminal `failed` because the Agent's frozen execution contract is invalid.
+- **Recovery Required** is reserved for uncertain external side effects and replay decisions, not ordinary runtime dependency unavailability.
 - During the MVP, external and workflow-layer **Detached Spawn** and **Waited Spawn** may build a Child **Agent Execution Config** from mini-compatible `-c/--config` and `-m/--model` options.
 - During the MVP, `-c/--config` options in external and workflow-layer Spawn are resolved relative to the current **Shared Workspace** using mini-compatible config resolution.
 - During the MVP, Spawn without explicit `-c/--config` uses mini-compatible default config resolution: `MSWEA_MINI_CONFIG_PATH` from the current **Runtime Process Environment** if present, otherwise the built-in `mini.yaml`.
@@ -244,7 +319,7 @@ _Avoid_: Special case, bypass
 - Runtime Process Environment variables that participate in Spawn config resolution affect only the newly frozen **Agent Execution Config**; they are not stored as runtime variables and are not consulted later by **AI Agent Execution**.
 - During the MVP, autonomous Agent Spawn uses the current Agent's **Agent Execution Config** as the base config for its Child Agent.
 - During the MVP, `-c/--config` and `-m/--model` Spawn overrides do not require an additional **Authority Grant** or confirmation.
-- During the MVP, Spawn rejects an **Agent Execution Config** whose environment is not a **Local Agent Environment**.
+- The original **Agent Execution Config** MVP rejected environments that were not **Local Agent Environments**; Docker support extends this through **Action Environment Bindings**.
 - During the MVP, a workflow-layer **Detached Spawn** or **Waited Spawn** without config overrides inherits the current autonomous **Agent**'s **Agent Execution Config** or, for an **Interactive Root Agent**, builds from the current mini config.
 - A **Child Status Event** does not include an **Agent Execution Config**.
 - A **Trajectory Artifact** may include the non-secret **Agent Execution Config** for diagnosis.
@@ -303,8 +378,11 @@ _Avoid_: Special case, bypass
 - Ordinary bash actions entered in an **Interactive Root Agent** are recorded in that Root Agent's **Trajectory Artifact**.
 - Interactive Root terminal history is not stored in a separate prompt-history file and does not reuse the existing `mini` prompt history; the Root Agent's **Trajectory Artifact** is the durable command history.
 - A **Close Signal** ends a **Remote Interactive Agent** without judging whether the child output was accepted or rejected.
-- A **Child Status Event** reports coarse lifecycle states such as `running`, `waiting_for_parent`, `recovery_required`, `closed`, `failed`, and `limits_exceeded`.
-- A **First Observable Event** is set when a **Child Agent** first reaches `waiting_for_parent`, `recovery_required`, `failed`, or `limits_exceeded`.
+- A **Child Status Event** reports coarse lifecycle states such as `running`, `waiting_for_parent`, `execution_blocked`, `recovery_required`, `closed`, `failed`, and `limits_exceeded`.
+- A **First Observable Event** is set when a **Child Agent** first reaches `waiting_for_parent`, `execution_blocked`, `recovery_required`, `failed`, or `limits_exceeded`.
+- **Execution Blocked** is not terminal; after the missing runtime dependency is repaired, an explicit continuation or retry path may allow the **Agent** to advance from its existing durable context.
+- Repairing the missing runtime dependency does not automatically advance an **Agent** in **Execution Blocked**.
+- A **Parent Agent**, **External MAS CLI**, or runner must explicitly continue or retry an **Agent** after **Execution Blocked**.
 - **Recovery Required** is not ordinary **Waiting for Parent**; it blocks automatic replay of an uncertain external side effect and requires an explicit recovery decision.
 - Ordinary `mini-mas continue` sends a **Continuation Signal** only to a direct **Child Agent** in `waiting_for_parent`.
 - `mini-mas continue --recovery <agent-id> "message"` sends a **Recovery Continuation Signal** only to a direct **Child Agent** in `recovery_required`.
