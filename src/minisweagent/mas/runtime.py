@@ -10,6 +10,7 @@ import threading
 import time
 import weakref
 from collections.abc import Awaitable, Mapping
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,13 @@ ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS = 300.0
 _DECLARED_DBOS_QUEUE_POLICIES: weakref.WeakKeyDictionary[Any, tuple[str, ...]] = weakref.WeakKeyDictionary()
 _SYNC_ASYNC_LOOP_LOCK = threading.Lock()
 _SYNC_ASYNC_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+class MasRuntimeProfile(str, Enum):
+    """Process-level MAS runtime activation profiles."""
+
+    INTERACTIVE_ONLY = "interactive_only"
+    SUPERVISED_INTERACTIVE_AND_AI = "supervised_interactive_and_ai"
 
 
 def load_dbos():
@@ -115,6 +123,17 @@ def _declare_dbos_queue_policy(dbos_module: Any, queue_names: list[str]) -> tupl
     return queue_policy
 
 
+def _queue_policy_for_runtime_profile(profile: MasRuntimeProfile) -> list[str]:
+    """Map a named runtime authorization profile to concrete DBOS queues."""
+    profile = MasRuntimeProfile(profile)
+    if profile is MasRuntimeProfile.INTERACTIVE_ONLY:
+        return [INTERACTIVE_WORKFLOW_QUEUE_NAME]
+    if profile is MasRuntimeProfile.SUPERVISED_INTERACTIVE_AND_AI:
+        return [INTERACTIVE_WORKFLOW_QUEUE_NAME, AI_AGENT_WORKFLOW_QUEUE_NAME]
+    msg = f"Unsupported MAS runtime profile: {profile}"
+    raise ValueError(msg)
+
+
 def launch_dbos_with_queue_policy(dbos_module: Any, queue_names: list[str]) -> None:
     """Launch DBOS after applying the MAS queue-listening policy once per DBOS instance."""
     queue_policy = _declare_dbos_queue_policy(dbos_module, queue_names)
@@ -141,8 +160,15 @@ def register_mas_agent_workflows() -> None:
 class MasRuntimeSession:
     """Own one activated External MAS CLI runtime lifecycle."""
 
-    def __init__(self, dbos_module: Any | None = None):
+    def __init__(
+        self,
+        dbos_module: Any | None = None,
+        *,
+        profile: MasRuntimeProfile = MasRuntimeProfile.INTERACTIVE_ONLY,
+    ):
         self._dbos_module = dbos_module or load_dbos()
+        self._runtime_profile = MasRuntimeProfile(profile)
+        self._queue_names = _queue_policy_for_runtime_profile(self._runtime_profile)
         self._launched = False
 
     async def __aenter__(self) -> MasRuntimeSession:
@@ -153,11 +179,11 @@ class MasRuntimeSession:
         return None
 
     async def activate_interactive_runtime(self) -> None:
-        """Launch DBOS once for ordinary External MAS CLI work."""
+        """Launch DBOS once for this session's runtime authorization profile."""
         if self._launched:
             return
         register_mas_agent_workflows()
-        await launch_interactive_runtime_async(self._dbos_module)
+        await launch_dbos_with_queue_policy_async(self._dbos_module, self._queue_names)
         self._launched = True
 
     async def start_interactive_root_agent_workflow(

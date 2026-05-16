@@ -7,6 +7,7 @@ import pytest
 from minisweagent.mas import runtime
 from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME, INTERACTIVE_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import (
+    MasRuntimeProfile,
     _run_mas_async,
     activate_ai_agent_execution,
     discover_interactive_root_agents,
@@ -372,6 +373,32 @@ def test_interactive_runtime_launch_reuses_existing_interactive_policy_and_rejec
 
     with pytest.raises(RuntimeError, match="non-interactive MAS queue policy"):
         launch_dbos_with_queue_policy(dbos_module, [AI_AGENT_WORKFLOW_QUEUE_NAME])
+
+
+def test_supervised_runtime_profile_listens_to_interactive_and_ai_workflow_queues():
+    dbos_module = _mock_dbos_module()
+    register_workflows = Mock()
+
+    async def activate_session():
+        session = runtime.MasRuntimeSession(
+            dbos_module,
+            profile=MasRuntimeProfile.SUPERVISED_INTERACTIVE_AND_AI,
+        )
+        await session.activate_interactive_runtime()
+
+    with patch("minisweagent.mas.runtime.register_mas_agent_workflows", register_workflows):
+        _run_mas_async(activate_session())
+
+    dbos_module.DBOS.listen_queues.assert_called_once_with(
+        [INTERACTIVE_WORKFLOW_QUEUE_NAME, AI_AGENT_WORKFLOW_QUEUE_NAME]
+    )
+    dbos_module.DBOS.register_queue_async.assert_has_calls(
+        [
+            call(INTERACTIVE_WORKFLOW_QUEUE_NAME),
+            call(AI_AGENT_WORKFLOW_QUEUE_NAME),
+        ]
+    )
+    register_workflows.assert_called_once_with()
 
 
 def test_ai_agent_activation_runtime_listens_only_to_ai_workflows_before_launch():
