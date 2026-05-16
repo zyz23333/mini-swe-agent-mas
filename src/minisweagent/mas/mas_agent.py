@@ -10,6 +10,10 @@ from jinja2 import StrictUndefined, Template
 
 from minisweagent.exceptions import InterruptAgentFlow
 from minisweagent.mas import agent_interactions
+from minisweagent.mas.action_environment import (
+    ActionEnvironmentUnavailableError,
+    execute_action_from_environment_config,
+)
 from minisweagent.mas.artifacts import (
     make_artifact_metadata,
     save_trajectory_artifact,
@@ -24,6 +28,7 @@ from minisweagent.mas.commands import (
 from minisweagent.mas.execution_config import (
     ERROR_AGENT_EXECUTION_RUNTIME_FAILED,
     AgentExecutionConfigError,
+    default_action_environment_template_vars,
     redact_agent_execution_config,
     safe_prompt_template_vars,
     validate_agent_execution_config,
@@ -176,12 +181,6 @@ def _get_model_from_config(model_config: dict):
     return get_model(config=model_config)
 
 
-def _get_environment_from_config(environment_config: dict):
-    from minisweagent.environments import get_environment
-
-    return get_environment(environment_config, default_type="local")
-
-
 def _render_template(template: str, template_vars: dict[str, Any]) -> str:
     return Template(template, undefined=StrictUndefined).render(**template_vars)
 
@@ -277,10 +276,10 @@ async def execute_bash_step(env, action: dict) -> dict:
 
 @_dbos.DBOS.step()
 async def execute_bash_from_config_step(environment_config: dict, action: dict) -> dict:
-    """Construct and use a Local Agent Environment from serializable config inside a DBOS step."""
+    """Execute ordinary bash through an Action Environment Binding inside a DBOS step."""
 
     def execute() -> dict:
-        return _get_environment_from_config(environment_config).execute(action)
+        return execute_action_from_environment_config(environment_config, action)
 
     return await asyncio.to_thread(execute)
 
@@ -366,7 +365,7 @@ def _terminal_result(*, agent_id: str, parent_agent_id: str | None, terminal_mes
 
 
 def _latest_error_for_terminal(terminal_state: str, terminal_message: dict) -> str:
-    if _lifecycle_state_for_terminal(terminal_state) != "failed":
+    if _lifecycle_state_for_terminal(terminal_state) not in {"failed", "execution_blocked"}:
         return ""
     return terminal_message.get("content", "")
 
@@ -374,6 +373,8 @@ def _latest_error_for_terminal(terminal_state: str, terminal_message: dict) -> s
 def _lifecycle_state_for_terminal(terminal_state: str) -> LifecycleState:
     if terminal_state == "limits_exceeded":
         return "limits_exceeded"
+    if terminal_state == "execution_blocked":
+        return "execution_blocked"
     if terminal_state in {"failed", "error", "Exception"}:
         return "failed"
     return "closed"
@@ -397,6 +398,26 @@ def _runtime_failed_message(model, content: str) -> dict:
             "mas_error": {
                 "code": ERROR_AGENT_EXECUTION_RUNTIME_FAILED,
                 "message": content,
+            },
+        },
+    }
+    if model is None:
+        return message
+    return model.format_message(**message)
+
+
+def _execution_blocked_message(model, error: ActionEnvironmentUnavailableError) -> dict:
+    content = str(error)
+    message = {
+        "role": "exit",
+        "content": content,
+        "extra": {
+            "exit_status": "execution_blocked",
+            "submission": "",
+            "mas_error": {
+                "code": error.code,
+                "message": error.message,
+                **({"action_environment_id": error.action_environment_id} if error.action_environment_id else {}),
             },
         },
     }
@@ -485,7 +506,7 @@ class MasAgent:
                 latest_submission=result["submission"],
                 latest_error=latest_error,
             )
-            if self.parent_agent_id is not None and lifecycle_state in {"failed", "limits_exceeded"}:
+            if self.parent_agent_id is not None and lifecycle_state in {"failed", "limits_exceeded", "execution_blocked"}:
                 await _publish_first_observable_event_once(
                     self,
                     agent_id=self.agent_id,
@@ -599,6 +620,8 @@ class MasAgent:
                 await self.step()
             except InterruptAgentFlow as flow:
                 self.add_messages(*flow.messages)
+            except ActionEnvironmentUnavailableError as exc:
+                self.add_messages(_execution_blocked_message(self.model, exc))
             except Exception as exc:
                 if self.parent_agent_id is None:
                     raise
@@ -695,7 +718,7 @@ class MasAgent:
             if isinstance(cwd, str) and cwd:
                 return str(self.env.config.cwd)
             return "."
-        return str(self.agent_execution_config.get("environment", {}).get("cwd") or ".")
+        return str(default_action_environment_template_vars(self.agent_execution_config["environment"])["cwd"] or ".")
 
     def _should_wait_for_parent_after_submission(self, result: dict[str, Any]) -> bool:
         return self.parent_agent_id is not None and result["terminal_state"] == "Submitted"
@@ -748,15 +771,20 @@ class MasInteractiveAgent:
         model=None,
         env=None,
         step_limit: int,
+        agent_execution_config: dict[str, Any] | None = None,
     ) -> None:
         self.agent_id = validate_agent_id(agent_id)
         self.workflow_id = self.agent_id
         self.parent_agent_id = None
+        self.agent_execution_config = validate_agent_execution_config(agent_execution_config, preflight_credentials=False) if agent_execution_config is not None else None
         self.model = model or RootCommandModel()
-        self.env = env or self._default_environment()
+        self.env = env if self.agent_execution_config is not None else (env or self._default_environment())
         self.step_limit = step_limit
         self.messages: list[dict] = []
-        self.command_handler = MasCommandHandler()
+        self.command_handler = MasCommandHandler(
+            agent_execution_config=self.agent_execution_config,
+            shared_workspace=self._shared_workspace(),
+        )
 
     def _default_environment(self):
         from minisweagent.environments import get_environment
@@ -819,6 +847,7 @@ class MasInteractiveAgent:
         outputs = await _execute_agent_workflow_outputs(
             message=message,
             env=self.env,
+            environment_config=self.agent_execution_config["environment"] if self.agent_execution_config is not None else None,
             command_handler=self.command_handler,
         )
         observations = self.model.format_observation_messages(message, outputs, self.get_template_vars())
@@ -861,6 +890,16 @@ class MasInteractiveAgent:
         }
 
     def get_template_vars(self) -> dict:
+        if self.agent_execution_config is not None:
+            data = default_action_environment_template_vars(self.agent_execution_config["environment"])
+            data |= {
+                "task": "",
+                "n_model_calls": 0,
+                "model_cost": 0.0,
+                "agent_id": self.agent_id,
+                "agent_execution_config": self.agent_execution_config,
+            }
+            return data
         data = {}
         if hasattr(self.env, "get_template_vars"):
             data |= self.env.get_template_vars()
@@ -873,6 +912,13 @@ class MasInteractiveAgent:
             "agent_id": self.agent_id,
         }
         return data
+
+    def _shared_workspace(self) -> str:
+        if self.agent_execution_config is not None:
+            return str(default_action_environment_template_vars(self.agent_execution_config["environment"])["cwd"] or ".")
+        env_config = getattr(self.env, "config", None)
+        cwd = getattr(env_config, "cwd", "")
+        return str(cwd or ".")
 
     async def _publish_status(
         self,
@@ -998,6 +1044,7 @@ async def interactive_root_agent_workflow(
     env=None,
     step_limit: int = 0,
     max_commands: int | None = 0,
+    agent_execution_config: dict[str, Any] | None = None,
 ) -> dict:
     """Interactive Root Agent DBOS workflow for idle startup and Root command execution."""
     agent_id = validate_agent_id(agent_id)
@@ -1010,6 +1057,7 @@ async def interactive_root_agent_workflow(
             model=model,
             env=env,
             step_limit=step_limit,
+            agent_execution_config=agent_execution_config,
         )
         if max_commands == 0:
             return await agent.run_until_idle()

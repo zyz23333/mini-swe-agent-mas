@@ -49,6 +49,41 @@ def test_workflow_action_execution_keeps_ordinary_bash_on_bash_path():
     assert "<returncode>0</returncode>" in _observation_text(observations[0])
     assert "hello" in _observation_text(observations[0])
 
+
+def test_workflow_action_execution_intercepts_mas_commands_before_configured_docker(monkeypatch):
+    from minisweagent.mas import action_environment
+    from minisweagent.mas.mas_agent import execute_agent_workflow_actions
+
+    message = make_output("dispatch", [{"command": "mini-mas status"}])
+    model = DeterministicModel(outputs=[])
+
+    monkeypatch.setattr(
+        action_environment.subprocess,
+        "run",
+        Mock(side_effect=AssertionError("standalone MAS command must not be sent to Docker")),
+    )
+
+    observations = asyncio.run(
+        execute_agent_workflow_actions(
+            message=message,
+            model=model,
+            environment_config={
+                "default_action_environment_id": "programbench-cleanroom",
+                "action_environments": {
+                    "programbench-cleanroom": {
+                        "kind": "docker",
+                        "scope": "shared",
+                        "image": "programbench/example:task_cleanroom",
+                        "cwd": "/workspace",
+                    }
+                },
+            },
+            template_vars={},
+        )
+    )
+
+    assert "mini-mas status requires Agent context" in _observation_text(observations[0])
+
 @pytest.mark.parametrize(
     "command",
     [

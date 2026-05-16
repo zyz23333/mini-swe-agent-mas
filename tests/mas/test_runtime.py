@@ -155,7 +155,10 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
     workflow_func = dbos_module.DBOS.enqueue_workflow_async.call_args.args[1]
     assert workflow_func.__name__ == "interactive_root_agent_workflow"
     assert dbos_module.DBOS.enqueue_workflow_async.call_args.args[2] == "mas-1111111111111111"
-    assert dbos_module.DBOS.enqueue_workflow_async.call_args.kwargs == {"max_commands": None}
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.kwargs == {
+        "max_commands": None,
+        "agent_execution_config": None,
+    }
     dbos_module.DBOS.get_event_async.assert_called_once_with("mas-1111111111111111", "mini_mas_status", 60)
     assert result == {
         "agent_id": "mas-1111111111111111",
@@ -260,7 +263,10 @@ def test_interactive_root_startup_is_queued_on_interactive_workflow_queue():
     workflow_func = dbos_module.DBOS.enqueue_workflow_async.call_args.args[1]
     assert workflow_func.__name__ == "interactive_root_agent_workflow"
     assert dbos_module.DBOS.enqueue_workflow_async.call_args.args[2] == "mas-1111111111111111"
-    assert dbos_module.DBOS.enqueue_workflow_async.call_args.kwargs == {"max_commands": None}
+    assert dbos_module.DBOS.enqueue_workflow_async.call_args.kwargs == {
+        "max_commands": None,
+        "agent_execution_config": None,
+    }
 
 
 def test_ordinary_runtime_entrypoints_apply_interactive_queue_policy_before_launch(monkeypatch, tmp_path):

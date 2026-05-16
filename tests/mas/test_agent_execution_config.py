@@ -37,10 +37,131 @@ def test_normalize_agent_execution_config_drops_base_only_fields_and_fixes_works
     assert set(config) == {"schema_version", "agent", "model", "environment"}
     assert "mode" not in config["agent"]
     assert "output_path" not in config["agent"]
-    assert config["environment"]["environment_class"] == "local"
-    assert config["environment"]["cwd"] == tmp_path.resolve().as_posix()
-    assert config["environment"]["env"] == {"PAGER": "cat"}
+    assert config["environment"]["default_action_environment_id"] == "local"
+    assert config["environment"]["action_environments"] == {
+        "local": {
+            "kind": "local",
+            "scope": "private",
+            "cwd": tmp_path.resolve().as_posix(),
+            "env": {"PAGER": "cat"},
+            "timeout": 30,
+        }
+    }
     assert config["model"]["model_kwargs"] == {"drop_params": True}
+
+
+def test_validate_agent_execution_config_accepts_docker_shared_binding(tmp_path):
+    from minisweagent.mas.execution_config import normalize_agent_execution_config, validate_agent_execution_config
+
+    config = normalize_agent_execution_config(_base_config(tmp_path), shared_workspace=tmp_path)
+    config["environment"] = {
+        "default_action_environment_id": "programbench-cleanroom",
+        "action_environments": {
+            "programbench-cleanroom": {
+                "kind": "docker",
+                "scope": "shared",
+                "image": "programbench/example:task_cleanroom",
+                "cwd": "/workspace",
+                "env": {"PAGER": "cat"},
+                "timeout": 30,
+                "run_args": ["--network", "none"],
+                "interpreter": ["bash", "-lc"],
+            }
+        },
+    }
+
+    validated = validate_agent_execution_config(config)
+
+    assert validated["environment"]["action_environments"]["programbench-cleanroom"]["cwd"] == "/workspace"
+
+
+def test_validate_agent_execution_config_rejects_invalid_binding_id(tmp_path):
+    from minisweagent.mas.execution_config import (
+        AgentExecutionConfigError,
+        normalize_agent_execution_config,
+        validate_agent_execution_config,
+    )
+
+    config = normalize_agent_execution_config(_base_config(tmp_path), shared_workspace=tmp_path)
+    config["environment"] = {
+        "default_action_environment_id": "local",
+        "action_environments": {
+            "local": config["environment"]["action_environments"]["local"],
+            "bad id": {
+                "kind": "local",
+                "scope": "private",
+                "cwd": tmp_path.resolve().as_posix(),
+            }
+        },
+    }
+
+    with pytest.raises(AgentExecutionConfigError) as exc_info:
+        validate_agent_execution_config(config)
+
+    assert exc_info.value.code == "invalid_agent_execution_config"
+    assert exc_info.value.path == "environment.action_environments.bad id"
+
+
+def test_validate_agent_execution_config_rejects_missing_default_binding(tmp_path):
+    from minisweagent.mas.execution_config import (
+        AgentExecutionConfigError,
+        normalize_agent_execution_config,
+        validate_agent_execution_config,
+    )
+
+    config = normalize_agent_execution_config(_base_config(tmp_path), shared_workspace=tmp_path)
+    config["environment"]["default_action_environment_id"] = "missing"
+
+    with pytest.raises(AgentExecutionConfigError) as exc_info:
+        validate_agent_execution_config(config)
+
+    assert exc_info.value.code == "invalid_agent_execution_config"
+    assert exc_info.value.path == "environment.default_action_environment_id"
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        {"kind": "docker", "scope": "private", "image": "example:latest", "cwd": "/workspace"},
+        {"kind": "local", "scope": "shared", "cwd": "/tmp/workspace"},
+    ],
+)
+def test_validate_agent_execution_config_rejects_unsupported_binding_combinations(tmp_path, binding):
+    from minisweagent.mas.execution_config import (
+        AgentExecutionConfigError,
+        normalize_agent_execution_config,
+        validate_agent_execution_config,
+    )
+
+    config = normalize_agent_execution_config(_base_config(tmp_path), shared_workspace=tmp_path)
+    config["environment"]["action_environments"]["local"] = binding
+
+    with pytest.raises(AgentExecutionConfigError) as exc_info:
+        validate_agent_execution_config(config)
+
+    assert exc_info.value.code == "unsupported_agent_environment"
+    assert exc_info.value.path == "environment.action_environments.local"
+
+
+def test_validate_agent_execution_config_rejects_flat_docker_environment_shape(tmp_path):
+    from minisweagent.mas.execution_config import (
+        AgentExecutionConfigError,
+        normalize_agent_execution_config,
+        validate_agent_execution_config,
+    )
+
+    config = normalize_agent_execution_config(_base_config(tmp_path), shared_workspace=tmp_path)
+    config["environment"] = {
+        "environment_class": "docker",
+        "image": "programbench/example:task_cleanroom",
+        "cwd": "/workspace",
+    }
+
+    with pytest.raises(AgentExecutionConfigError) as exc_info:
+        validate_agent_execution_config(config)
+
+    assert exc_info.value.code == "invalid_agent_execution_config"
+    assert exc_info.value.path == "environment.default_action_environment_id"
 
 
 def test_build_agent_execution_config_rejects_explicit_excluded_override(tmp_path):
@@ -95,7 +216,7 @@ def test_validate_agent_execution_config_rejects_secret_like_keys(tmp_path):
         normalize_agent_execution_config(raw, shared_workspace=tmp_path)
 
     assert exc_info.value.code == "agent_execution_config_secret_key"
-    assert exc_info.value.path == "environment.env.OPENAI_API_KEY"
+    assert exc_info.value.path == "environment.action_environments.local.env.OPENAI_API_KEY"
 
 
 def test_redact_agent_execution_config_redacts_only_environment_values(tmp_path):
@@ -104,8 +225,10 @@ def test_redact_agent_execution_config_redacts_only_environment_values(tmp_path)
     config = normalize_agent_execution_config(_base_config(tmp_path), shared_workspace=tmp_path)
     redacted = redact_agent_execution_config(config)
 
-    assert redacted["environment"]["env"] == {"PAGER": "<redacted>"}
-    assert config["environment"]["env"] == {"PAGER": "cat"}
+    redacted_binding = redacted["environment"]["action_environments"]["local"]
+    original_binding = config["environment"]["action_environments"]["local"]
+    assert redacted_binding["env"] == {"PAGER": "<redacted>"}
+    assert original_binding["env"] == {"PAGER": "cat"}
     assert redacted["model"]["model_kwargs"] == {"drop_params": True}
 
 
@@ -144,7 +267,7 @@ def test_build_agent_execution_config_without_specs_uses_mini_mas_default(monkey
     config = build_agent_execution_config(AgentExecutionConfigBuildRequest(shared_workspace=tmp_path))
 
     assert seen_specs == [expected_spec]
-    assert config["environment"]["cwd"] == tmp_path.resolve().as_posix()
+    assert config["environment"]["action_environments"]["local"]["cwd"] == tmp_path.resolve().as_posix()
 
 
 def test_safe_prompt_template_vars_are_from_config_not_process_env(tmp_path, monkeypatch):

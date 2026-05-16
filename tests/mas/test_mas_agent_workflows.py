@@ -161,6 +161,146 @@ def test_interactive_root_agent_executes_root_command_signal_and_publishes_scope
     ]
 
 
+def test_configured_interactive_root_executes_command_through_agent_execution_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX
+
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        return {
+            "kind": "root_command",
+            "command_id": "cmd-configured",
+            "root_agent_id": "mas-0123456789abcdef",
+            "command": "echo configured",
+            "source": "external_cli",
+        }
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+    execute_from_config = Mock(return_value={"output": "configured\n", "returncode": 0, "exception_info": "", "extra": {}})
+    monkeypatch.setattr(workflows, "execute_bash_from_config_step", execute_from_config)
+
+    config = _agent_execution_config(tmp_path)
+    result = _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        env=Mock(side_effect=AssertionError("configured Root must not use host env for ordinary bash")),
+        max_commands=1,
+        agent_execution_config=config,
+    )
+
+    assert result["lifecycle_state"] == "waiting_for_command"
+    execute_from_config.assert_called_once()
+    assert execute_from_config.call_args.args[0] == config["environment"]
+    result_events = [
+        value
+        for key, value in published
+        if key == f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-configured"
+    ]
+    assert result_events[0]["result"]["output"] == "configured\n"
+
+
+def test_configured_interactive_root_spawn_inherits_action_environment_bindings(monkeypatch, tmp_path):
+    import minisweagent.mas.commands as commands
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.signals import ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    spawned = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    async def recv_async(topic=None, timeout_seconds=60):
+        return {
+            "kind": "root_command",
+            "command_id": "cmd-spawn",
+            "root_agent_id": "mas-0123456789abcdef",
+            "command": 'mini-mas spawn "work"',
+            "source": "external_cli",
+        }
+
+    async def spawn_children(*, parent_workflow_id, tasks, agent_execution_config):
+        spawned.append(agent_execution_config)
+        from minisweagent.mas.agent_interactions import SpawnChildrenResult
+
+        return SpawnChildrenResult(
+            children=[
+                {
+                    "task": tasks[0],
+                    "agent_id": "mas-1111111111111111",
+                    "parent_agent_id": parent_workflow_id,
+                    "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
+                    "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(workflows._dbos.DBOS, "recv_async", Mock(side_effect=recv_async))
+    monkeypatch.setattr(workflows.agent_interactions, "spawn_children", spawn_children)
+    monkeypatch.setattr(commands.agent_interactions, "spawn_children", spawn_children)
+
+    config = _agent_execution_config(tmp_path)
+    config["environment"] = {
+        "default_action_environment_id": "programbench-cleanroom",
+        "action_environments": {
+            "programbench-cleanroom": {
+                "kind": "docker",
+                "scope": "shared",
+                "image": "programbench/example:task_cleanroom",
+                "cwd": "/workspace",
+                "env": {"PAGER": "cat"},
+            }
+        },
+    }
+
+    _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        max_commands=1,
+        agent_execution_config=config,
+    )
+
+    assert spawned
+    assert spawned[0]["environment"] == config["environment"]
+    result_events = [
+        value
+        for key, value in published
+        if key == f"{ROOT_COMMAND_RESULT_EVENT_KEY_PREFIX}cmd-spawn"
+    ]
+    assert result_events[0]["result"]["returncode"] == 0
+
+
+def test_configured_interactive_root_creation_does_not_preflight_model_credentials(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    import minisweagent.mas.mas_agent as workflows
+
+    config = _agent_execution_config(tmp_path)
+    config["model"]["model_class"] = "litellm"
+    config["model"]["model_name"] = "openai/gpt-4.1"
+
+    result = _call_root_agent_workflow(
+        workflows.interactive_root_agent_workflow,
+        "mas-0123456789abcdef",
+        agent_execution_config=config,
+    )
+
+    assert result["lifecycle_state"] == "waiting_for_command"
+
+
 def test_interactive_root_agent_rejects_mismatched_root_command_signal_without_execution(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
@@ -566,10 +706,16 @@ def test_child_agent_trajectory_redacts_agent_execution_config_env_values(tmp_pa
             "format_error_template": "{{error}}",
         },
         "environment": {
-            "environment_class": "local",
-            "cwd": tmp_path.as_posix(),
-            "env": {"PAGER": "cat"},
-            "timeout": 30,
+            "default_action_environment_id": "local",
+            "action_environments": {
+                "local": {
+                    "kind": "local",
+                    "scope": "private",
+                    "cwd": tmp_path.as_posix(),
+                    "env": {"PAGER": "cat"},
+                    "timeout": 30,
+                }
+            },
         },
     }
 
@@ -584,8 +730,8 @@ def test_child_agent_trajectory_redacts_agent_execution_config_env_values(tmp_pa
     assert result["terminal_state"] == "failed"
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
     recorded_config = artifact["info"]["agent_execution_config"]
-    assert recorded_config["environment"]["env"] == {"PAGER": "<redacted>"}
-    assert config["environment"]["env"] == {"PAGER": "cat"}
+    assert recorded_config["environment"]["action_environments"]["local"]["env"] == {"PAGER": "<redacted>"}
+    assert config["environment"]["action_environments"]["local"]["env"] == {"PAGER": "cat"}
 
 
 def test_root_agent_workflow_is_registered_as_dbos_workflow_when_module_loads():
@@ -1055,6 +1201,65 @@ def test_child_workflow_sets_first_observable_event_for_failure_and_limits(monke
     first_observable = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
     assert first_observable[-1]["agent_id"] == "mas-2222222222222222"
     assert first_observable[-1]["lifecycle_state"] == "limits_exceeded"
+
+
+def test_child_workflow_blocks_on_unavailable_action_environment(monkeypatch, tmp_path):
+    import minisweagent.mas.mas_agent as workflows
+    from minisweagent.mas.action_environment import ActionEnvironmentUnavailableError
+
+    monkeypatch.chdir(tmp_path)
+    published = []
+    monkeypatch.setattr(workflows._dbos.DBOS, "workflow_id", "mas-1111111111111111")
+
+    async def set_event_async(key, value):
+        published.append((key, value))
+
+    monkeypatch.setattr(workflows._dbos.DBOS, "set_event_async", Mock(side_effect=set_event_async))
+    monkeypatch.setattr(
+        workflows,
+        "execute_bash_from_config_step",
+        Mock(
+            side_effect=ActionEnvironmentUnavailableError(
+                "action_environment_unavailable",
+                "Docker Action Environment container not found",
+                "programbench-cleanroom",
+            )
+        ),
+    )
+
+    config = _agent_execution_config(
+        tmp_path,
+        outputs=[make_output("work", [{"command": "echo hi"}], cost=0.1)],
+        step_limit=3,
+    )
+    config["environment"]["default_action_environment_id"] = "programbench-cleanroom"
+    config["environment"]["action_environments"] = {
+        "programbench-cleanroom": {
+            "kind": "docker",
+            "scope": "shared",
+            "image": "programbench/example:task_cleanroom",
+            "cwd": "/workspace",
+        }
+    }
+
+    result = _call_root_agent_workflow(
+        workflows.child_agent_workflow,
+        "mas-1111111111111111",
+        "work",
+        parent_agent_id="mas-0123456789abcdef",
+        agent_execution_config=config,
+    )
+
+    assert result["status"] == "execution_blocked"
+    assert result["terminal_state"] == "execution_blocked"
+    status_events = [value for key, value in published if key == mas_status_events.STATUS_EVENT_KEY]
+    assert status_events[-1]["lifecycle_state"] == "execution_blocked"
+    assert "Docker Action Environment container not found" in status_events[-1]["latest_error"]
+    first_observable_events = [value for key, value in published if key == mas_status_events.FIRST_OBSERVABLE_EVENT_KEY]
+    assert first_observable_events[-1]["lifecycle_state"] == "execution_blocked"
+    artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
+    assert artifact["info"]["exit_status"] == "execution_blocked"
+    assert artifact["messages"][-1]["extra"]["mas_error"]["action_environment_id"] == "programbench-cleanroom"
 
 def test_root_agent_workflow_runs_model_and_bash_path_and_saves_trajectory(tmp_path, monkeypatch):
     from minisweagent.exceptions import Submitted

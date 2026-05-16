@@ -22,13 +22,17 @@ ERROR_UNSUPPORTED_AGENT_EXECUTION_CONFIG_VERSION = "unsupported_agent_execution_
 ERROR_INVALID_AGENT_EXECUTION_CONFIG = "invalid_agent_execution_config"
 ERROR_UNSUPPORTED_AGENT_ENVIRONMENT = "unsupported_agent_environment"
 ERROR_UNSUPPORTED_AGENT_ENVIRONMENT_CWD_OVERRIDE = "unsupported_agent_environment_cwd_override"
+ERROR_UNSUPPORTED_AGENT_ENVIRONMENT_OVERRIDE = "unsupported_agent_environment_override"
 ERROR_AGENT_EXECUTION_CONFIG_SECRET_KEY = "agent_execution_config_secret_key"
 ERROR_MISSING_MODEL_PROVIDER_CREDENTIAL = "missing_model_provider_credential"
 ERROR_AGENT_EXECUTION_CONFIG_RESOLUTION_FAILED = "agent_execution_config_resolution_failed"
 ERROR_AGENT_EXECUTION_RUNTIME_FAILED = "agent_execution_runtime_failed"
+ERROR_ACTION_ENVIRONMENT_UNAVAILABLE = "action_environment_unavailable"
 
 _EXCLUDED_AGENT_FIELDS = frozenset({"agent_class", "mode", "confirm_exit", "whitelist_actions", "output_path"})
 _EXCLUDED_TOP_LEVEL_FIELDS = frozenset({"run"})
+DEFAULT_LOCAL_ACTION_ENVIRONMENT_ID = "local"
+ACTION_ENVIRONMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SECRET_TOKENS = frozenset({"key", "token", "secret", "password", "credential", "authorization"})
 _SECRET_COMPOUND_KEYS = frozenset(
     {
@@ -88,6 +92,7 @@ def build_agent_execution_config(request: AgentExecutionConfigBuildRequest) -> d
     _reject_explicit_excluded_overrides(explicit_overrides)
 
     if request.base_agent_execution_config is not None:
+        _reject_environment_override(explicit_overrides, base_config_present=True)
         base_config = _strip_schema(copy.deepcopy(dict(request.base_agent_execution_config)))
         merged_config = recursive_merge(base_config, explicit_overrides)
     else:
@@ -124,8 +129,7 @@ def normalize_agent_execution_config(config: Mapping[str, Any], *, shared_worksp
     for field in _EXCLUDED_AGENT_FIELDS:
         agent.pop(field, None)
 
-    environment["environment_class"] = "local"
-    environment["cwd"] = shared_workspace.resolve().as_posix()
+    environment = _normalize_local_environment_binding(environment, shared_workspace=shared_workspace)
 
     normalized = {
         "schema_version": AGENT_EXECUTION_CONFIG_SCHEMA_VERSION,
@@ -175,17 +179,7 @@ def validate_agent_execution_config(
     if "model_kwargs" in model and not isinstance(model["model_kwargs"], Mapping):
         raise AgentExecutionConfigError(ERROR_INVALID_AGENT_EXECUTION_CONFIG, "model.model_kwargs must be a mapping", "model.model_kwargs")
 
-    environment_class = str(environment.get("environment_class", "local") or "local")
-    if environment_class not in _LOCAL_ENVIRONMENT_CLASSES:
-        raise AgentExecutionConfigError(
-            ERROR_UNSUPPORTED_AGENT_ENVIRONMENT,
-            f"Unsupported Agent Execution Config environment: {environment_class}",
-            "environment.environment_class",
-        )
-    _required_string(environment, "environment.cwd")
-    if "env" in environment and not _is_string_mapping(environment["env"]):
-        raise AgentExecutionConfigError(ERROR_INVALID_AGENT_EXECUTION_CONFIG, "environment.env must be a string mapping", "environment.env")
-    _optional_nonnegative_int(environment, "timeout", "environment.timeout")
+    _validate_action_environment_bindings(environment)
 
     _reject_secret_keys(config_dict)
 
@@ -195,14 +189,38 @@ def validate_agent_execution_config(
     return config_dict
 
 
+def default_action_environment_binding(environment: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Return the default Action Environment ID and binding from a canonical environment config."""
+    environment_dict = _mapping_section(environment, "environment")
+    default_id = str(environment_dict.get("default_action_environment_id") or "")
+    bindings = _mapping_section(environment_dict.get("action_environments"), "environment.action_environments")
+    binding = _mapping_section(bindings.get(default_id), f"environment.action_environments.{default_id}")
+    return default_id, binding
+
+
+def default_action_environment_template_vars(environment: Mapping[str, Any]) -> dict[str, Any]:
+    """Build prompt template variables from the default Action Environment Binding."""
+    action_environment_id, binding = default_action_environment_binding(environment)
+    return {
+        "action_environment_id": action_environment_id,
+        "cwd": binding.get("cwd", ""),
+        "env": copy.deepcopy(binding.get("env", {})),
+        "timeout": binding.get("timeout", 30),
+    }
+
+
 def redact_agent_execution_config(config: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Return a trajectory-safe config snapshot with Action Environment Variable values redacted."""
     if config is None:
         return None
     redacted = copy.deepcopy(dict(config))
     environment = redacted.get("environment")
-    if isinstance(environment, dict) and isinstance(environment.get("env"), dict):
-        environment["env"] = {str(key): REDACTED_ENV_VALUE for key in environment["env"]}
+    if isinstance(environment, dict):
+        action_environments = environment.get("action_environments")
+        if isinstance(action_environments, dict):
+            for binding in action_environments.values():
+                if isinstance(binding, dict) and isinstance(binding.get("env"), dict):
+                    binding["env"] = {str(key): REDACTED_ENV_VALUE for key in binding["env"]}
     return redacted
 
 
@@ -217,16 +235,14 @@ def safe_prompt_template_vars(
 ) -> dict[str, Any]:
     """Build autonomous MAS Child prompt template vars without process environment leakage."""
     config = validate_agent_execution_config(agent_execution_config, preflight_credentials=False)
-    environment = config["environment"]
     model = config["model"]
+    environment_vars = default_action_environment_template_vars(config["environment"])
     uname = platform.uname()
     return {
         "task": task,
         "agent_id": agent_id,
         "parent_agent_id": parent_agent_id or "",
-        "cwd": environment.get("cwd", ""),
-        "env": copy.deepcopy(environment.get("env", {})),
-        "timeout": environment.get("timeout", 30),
+        **environment_vars,
         "model_name": model.get("model_name", ""),
         "n_model_calls": n_model_calls,
         "model_cost": model_cost,
@@ -285,13 +301,112 @@ def _reject_explicit_excluded_overrides(overrides: Mapping[str, Any]) -> None:
                     f"agent.{field} is not part of Agent Execution Config schema version 1",
                     f"agent.{field}",
                 )
+    _reject_environment_override(overrides, base_config_present=False)
+
+
+def _reject_environment_override(overrides: Mapping[str, Any], *, base_config_present: bool) -> None:
     environment = overrides.get("environment")
-    if isinstance(environment, Mapping) and "cwd" in environment:
+    if not isinstance(environment, Mapping):
+        return
+    if base_config_present:
+        raise AgentExecutionConfigError(
+            ERROR_UNSUPPORTED_AGENT_ENVIRONMENT_OVERRIDE,
+            "Spawn config overrides cannot change inherited Action Environment Bindings",
+            "environment",
+        )
+    if "cwd" in environment:
         raise AgentExecutionConfigError(
             ERROR_UNSUPPORTED_AGENT_ENVIRONMENT_CWD_OVERRIDE,
             "Spawn config overrides cannot change Local Agent Environment working directory",
             "environment.cwd",
         )
+
+
+def _normalize_local_environment_binding(environment: Mapping[str, Any], *, shared_workspace: Path) -> dict[str, Any]:
+    if "default_action_environment_id" in environment or "action_environments" in environment:
+        return copy.deepcopy(dict(environment))
+    environment_class = str(environment.get("environment_class", "local") or "local")
+    if environment_class not in _LOCAL_ENVIRONMENT_CLASSES:
+        raise AgentExecutionConfigError(
+            ERROR_UNSUPPORTED_AGENT_ENVIRONMENT,
+            f"Unsupported Agent Execution Config environment: {environment_class}",
+            "environment.environment_class",
+        )
+    local_binding = {
+        "kind": "local",
+        "scope": "private",
+        "cwd": shared_workspace.resolve().as_posix(),
+        "env": copy.deepcopy(environment.get("env", {})),
+        "timeout": environment.get("timeout", 30),
+    }
+    return {
+        "default_action_environment_id": DEFAULT_LOCAL_ACTION_ENVIRONMENT_ID,
+        "action_environments": {DEFAULT_LOCAL_ACTION_ENVIRONMENT_ID: local_binding},
+    }
+
+
+def _validate_action_environment_bindings(environment: Mapping[str, Any]) -> None:
+    default_id = environment.get("default_action_environment_id")
+    if not isinstance(default_id, str) or not default_id:
+        raise AgentExecutionConfigError(
+            ERROR_INVALID_AGENT_EXECUTION_CONFIG,
+            "environment.default_action_environment_id must be a non-empty string",
+            "environment.default_action_environment_id",
+        )
+    _validate_action_environment_id(default_id, "environment.default_action_environment_id")
+    action_environments = _mapping_section(
+        environment.get("action_environments"),
+        "environment.action_environments",
+    )
+    if default_id not in action_environments:
+        raise AgentExecutionConfigError(
+            ERROR_INVALID_AGENT_EXECUTION_CONFIG,
+            "environment.default_action_environment_id must reference an existing Action Environment Binding",
+            "environment.default_action_environment_id",
+        )
+    for action_environment_id, raw_binding in action_environments.items():
+        binding_path = f"environment.action_environments.{action_environment_id}"
+        if not isinstance(action_environment_id, str):
+            raise AgentExecutionConfigError(
+                ERROR_INVALID_AGENT_EXECUTION_CONFIG,
+                "Action Environment ID must be a string",
+                "environment.action_environments",
+            )
+        _validate_action_environment_id(action_environment_id, binding_path)
+        binding = _mapping_section(raw_binding, binding_path)
+        _validate_action_environment_binding(binding, binding_path)
+
+
+def _validate_action_environment_id(action_environment_id: str, path: str) -> None:
+    if not ACTION_ENVIRONMENT_ID_RE.fullmatch(action_environment_id):
+        raise AgentExecutionConfigError(
+            ERROR_INVALID_AGENT_EXECUTION_CONFIG,
+            "Action Environment ID must match ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$",
+            path,
+        )
+
+
+def _validate_action_environment_binding(binding: Mapping[str, Any], path: str) -> None:
+    kind = binding.get("kind")
+    scope = binding.get("scope")
+    if not isinstance(kind, str) or not kind:
+        raise AgentExecutionConfigError(ERROR_INVALID_AGENT_EXECUTION_CONFIG, f"{path}.kind must be a non-empty string", f"{path}.kind")
+    if not isinstance(scope, str) or not scope:
+        raise AgentExecutionConfigError(ERROR_INVALID_AGENT_EXECUTION_CONFIG, f"{path}.scope must be a non-empty string", f"{path}.scope")
+    if (kind, scope) not in {("local", "private"), ("docker", "shared")}:
+        raise AgentExecutionConfigError(
+            ERROR_UNSUPPORTED_AGENT_ENVIRONMENT,
+            f"Unsupported Action Environment Binding: kind={kind!r}, scope={scope!r}",
+            path,
+        )
+    _required_string(binding, f"{path}.cwd")
+    if "env" in binding and not _is_string_mapping(binding["env"]):
+        raise AgentExecutionConfigError(ERROR_INVALID_AGENT_EXECUTION_CONFIG, f"{path}.env must be a string mapping", f"{path}.env")
+    _optional_nonnegative_int(binding, "timeout", f"{path}.timeout")
+    if kind == "docker":
+        _required_string(binding, f"{path}.image")
+        _optional_string_sequence(binding, "run_args", f"{path}.run_args")
+        _optional_string_sequence(binding, "interpreter", f"{path}.interpreter")
 
 
 def _mapping_section(value: Any, path: str) -> dict[str, Any]:
@@ -324,18 +439,30 @@ def _optional_nonnegative_number(section: Mapping[str, Any], key: str, path: str
         raise AgentExecutionConfigError(ERROR_INVALID_AGENT_EXECUTION_CONFIG, f"{path} must be a non-negative number", path)
 
 
+def _optional_string_sequence(section: Mapping[str, Any], key: str, path: str) -> None:
+    if key not in section:
+        return
+    value = section[key]
+    if not isinstance(value, Sequence) or isinstance(value, str) or not all(isinstance(item, str) for item in value):
+        raise AgentExecutionConfigError(ERROR_INVALID_AGENT_EXECUTION_CONFIG, f"{path} must be a list of strings", path)
+
+
 def _is_string_mapping(value: Any) -> bool:
     return isinstance(value, Mapping) and all(isinstance(key, str) and isinstance(item, str) for key, item in value.items())
 
 
 def _reject_secret_keys(config: Mapping[str, Any]) -> None:
     for path, key in _walk_keys(config):
-        if _is_secret_key_name(str(key), environment_name=path.startswith("environment.env.")):
+        if _is_secret_key_name(str(key), environment_name=_is_action_environment_variable_path(path)):
             raise AgentExecutionConfigError(
                 ERROR_AGENT_EXECUTION_CONFIG_SECRET_KEY,
                 f"Agent Execution Config contains secret-like key: {key}",
                 path,
             )
+
+
+def _is_action_environment_variable_path(path: str) -> bool:
+    return path.startswith("environment.env.") or ".env." in path
 
 
 def _walk_keys(value: Any, prefix: str = "") -> list[tuple[str, str]]:

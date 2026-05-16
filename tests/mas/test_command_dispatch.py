@@ -158,9 +158,6 @@ agent:
 model:
   model_kwargs:
     temperature: 0
-environment:
-  env:
-    PAGER: cat
 """
     )
 
@@ -202,7 +199,42 @@ environment:
     assert calls[0][2]["agent"]["system_template"] == "Override system"
     assert calls[0][2]["model"]["model_name"] == "deterministic"
     assert calls[0][2]["model"]["model_kwargs"] == {"outputs": [], "temperature": 0}
-    assert calls[0][2]["environment"]["cwd"] == tmp_path.resolve().as_posix()
+    assert calls[0][2]["environment"]["action_environments"]["local"]["cwd"] == tmp_path.resolve().as_posix()
+
+
+def test_spawn_command_rejects_environment_binding_overrides_from_config(monkeypatch, tmp_path):
+    import minisweagent.mas.commands as commands
+    from minisweagent.mas.commands import MasCommandHandler, classify_mas_command
+
+    config_file = tmp_path / "child.yaml"
+    config_file.write_text(
+        """
+environment:
+  action_environments:
+    other:
+      kind: local
+      scope: private
+      cwd: /tmp/other
+"""
+    )
+
+    async def spawn_children(**_kwargs):
+        raise AssertionError("environment binding overrides must fail before Child creation")
+
+    monkeypatch.setattr(commands.agent_interactions, "current_workflow_id", lambda: "mas-0123456789abcdef")
+    monkeypatch.setattr(commands.agent_interactions, "spawn_children", spawn_children)
+
+    handler = MasCommandHandler(agent_execution_config=_agent_execution_config(), shared_workspace=tmp_path)
+
+    result = asyncio.run(
+        handler.execute(
+            classify_mas_command(f'mini-mas spawn -c {config_file} "task C"'),
+        )
+    )
+
+    assert result["returncode"] == 2
+    assert result["extra"]["mas_command_error"] == "unsupported_agent_environment_override"
+    assert "environment" in result["output"]
 
 
 def test_spawn_config_validation_error_does_not_create_child(monkeypatch):

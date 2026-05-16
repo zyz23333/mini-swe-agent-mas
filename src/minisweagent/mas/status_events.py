@@ -18,6 +18,7 @@ LifecycleState = Literal[
     "closed",
     "failed",
     "limits_exceeded",
+    "execution_blocked",
 ]
 LIFECYCLE_STATES: tuple[LifecycleState, ...] = (
     "waiting_for_command",
@@ -27,6 +28,7 @@ LIFECYCLE_STATES: tuple[LifecycleState, ...] = (
     "closed",
     "failed",
     "limits_exceeded",
+    "execution_blocked",
 )
 
 

@@ -164,6 +164,7 @@ class MasRuntimeSession:
         self,
         *,
         workflow_id: str | None = None,
+        agent_execution_config: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """Start an Interactive Root Agent inside this runtime session."""
         from minisweagent.mas.mas_agent import interactive_root_agent_workflow
@@ -177,6 +178,7 @@ class MasRuntimeSession:
                 interactive_root_agent_workflow,
                 assigned_workflow_id,
                 max_commands=None,
+                agent_execution_config=dict(agent_execution_config) if agent_execution_config is not None else None,
             )
 
         started_workflow_id = _handle_workflow_id(handle)
@@ -528,20 +530,26 @@ def _format_interactive_root_result(*, agent_id: str, result: Mapping[str, Any] 
 async def _start_interactive_root_agent_workflow_async(
     *,
     workflow_id: str | None = None,
+    agent_execution_config: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     """Async compatibility wrapper for starting an Interactive Root Agent."""
     async with MasRuntimeSession() as session:
-        return await session.start_interactive_root_agent_workflow(workflow_id=workflow_id)
+        return await session.start_interactive_root_agent_workflow(
+            workflow_id=workflow_id,
+            agent_execution_config=agent_execution_config,
+        )
 
 
 def start_interactive_root_agent_workflow(
     *,
     workflow_id: str | None = None,
+    agent_execution_config: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
     """Initialize DBOS and start the minimal Interactive Root Agent path."""
     return _run_mas_async(
         _start_interactive_root_agent_workflow_async(
             workflow_id=workflow_id,
+            agent_execution_config=agent_execution_config,
         )
     )
 

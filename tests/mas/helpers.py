@@ -100,10 +100,16 @@ def _agent_execution_config(tmp_path, *, outputs=None, step_limit: int = 0, env:
             ),
         },
         "environment": {
-            "environment_class": "local",
-            "cwd": tmp_path.resolve().as_posix(),
-            "env": dict(env or {}),
-            "timeout": 30,
+            "default_action_environment_id": "local",
+            "action_environments": {
+                "local": {
+                    "kind": "local",
+                    "scope": "private",
+                    "cwd": tmp_path.resolve().as_posix(),
+                    "env": dict(env or {}),
+                    "timeout": 30,
+                }
+            },
         },
     }
 

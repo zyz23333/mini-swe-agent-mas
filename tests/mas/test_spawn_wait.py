@@ -81,7 +81,10 @@ def test_detached_spawn_returns_child_metadata_and_uses_ai_agent_queue(tmp_path,
     )
     assert child_call["kwargs"]["parent_agent_id"] == "mas-0123456789abcdef"
     assert child_call["kwargs"]["agent_execution_config"]["schema_version"] == 1
-    assert child_call["kwargs"]["agent_execution_config"]["environment"]["cwd"] == tmp_path.resolve().as_posix()
+    assert (
+        child_call["kwargs"]["agent_execution_config"]["environment"]["action_environments"]["local"]["cwd"]
+        == tmp_path.resolve().as_posix()
+    )
     assert result["terminal_state"] == "limits_exceeded"
 
     artifact = json.loads((tmp_path / result["trajectory_artifact_path"]).read_text())
