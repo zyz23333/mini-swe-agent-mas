@@ -9,6 +9,7 @@ traj.json
 .claude/**
 .vscode/**
 .mini-mas/
+.scratch/programbench-runs/
 
 # Created by https://www.toptal.com/developers/gitignore/api/python
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
