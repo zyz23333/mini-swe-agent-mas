@@ -9,6 +9,7 @@ import json
 import os
 import random
 import re
+import secrets
 import shutil
 import subprocess
 import tarfile
@@ -37,7 +38,7 @@ from minisweagent.mas.execution_config import (
     normalize_agent_execution_config,
     validate_agent_execution_config,
 )
-from minisweagent.mas.runtime import MasRuntimeProfile, MasRuntimeSession
+from minisweagent.mas.runtime import MAS_RUNTIME_STATE_STORE_ENV, MasRuntimeProfile, MasRuntimeSession
 from minisweagent.run.benchmarks.utils.batch_progress import RunBatchProgressManager
 from minisweagent.utils.log import add_file_handler, logger
 from minisweagent.utils.serialize import UNSET, recursive_merge
@@ -47,6 +48,7 @@ PROGRAMBENCH_IMAGE_TAG = "task_cleanroom"
 PROGRAMBENCH_WORKSPACE = "/workspace"
 PROGRAMBENCH_RESULTS_FILE = "programbench-mas-results.json"
 PROGRAMBENCH_EVAL_COMMAND_TEMPLATE = "uv run --project references/ProgramBench programbench eval {run_dir}"
+PROGRAMBENCH_ROOT_COMMAND_RESULT_TIMEOUT_MARGIN_SECONDS = 30.0
 DEFAULT_CONFIG_FILE = builtin_config_dir / "mini-mas.yaml"
 DEFAULT_TASKS_DIR = Path("references") / "ProgramBench" / "src" / "programbench" / "data" / "tasks"
 _OUTPUT_FILE_LOCK = threading.Lock()
@@ -481,7 +483,8 @@ async def run_programbench_instance_async(
             cwd=PROGRAMBENCH_WORKSPACE,
             run_args=docker_run_args,
         )
-        command = make_programbench_root_spawn_command(instance)
+        command = make_programbench_root_spawn_command(instance, wait_timeout_seconds=result_timeout_seconds)
+        root_command_timeout_seconds = result_timeout_seconds + PROGRAMBENCH_ROOT_COMMAND_RESULT_TIMEOUT_MARGIN_SECONDS
         async with session_factory(profile=MasRuntimeProfile.SUPERVISED_INTERACTIVE_AND_AI) as session:
             await session.start_interactive_root_agent_workflow(
                 workflow_id=root_agent_id,
@@ -490,7 +493,7 @@ async def run_programbench_instance_async(
             result_event = await session.send_root_command(
                 root_agent_id=root_agent_id,
                 command=command,
-                result_timeout_seconds=result_timeout_seconds,
+                result_timeout_seconds=root_command_timeout_seconds,
             )
             command_result = dict(result_event.get("result", {}))
             extra = dict(command_result.get("extra", {}))
@@ -506,7 +509,7 @@ async def run_programbench_instance_async(
                 await session.send_root_command(
                     root_agent_id=root_agent_id,
                     command=f"mini-mas close {child_agent_id}",
-                    result_timeout_seconds=result_timeout_seconds,
+                    result_timeout_seconds=root_command_timeout_seconds,
                 )
                 submission_path = export_workspace(
                     container_name=provisioned.container_name,
@@ -589,12 +592,24 @@ def process_instance(
     return result
 
 
-def make_programbench_root_spawn_command(instance: Mapping[str, Any]) -> str:
+def make_programbench_root_spawn_command(instance: Mapping[str, Any], *, wait_timeout_seconds: float) -> str:
     """Build the Root command submitted by the ProgramBench runner."""
     task = make_programbench_task_prompt(instance)
     import shlex
 
-    return " ".join(["mini-mas", "spawn", "--wait", shlex.quote(task)])
+    if wait_timeout_seconds < 0:
+        msg = "ProgramBench spawn wait timeout must be non-negative"
+        raise ValueError(msg)
+    return " ".join(
+        [
+            "mini-mas",
+            "spawn",
+            "--wait",
+            "--timeout",
+            f"{wait_timeout_seconds:g}",
+            shlex.quote(task),
+        ]
+    )
 
 
 def make_programbench_task_prompt(instance: Mapping[str, Any]) -> str:
@@ -619,6 +634,11 @@ def print_eval_handoff(output_dir: Path) -> str:
     return command
 
 
+def make_programbench_mas_runtime_state_store(output_dir: Path) -> Path:
+    """Create a fresh run-scoped MAS DBOS state store path for one benchmark invocation."""
+    return output_dir / ".mini-mas" / "runtime" / f"run-{secrets.token_hex(8)}" / "mini_mas_dbos.sqlite"
+
+
 # fmt: off
 @app.command()
 def main(
@@ -634,11 +654,17 @@ def main(
     model_class: str | None = typer.Option(None, "--model-class", help="Model class to use", rich_help_panel="Advanced"),
     config_spec: list[str] = typer.Option([str(DEFAULT_CONFIG_FILE)], "-c", "--config", help="Config specs", rich_help_panel="Basic"),
     docker_executable: str = typer.Option("docker", "--docker-executable", help="Docker executable", rich_help_panel="Advanced"),
-    result_timeout_seconds: float = typer.Option(60, "--result-timeout", help="Root command result timeout", rich_help_panel="Advanced"),
+    result_timeout_seconds: float = typer.Option(
+        60,
+        "--result-timeout",
+        help="Child spawn wait timeout; Root command result wait includes a small finalization margin",
+        rich_help_panel="Advanced",
+    ),
 ) -> None:
     # fmt: on
     """Run mini-mas on ProgramBench instances."""
     output.mkdir(parents=True, exist_ok=True)
+    os.environ[MAS_RUNTIME_STATE_STORE_ENV] = make_programbench_mas_runtime_state_store(output).as_posix()
     add_file_handler(output / "minisweagent-programbench-mas.log")
     instances = load_programbench_instances(tasks_dir, include_tests=False)
     selected = select_instances_for_run(
@@ -733,7 +759,7 @@ def _safe_tar_member_path(name: str) -> Path | None:
 
 def _submitted_ready_child(ready_children: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
     for child in ready_children:
-        if child.get("lifecycle_state") == "waiting_for_parent" and child.get("latest_submission"):
+        if child.get("lifecycle_state") == "waiting_for_parent":
             return child
     return None
 

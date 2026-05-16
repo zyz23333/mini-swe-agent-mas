@@ -15,6 +15,33 @@ def test_programbench_image_name_replaces_double_underscore():
     )
 
 
+def test_programbench_root_spawn_command_propagates_wait_timeout():
+    from minisweagent.run.benchmarks.programbench_mas import make_programbench_root_spawn_command
+
+    command = make_programbench_root_spawn_command(
+        {
+            "instance_id": "xorg62__tty-clock.f2f847c",
+            "repository": "xorg62/tty-clock",
+            "language": "c",
+        },
+        wait_timeout_seconds=1800,
+    )
+
+    assert command.startswith("mini-mas spawn --wait --timeout 1800 ")
+    assert "xorg62__tty-clock.f2f847c" in command
+
+
+def test_programbench_mas_runtime_state_store_is_run_scoped(tmp_path):
+    from minisweagent.run.benchmarks.programbench_mas import make_programbench_mas_runtime_state_store
+
+    first = make_programbench_mas_runtime_state_store(tmp_path / "run")
+    second = make_programbench_mas_runtime_state_store(tmp_path / "run")
+
+    assert first != second
+    assert first.name == "mini_mas_dbos.sqlite"
+    assert first.parent.parent == tmp_path / "run" / ".mini-mas" / "runtime"
+
+
 def test_load_and_select_programbench_instances(tmp_path):
     from minisweagent.run.benchmarks.programbench_mas import (
         filter_programbench_instances,
@@ -260,7 +287,7 @@ def test_single_instance_runner_uses_configured_root_closes_child_and_exports(tm
             return {"agent_id": workflow_id, "lifecycle_state": "waiting_for_command"}
 
         async def send_root_command(self, *, root_agent_id, command, result_timeout_seconds):
-            calls.append(("root_command", command))
+            calls.append(("root_command", command, result_timeout_seconds))
             child_id = "mas-1111111111111111"
             path = make_trajectory_artifact_path(child_id)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,7 +303,7 @@ def test_single_instance_runner_uses_configured_root_closes_child_and_exports(tm
                             {
                                 "agent_id": child_id,
                                 "lifecycle_state": "waiting_for_parent",
-                                "latest_submission": "done",
+                                "latest_submission": "",
                             }
                         ],
                     },
@@ -308,8 +335,10 @@ def test_single_instance_runner_uses_configured_root_closes_child_and_exports(tm
     assert result.submission_path == "testorg__calculator.abc1234/submission.tar.gz"
     assert ("session", MasRuntimeProfile.SUPERVISED_INTERACTIVE_AND_AI) in calls
     assert ("export", "container", "/workspace", "testorg__calculator.abc1234") in calls
-    assert any(call[0] == "root_command" and call[1].startswith("mini-mas spawn --wait") for call in calls)
-    assert any(call == ("root_command", "mini-mas close mas-1111111111111111") for call in calls)
+    assert any(
+        call[0] == "root_command" and call[1].startswith("mini-mas spawn --wait --timeout 60 ") for call in calls
+    )
+    assert any(call == ("root_command", "mini-mas close mas-1111111111111111", 90.0) for call in calls)
     assert calls[-1] == ("cleanup", "container")
     manifest = json.loads((tmp_path / "run" / "testorg__calculator.abc1234" / "mas-run.json").read_text())
     summary = json.loads((tmp_path / "run" / "programbench-mas-results.json").read_text())

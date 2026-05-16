@@ -7,6 +7,7 @@ import pytest
 from minisweagent.mas import runtime
 from minisweagent.mas.queues import AI_AGENT_WORKFLOW_QUEUE_NAME, INTERACTIVE_WORKFLOW_QUEUE_NAME
 from minisweagent.mas.runtime import (
+    MAS_RUNTIME_STATE_STORE_ENV,
     MasRuntimeProfile,
     _run_mas_async,
     activate_ai_agent_execution,
@@ -167,6 +168,17 @@ def test_plain_mini_mas_runtime_starts_interactive_root_workflow_and_waits_for_i
         "agent_artifact_directory": ".mini-mas/agents/mas-1111111111111111",
         "trajectory_artifact_path": ".mini-mas/agents/mas-1111111111111111/trajectory.traj.json",
     }
+
+
+def test_dbos_config_can_use_runtime_state_store_env_override(tmp_path, monkeypatch):
+    custom_state_store = tmp_path / "programbench-run" / "mini_mas_dbos.sqlite"
+    monkeypatch.setenv(MAS_RUNTIME_STATE_STORE_ENV, custom_state_store.as_posix())
+
+    assert make_dbos_config() == {
+        "name": "mini-swe-agent-mas",
+        "system_database_url": f"sqlite:///{custom_state_store.as_posix()}",
+    }
+    assert custom_state_store.parent.is_dir()
 
 
 def test_sync_mas_async_runner_reuses_loop_without_shutting_down_default_executor():

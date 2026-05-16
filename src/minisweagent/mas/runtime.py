@@ -25,6 +25,7 @@ from minisweagent.mas.status_events import STATUS_EVENT_KEY, normalize_agent_sna
 
 MAS_APP_NAME = "mini-swe-agent-mas"
 MAS_RUNTIME_STATE_STORE_PATH = Path(".mini-mas") / "runtime" / "mini_mas_dbos.sqlite"
+MAS_RUNTIME_STATE_STORE_ENV = "MINI_MAS_RUNTIME_STATE_STORE"
 ATTACHMENT_LEASE_TOKEN_PREFIX = "att-"
 ATTACHMENT_LEASE_DEFAULT_TTL_SECONDS = 300.0
 _DECLARED_DBOS_QUEUE_POLICIES: weakref.WeakKeyDictionary[Any, tuple[str, ...]] = weakref.WeakKeyDictionary()
@@ -101,12 +102,19 @@ def open_runtime_control_plane() -> RuntimeControlPlane:
     return RuntimeControlPlane(load_dbos())
 
 
+def get_mas_runtime_state_store_path() -> Path:
+    """Return the configured DBOS state store path for this runtime process."""
+    override = os.environ.get(MAS_RUNTIME_STATE_STORE_ENV)
+    return Path(override) if override else MAS_RUNTIME_STATE_STORE_PATH
+
+
 def make_dbos_config() -> dict[str, str]:
     """Build the minimal DBOS configuration for the external MAS CLI."""
-    MAS_RUNTIME_STATE_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    runtime_state_store_path = get_mas_runtime_state_store_path()
+    runtime_state_store_path.parent.mkdir(parents=True, exist_ok=True)
     return {
         "name": MAS_APP_NAME,
-        "system_database_url": f"sqlite:///{MAS_RUNTIME_STATE_STORE_PATH.as_posix()}",
+        "system_database_url": f"sqlite:///{runtime_state_store_path.as_posix()}",
     }
 
 
