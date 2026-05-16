@@ -34,7 +34,6 @@ from minisweagent.mas.action_environment import (
 from minisweagent.mas.artifacts import make_agent_id, make_trajectory_artifact_path
 from minisweagent.mas.execution_config import (
     AGENT_EXECUTION_CONFIG_SCHEMA_VERSION,
-    default_mini_config_spec,
     normalize_agent_execution_config,
     validate_agent_execution_config,
 )
@@ -49,7 +48,7 @@ PROGRAMBENCH_WORKSPACE = "/workspace"
 PROGRAMBENCH_RESULTS_FILE = "programbench-mas-results.json"
 PROGRAMBENCH_EVAL_COMMAND_TEMPLATE = "uv run --project references/ProgramBench programbench eval {run_dir}"
 PROGRAMBENCH_ROOT_COMMAND_RESULT_TIMEOUT_MARGIN_SECONDS = 30.0
-DEFAULT_CONFIG_FILE = builtin_config_dir / "mini-mas.yaml"
+DEFAULT_CONFIG_FILE = builtin_config_dir / "benchmarks" / "programbench_mas.yaml"
 DEFAULT_TASKS_DIR = Path("references") / "ProgramBench" / "src" / "programbench" / "data" / "tasks"
 _OUTPUT_FILE_LOCK = threading.Lock()
 
@@ -282,7 +281,7 @@ def build_programbench_agent_execution_config(
     interpreter: Sequence[str] = ("bash", "-lc"),
 ) -> dict[str, Any]:
     """Build the Configured Interactive Root Agent Execution Config for ProgramBench."""
-    specs = list(config_specs) or [default_mini_config_spec()]
+    specs = list(config_specs) or [str(DEFAULT_CONFIG_FILE)]
     configs = [get_config_from_spec(spec) for spec in specs]
     configs.append(
         {

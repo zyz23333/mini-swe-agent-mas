@@ -31,6 +31,31 @@ def test_programbench_root_spawn_command_propagates_wait_timeout():
     assert "xorg62__tty-clock.f2f847c" in command
 
 
+def test_programbench_mas_uses_programbench_specific_default_config():
+    from minisweagent.config import get_config_from_spec
+    from minisweagent.run.benchmarks.programbench_mas import (
+        DEFAULT_CONFIG_FILE,
+        build_programbench_agent_execution_config,
+    )
+
+    assert DEFAULT_CONFIG_FILE.name == "programbench_mas.yaml"
+    config = get_config_from_spec(DEFAULT_CONFIG_FILE)
+    instance_template = config["agent"]["instance_template"]
+
+    assert "ProgramBench Submission Contract" in instance_template
+    assert "chmod +x ./compile.sh && ./compile.sh" in instance_template
+    assert "`compile.sh` MUST build or create the candidate program as `./executable`" in instance_template
+
+    execution_config = build_programbench_agent_execution_config(
+        config_specs=[],
+        model_name="deterministic",
+        model_class=None,
+        action_environment_id="programbench-test",
+        image="programbench/test:task_cleanroom",
+    )
+    assert "ProgramBench Submission Contract" in execution_config["agent"]["instance_template"]
+
+
 def test_programbench_mas_runtime_state_store_is_run_scoped(tmp_path):
     from minisweagent.run.benchmarks.programbench_mas import make_programbench_mas_runtime_state_store
 

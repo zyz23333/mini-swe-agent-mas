@@ -6,3 +6,4 @@
 ## Benchmarks
 
 * `benchmarks/swebench.yaml` - Config for the `run/benchmarks/swebench.py` entry point.
+* `benchmarks/programbench_mas.yaml` - Config for the `run/benchmarks/programbench_mas.py` entry point.
